@@ -177,8 +177,9 @@ def _plan_from_ai_edit_data(plan: TransformPlan, diagnostic: dict[str, Any]) -> 
     if not rows:
         return None
 
+    value_cols = max((len(row) - 1 for row in rows), default=0)
     if plan.orientation_ppt == "series_rows_categories_columns":
-        categories = headers[1:] or list(plan.categories)
+        categories = _axis_headers(headers, value_cols, plan.categories)
         series = [row[0] for row in rows]
         values = [_parse_row_values(row[1:], percentage_hint=plan.preserve_percentage_decimal) for row in rows]
         if not _valid_matrix(values, expected_rows=len(series), expected_cols=len(categories)):
@@ -193,7 +194,7 @@ def _plan_from_ai_edit_data(plan: TransformPlan, diagnostic: dict[str, Any]) -> 
             preserve_percentage_decimal=plan.preserve_percentage_decimal or _rows_have_percent(raw_rows),
         )
 
-    series = headers[1:] or list(plan.series)
+    series = _axis_headers(headers, value_cols, plan.series)
     categories = [row[0] for row in rows]
     values = [_parse_row_values(row[1:], percentage_hint=plan.preserve_percentage_decimal) for row in rows]
     if not _valid_matrix(values, expected_rows=len(categories), expected_cols=len(series)):
@@ -207,6 +208,17 @@ def _plan_from_ai_edit_data(plan: TransformPlan, diagnostic: dict[str, Any]) -> 
         reason=f"{plan.reason} Matriz substituída pela tabela correta sugerida pela IA.",
         preserve_percentage_decimal=plan.preserve_percentage_decimal or _rows_have_percent(raw_rows),
     )
+
+
+def _axis_headers(headers: list[str], expected_count: int, fallback: list[str]) -> list[str]:
+    clean = [header for header in headers if header]
+    if len(clean) == expected_count:
+        return clean
+    if len(headers) == expected_count + 1:
+        return headers[1:]
+    if len(fallback) == expected_count:
+        return list(fallback)
+    return clean or list(fallback)
 
 
 def _parse_row_values(values: list[str], percentage_hint: bool) -> list[Any]:

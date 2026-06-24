@@ -246,6 +246,7 @@ def _ai_diagnostics_for_job(job_dir: Path, analysis: AnalysisResult) -> tuple[di
                 "reason": item.reason,
                 "row_mapping": item.row_mapping,
                 "column_mapping": item.column_mapping,
+                "recommended_edit_data": item.recommended_edit_data,
             }
             for item in diagnostics
         }

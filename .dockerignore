@@ -1,0 +1,14 @@
+.agents
+.git
+.venv
+__pycache__
+*.pyc
+.env
+.streamlit
+outputs
+workspace_data
+streamlit.log
+streamlit.err.log
+*.pptx
+*.xlsx
+*.zip

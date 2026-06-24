@@ -1,0 +1,41 @@
+.venv/
+.env
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+pip-wheel-metadata/
+htmlcov/
+dist/
+build/
+*.egg-info/
+.installed.cfg
+
+# Python virtualenvs
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Streamlit
+.streamlit/*
+!.streamlit/config.toml
+
+# Logs
+*.log
+
+# Build outputs
+outputs/
+workspace_data/
+
+# Editor / OS files
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~

@@ -72,6 +72,11 @@
             <span>Planilha de mapeamento opcional</span>
             <input name="mapping" type="file" accept=".xlsx">
           </label>
+          <label>
+            <span>Slides para atualizar</span>
+            <input name="slides_to_update" placeholder="Opcional. Ex.: 3, 5, 8-10. Vazio = todos os slides">
+            <small class="muted">A análise, a IA e a geração do PPT vão considerar somente estes slides.</small>
+          </label>
           <label class="checkline">
             <input name="use_ai" type="checkbox" value="1" {% if ai_available %}checked{% endif %}>
             <span>Usar IA para diagnosticar se cada datasource está no formato certo para o “Editar dados” do PPT</span>

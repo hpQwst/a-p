@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from .embedded_workbook_writer import update_embedded_workbook
 from .ppt_chart_writer import chart_replacements
 from .ppt_discovery import PptTarget, discover_ppt_targets, read_bytes
 from .ppt_table_writer import update_table_slide_xml
 from .preview_model import PreviewTarget, build_preview
 from .table_normalizer import TransformPlan, build_transform_plans
 from .xlsx_parser import ParsedXlsxTable, parse_datasource_zip
+
 
 
 InputFile = str | Path | bytes | bytearray | BinaryIO
@@ -44,7 +46,17 @@ def generate_updated_pptx(pptx_file: InputFile, plans: list[TransformPlan]) -> b
     with ZipFile(BytesIO(ppt_bytes)) as zf:
         for plan in plans:
             if plan.object_type == "chart":
-                replacements.update(chart_replacements(zf, plan.target, plan))
+                updates = chart_replacements(zf, plan.target, plan)
+
+                if plan.target.workbook_embedded:
+                    updates[plan.target.workbook_embedded] = update_embedded_workbook(
+                        zf.read(plan.target.workbook_embedded),
+                        plan.target.sheet_name,
+                        _workbook_matrix(plan),
+                    )
+
+                replacements.update(updates)
+
             elif plan.object_type == "table":
                 table_plans_by_slide.setdefault(plan.target.slide_path, []).append(plan)
 
@@ -60,3 +72,18 @@ def generate_updated_pptx(pptx_file: InputFile, plans: list[TransformPlan]) -> b
                 data = replacements.get(item.filename, zf.read(item.filename))
                 zout.writestr(item, data)
     return output.getvalue()
+
+
+def _workbook_matrix(plan: TransformPlan) -> list[list[Any]]:
+    if plan.orientation_ppt == "series_rows_categories_columns":
+        matrix = [[None, *plan.categories]]
+        for index, series_name in enumerate(plan.series):
+            values = plan.values[index] if index < len(plan.values) else []
+            matrix.append([series_name, *values])
+        return matrix
+
+    matrix = [[None, *plan.series]]
+    for index, category in enumerate(plan.categories):
+        values = plan.values[index] if index < len(plan.values) else []
+        matrix.append([category, *values])
+    return matrix

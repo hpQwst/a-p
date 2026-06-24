@@ -1,72 +1,35 @@
 from __future__ import annotations
 
-from io import BytesIO
+
 from typing import Any
 from zipfile import ZipFile
 import re
 import xml.etree.ElementTree as ET
 
-import openpyxl
+
 
 from .ppt_discovery import CHART_NS, NS, PptTarget
 from .table_normalizer import TransformPlan
+
+
 
 
 PERCENT_FORMAT = "0.0%"
 
 
 def chart_replacements(zf: ZipFile, target: PptTarget, plan: TransformPlan) -> dict[str, bytes]:
-    if not target.chart_xml or not target.workbook_embedded:
+    if not target.chart_xml:
         return {}
     return {
-        target.workbook_embedded: _updated_workbook_bytes(zf, target, plan),
         target.chart_xml: _updated_chart_xml_bytes(zf, target, plan),
     }
 
 
-def _updated_workbook_bytes(zf: ZipFile, target: PptTarget, plan: TransformPlan) -> bytes:
-    wb = openpyxl.load_workbook(BytesIO(zf.read(target.workbook_embedded)))
-    ws = wb[target.sheet_name] if target.sheet_name in wb.sheetnames else wb.worksheets[0]
-    number_format = _plan_number_format(plan)
-
-    if plan.orientation_ppt == "series_rows_categories_columns":
-        max_row = max(ws.max_row, len(plan.series) + 1)
-        max_col = max(ws.max_column, len(plan.categories) + 1)
-        _clear_values(ws, max_row, max_col)
-        ws.cell(row=1, column=1).value = None
-        for col_idx, category in enumerate(plan.categories, 2):
-            ws.cell(row=1, column=col_idx).value = category
-        for row_idx, series_name in enumerate(plan.series, 2):
-            ws.cell(row=row_idx, column=1).value = series_name
-            row_values = plan.values[row_idx - 2] if row_idx - 2 < len(plan.values) else []
-            for col_idx, value in enumerate(row_values, 2):
-                cell = ws.cell(row=row_idx, column=col_idx)
-                cell.value = _workbook_value(value, number_format)
-                if number_format:
-                    cell.number_format = number_format
-    else:
-        max_row = max(ws.max_row, len(plan.categories) + 1)
-        max_col = max(ws.max_column, len(plan.series) + 1)
-        _clear_values(ws, max_row, max_col)
-        ws.cell(row=1, column=1).value = None
-        for col_idx, series_name in enumerate(plan.series, 2):
-            ws.cell(row=1, column=col_idx).value = series_name
-        for row_idx, category in enumerate(plan.categories, 2):
-            ws.cell(row=row_idx, column=1).value = category
-            row_values = plan.values[row_idx - 2] if row_idx - 2 < len(plan.values) else []
-            for col_idx, value in enumerate(row_values, 2):
-                cell = ws.cell(row=row_idx, column=col_idx)
-                cell.value = _workbook_value(value, number_format)
-                if number_format:
-                    cell.number_format = number_format
-
-    output = BytesIO()
-    wb.save(output)
-    return output.getvalue()
 
 
 def _updated_chart_xml_bytes(zf: ZipFile, target: PptTarget, plan: TransformPlan) -> bytes:
     root = ET.fromstring(zf.read(target.chart_xml))
+    _disable_chart_auto_update(root)
     series_elements = root.findall(".//c:ser", NS)
     sheet = _sheet_ref(target.sheet_name or "Sheet1")
     number_format = _plan_number_format(plan)
@@ -94,10 +57,14 @@ def _updated_chart_xml_bytes(zf: ZipFile, target: PptTarget, plan: TransformPlan
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
-def _clear_values(ws: Any, max_row: int, max_col: int) -> None:
-    for row in ws.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col):
-        for cell in row:
-            cell.value = None
+
+
+def _disable_chart_auto_update(root: ET.Element) -> None:
+    for external_data in root.findall(".//c:externalData", NS):
+        auto_update = external_data.find("./c:autoUpdate", NS)
+        if auto_update is None:
+            auto_update = ET.SubElement(external_data, f"{{{CHART_NS}}}autoUpdate")
+        auto_update.attrib["val"] = "0"
 
 
 def _update_series_text(ser: ET.Element, formula: str, label: str) -> None:
@@ -200,12 +167,6 @@ def _chart_value_text(value: Any, numeric: bool, number_format: str = "") -> str
     return str(value)
 
 
-def _workbook_value(value: Any, number_format: str = "") -> Any:
-    if not number_format:
-        parsed = _numeric_value(value, percentage=False)
-        return parsed if parsed is not None else value
-    parsed = _numeric_value(value, percentage=True)
-    return parsed if parsed is not None else value
 
 
 def _plan_number_format(plan: TransformPlan) -> str:
@@ -231,7 +192,7 @@ def _numeric_value(value: Any, percentage: bool = False) -> float | None:
     is_percent = "%" in text
     text = text.replace("%", "").strip()
     text = re.sub(r"^,", "0,", text)
-    text = re.sub(r"^- ,", "-0,", text)
+    text = re.sub(r"^-,", "-0,", text)
     text = text.replace(" ", "")
     if "," in text and "." in text:
         text = text.replace(".", "").replace(",", ".")

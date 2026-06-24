@@ -72,6 +72,36 @@
                       <pre>{{ item.ai.column_mapping }}</pre>
                     </details>
                   {% endif %}
+                  {% if item.ai.recommended_edit_data and item.ai.recommended_edit_data.rows %}
+                    <details open>
+                      <summary>Tabela correta sugerida pela IA para o “Editar dados”</summary>
+                      {% if item.ai.recommended_edit_data.orientation %}
+                        <p class="context">Orientação: {{ item.ai.recommended_edit_data.orientation }}</p>
+                      {% endif %}
+                      <div class="table-wrap small ai-correct-table">
+                        <table>
+                          {% if item.ai.recommended_edit_data.headers %}
+                            <thead>
+                              <tr>
+                                {% for header in item.ai.recommended_edit_data.headers %}
+                                  <th>{{ header }}</th>
+                                {% endfor %}
+                              </tr>
+                            </thead>
+                          {% endif %}
+                          <tbody>
+                            {% for row in item.ai.recommended_edit_data.rows %}
+                              <tr>
+                                {% for value in row %}
+                                  <td>{{ value }}</td>
+                                {% endfor %}
+                              </tr>
+                            {% endfor %}
+                          </tbody>
+                        </table>
+                      </div>
+                    </details>
+                  {% endif %}
                 </div>
               {% endif %}
               {% if item.nearby_text %}

@@ -67,6 +67,7 @@ def _updated_workbook_bytes(zf: ZipFile, target: PptTarget, plan: TransformPlan)
 
 def _updated_chart_xml_bytes(zf: ZipFile, target: PptTarget, plan: TransformPlan) -> bytes:
     root = ET.fromstring(zf.read(target.chart_xml))
+    _disable_chart_auto_update(root)
     series_elements = root.findall(".//c:ser", NS)
     sheet = _sheet_ref(target.sheet_name or "Sheet1")
     number_format = _plan_number_format(plan)
@@ -98,6 +99,14 @@ def _clear_values(ws: Any, max_row: int, max_col: int) -> None:
     for row in ws.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col):
         for cell in row:
             cell.value = None
+
+
+def _disable_chart_auto_update(root: ET.Element) -> None:
+    for external_data in root.findall(".//c:externalData", NS):
+        auto_update = external_data.find("./c:autoUpdate", NS)
+        if auto_update is None:
+            auto_update = ET.SubElement(external_data, f"{{{CHART_NS}}}autoUpdate")
+        auto_update.attrib["val"] = "0"
 
 
 def _update_series_text(ser: ET.Element, formula: str, label: str) -> None:
@@ -231,7 +240,7 @@ def _numeric_value(value: Any, percentage: bool = False) -> float | None:
     is_percent = "%" in text
     text = text.replace("%", "").strip()
     text = re.sub(r"^,", "0,", text)
-    text = re.sub(r"^- ,", "-0,", text)
+    text = re.sub(r"^-,", "-0,", text)
     text = text.replace(" ", "")
     if "," in text and "." in text:
         text = text.replace(".", "").replace(",", ".")

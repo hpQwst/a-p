@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 if (-not $Region) {
     $Region = (aws configure get region).Trim()
     if (-not $Region) {
-        $Region = "sa-east-1"
+        $Region = "us-east-1"
     }
 }
 

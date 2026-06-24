@@ -17,6 +17,10 @@ from .core import (
     read_source_table_from_workbook,
     suggest_source_matches,
 )
+from .engine import analyze_update_package, generate_updated_pptx, preview_update_package
+from .ppt_discovery import PptTarget, discover_ppt_targets
+from .table_normalizer import TransformPlan
+from .xlsx_parser import ParsedXlsxTable, parse_datasource_zip, parse_xlsx_table
 
 __all__ = [
     "ChartJob",
@@ -34,4 +38,13 @@ __all__ = [
     "load_ppt_targets",
     "read_source_table_from_workbook",
     "suggest_source_matches",
+    "PptTarget",
+    "ParsedXlsxTable",
+    "TransformPlan",
+    "analyze_update_package",
+    "discover_ppt_targets",
+    "generate_updated_pptx",
+    "parse_datasource_zip",
+    "parse_xlsx_table",
+    "preview_update_package",
 ]

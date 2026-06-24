@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Preview - QWST Auto PPT</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+  </head>
+  <body>
+    <main class="shell wide">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">{{ squad }} / {{ project_name }}</p>
+          <h1>Preview das atualizações</h1>
+        </div>
+        <a class="button" href="/jobs/{{ job_id }}/download">Baixar PPT atualizado</a>
+      </header>
+
+      {% if notice %}
+        <div class="notice ok">{{ notice }}</div>
+      {% endif %}
+      {% if error %}
+        <div class="notice warn">{{ error }}</div>
+      {% endif %}
+
+      <section class="metrics">
+        <div><strong>{{ target_count }}</strong><span>targets no PPT</span></div>
+        <div><strong>{{ source_count }}</strong><span>datasources lidos</span></div>
+        <div><strong>{{ mapped_count }}</strong><span>planos gerados</span></div>
+      </section>
+      <section class="ai-stage {{ ai_status.state }}">
+        <strong>Etapa IA</strong>
+        <span>{{ ai_status.message }}</span>
+      </section>
+
+      {% for slide, items in cards_by_slide.items() %}
+        <section class="slide-block">
+          <h2>Slide {{ slide }}</h2>
+          {% for item in items %}
+            <article class="target {% if not item.has_plan %}unmapped{% endif %}">
+              <div class="target-head">
+                <div>
+                  <p class="eyebrow">Target {{ item.target }} / {{ item.object_type }}</p>
+                  <h3>
+                    {% if item.datasource %}
+                      {{ item.datasource }}
+                    {% else %}
+                      Sem datasource automático
+                    {% endif %}
+                  </h3>
+                </div>
+                <span class="pill">{{ item.action }}</span>
+              </div>
+
+              {% if item.manual_file %}
+                <p class="reason"><strong>Correção manual:</strong> {{ item.manual_file }}</p>
+              {% endif %}
+              <p class="reason">{{ item.reason }}</p>
+              {% if item.ai %}
+                <div class="ai-box">
+                  <strong>Diagnóstico IA: {{ item.ai.status }} / {{ item.ai.confidence }}%</strong>
+                  <p>{{ item.ai.reason }}</p>
+                  {% if item.ai.row_mapping %}
+                    <details>
+                      <summary>Mapeamento de linhas</summary>
+                      <pre>{{ item.ai.row_mapping }}</pre>
+                    </details>
+                  {% endif %}
+                  {% if item.ai.column_mapping %}
+                    <details>
+                      <summary>Mapeamento de colunas</summary>
+                      <pre>{{ item.ai.column_mapping }}</pre>
+                    </details>
+                  {% endif %}
+                </div>
+              {% endif %}
+              {% if item.nearby_text %}
+                <p class="context">Contexto no slide: {{ item.nearby_text }}</p>
+              {% endif %}
+
+              {% if item.ppt_contract and item.ppt_contract.rows %}
+                <details class="diagnostic" open>
+                  <summary>Contrato do PPT - “Editar dados”</summary>
+                  <p class="context">Orientação: {{ item.ppt_contract.orientation }}</p>
+                  <div class="table-wrap small">
+                    <table>
+                      {% if item.ppt_contract.headers %}
+                        <thead>
+                          <tr>
+                            {% for header in item.ppt_contract.headers %}
+                              <th>{{ header }}</th>
+                            {% endfor %}
+                          </tr>
+                        </thead>
+                      {% endif %}
+                      <tbody>
+                        {% for row in item.ppt_contract.rows %}
+                          <tr>
+                            {% for value in row %}
+                              <td>{{ value }}</td>
+                            {% endfor %}
+                          </tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              {% endif %}
+
+              {% if item.source_detected and item.source_detected.rows %}
+                <details class="diagnostic">
+                  <summary>Estrutura detectada no XLSX</summary>
+                  <p class="context">Orientação: {{ item.source_detected.orientation }}</p>
+                  <div class="table-wrap small">
+                    <table>
+                      {% if item.source_detected.headers %}
+                        <thead>
+                          <tr>
+                            {% for header in item.source_detected.headers %}
+                              <th>{{ header }}</th>
+                            {% endfor %}
+                          </tr>
+                        </thead>
+                      {% endif %}
+                      <tbody>
+                        {% for row in item.source_detected.rows %}
+                          <tr>
+                            {% for value in row %}
+                              <td>{{ value }}</td>
+                            {% endfor %}
+                          </tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              {% endif %}
+
+              {% if item.headers %}
+                <h4>Matriz final que será gravada</h4>
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        {% for header in item.headers %}
+                          <th>{{ header }}</th>
+                        {% endfor %}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for row in item.rows %}
+                        <tr>
+                          {% for value in row %}
+                            <td>{{ value }}</td>
+                          {% endfor %}
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              {% endif %}
+
+              <form class="inline-form" action="/jobs/{{ job_id }}/targets/{{ item.target }}/override" method="post" enctype="multipart/form-data">
+                <label>
+                  <span>Trocar XLSX deste target</span>
+                  <input name="datasource" type="file" accept=".xlsx" required>
+                </label>
+                <button type="submit">Aplicar XLSX</button>
+              </form>
+            </article>
+          {% endfor %}
+        </section>
+      {% endfor %}
+    </main>
+  </body>
+</html>

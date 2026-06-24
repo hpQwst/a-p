@@ -21,6 +21,50 @@ class AiUnavailableError(RuntimeError):
     pass
 
 
+def build_openai_client(root: Path | str | None = None) -> tuple[Any, str]:
+    load_local_env(root)
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise AiUnavailableError("OPENAI_API_KEY nao configurada.")
+
+    try:
+        from openai import OpenAI
+    except Exception as exc:
+        raise AiUnavailableError("Pacote openai nao instalado. Rode pip install -r requirements.txt.") from exc
+
+    model = os.getenv("OPENAI_MODEL", "gpt-5.5")
+    base_url = os.getenv("OPENAI_BASE_URL")
+    timeout = _env_float("OPENAI_TIMEOUT_SECONDS", 120.0)
+    max_retries = _env_int("OPENAI_MAX_RETRIES", 1)
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "timeout": timeout,
+        "max_retries": max_retries,
+    }
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    return OpenAI(**client_kwargs), model
+
+
+def format_ai_error(exc: Exception) -> str:
+    chain = _exception_chain(exc)
+    chain_text = " | ".join(str(item).strip() for item in chain if str(item).strip())
+    if "[WinError 10013]" in chain_text:
+        return (
+            "Conexao com a OpenAI bloqueada pelo Windows, firewall, proxy corporativo ou sandbox "
+            "([WinError 10013]). Rode o app pelo PowerShell normal ou libere o python.exe na rede."
+        )
+    if "CERTIFICATE_VERIFY_FAILED" in chain_text:
+        return "Falha de certificado SSL ao conectar na OpenAI. Verifique proxy corporativo/inspecao SSL."
+    if "invalid_api_key" in chain_text.lower() or "incorrect api key" in chain_text.lower():
+        return "OPENAI_API_KEY invalida. Confira a chave no .env."
+    if "model" in chain_text.lower() and ("not found" in chain_text.lower() or "does not exist" in chain_text.lower()):
+        return "Modelo OpenAI nao disponivel para essa chave. Confira OPENAI_MODEL no .env."
+    if chain_text and str(exc).strip() == "Connection error." and len(chain) > 1:
+        return f"Erro de conexao com a OpenAI: {chain_text}"
+    return str(exc).strip() or type(exc).__name__
+
+
 def load_local_env(root: Path | str | None = None) -> None:
     env_path = Path(root or Path.cwd()) / ".env"
     if not env_path.exists():
@@ -30,9 +74,10 @@ def load_local_env(root: Path | str | None = None) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        key = key.strip()
+        key = key.strip().lstrip("\ufeff")
         value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        current = os.environ.get(key)
+        if key and value and (current is None or not current.strip()):
             os.environ[key] = value
 
 
@@ -46,22 +91,7 @@ def suggest_datasource_with_ai(
     sources: Iterable[SourceTable],
     root: Path | str | None = None,
 ) -> AiMatchSuggestion:
-    load_local_env(root)
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise AiUnavailableError("OPENAI_API_KEY nao configurada.")
-
-    try:
-        from openai import OpenAI
-    except Exception as exc:
-        raise AiUnavailableError("Pacote openai nao instalado. Rode pip install -r requirements.txt.") from exc
-
-    model = os.getenv("OPENAI_MODEL", "gpt-5.5")
-    base_url = os.getenv("OPENAI_BASE_URL")
-    client_kwargs: dict[str, Any] = {"api_key": api_key}
-    if base_url:
-        client_kwargs["base_url"] = base_url
-    client = OpenAI(**client_kwargs)
+    client, model = build_openai_client(root)
 
     prompt_payload = {
         "task": "Escolha qual datasource XLSX deve alimentar o grafico do PowerPoint.",
@@ -144,22 +174,7 @@ def suggest_datasources_with_ai(
     sources: Iterable[SourceTable],
     root: Path | str | None = None,
 ) -> list[AiMatchSuggestion]:
-    load_local_env(root)
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise AiUnavailableError("OPENAI_API_KEY nao configurada.")
-
-    try:
-        from openai import OpenAI
-    except Exception as exc:
-        raise AiUnavailableError("Pacote openai nao instalado. Rode pip install -r requirements.txt.") from exc
-
-    model = os.getenv("OPENAI_MODEL", "gpt-5.5")
-    base_url = os.getenv("OPENAI_BASE_URL")
-    client_kwargs: dict[str, Any] = {"api_key": api_key}
-    if base_url:
-        client_kwargs["base_url"] = base_url
-    client = OpenAI(**client_kwargs)
+    client, model = build_openai_client(root)
 
     sources_payload = [
         {
@@ -274,3 +289,34 @@ def _response_text_fallback(response: Any) -> str:
         return response.output[0].content[0].text
     except Exception:
         return str(response)
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _exception_chain(exc: Exception) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        chain.append(current)
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return chain

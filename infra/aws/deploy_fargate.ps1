@@ -1,6 +1,7 @@
 param(
     [string]$AppName = "qwst-auto-ppt",
     [string]$Region = "",
+    [string]$CostTagValue = "qwst-auto-ppt",
     [string]$AllowedCidr = "0.0.0.0/0",
     [int]$DesiredCount = 1,
     [string]$Cpu = "1024",
@@ -35,6 +36,7 @@ function Get-RoleArn([string]$RoleName) {
 function Ensure-Role([string]$RoleName, [string]$ServicePrincipal) {
     $existing = Get-RoleArn $RoleName
     if ($existing) {
+        aws iam tag-role --role-name $RoleName --tags "Key=Name,Value=$CostTagValue" | Out-Null
         return $existing
     }
 
@@ -50,7 +52,7 @@ function Ensure-Role([string]$RoleName, [string]$ServicePrincipal) {
         )
     } $trustPath
 
-    aws iam create-role --role-name $RoleName --assume-role-policy-document "file://$trustPath" | Out-Null
+    aws iam create-role --role-name $RoleName --assume-role-policy-document "file://$trustPath" --tags "Key=Name,Value=$CostTagValue" | Out-Null
     Assert-AwsOk
     return (Get-RoleArn $RoleName)
 }
@@ -88,7 +90,7 @@ New-Item -ItemType Directory -Path $TempDir | Out-Null
 if (-not $Region) {
     $Region = (aws configure get region).Trim()
     if (-not $Region) {
-        $Region = "sa-east-1"
+        $Region = "us-east-1"
     }
 }
 
@@ -126,14 +128,18 @@ aws s3api put-public-access-block --bucket $BucketName --public-access-block-con
 Assert-AwsOk
 aws s3api put-bucket-encryption --bucket $BucketName --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}' --region $Region | Out-Null
 Assert-AwsOk
+aws s3api put-bucket-tagging --bucket $BucketName --tagging "TagSet=[{Key=Name,Value=$CostTagValue}]" --region $Region | Out-Null
+Assert-AwsOk
 
 Write-Step "Ensuring ECR repository $EcrRepo"
 aws ecr describe-repositories --repository-names $EcrRepo --region $Region 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) {
-    aws ecr create-repository --repository-name $EcrRepo --image-scanning-configuration scanOnPush=true --region $Region | Out-Null
+    aws ecr create-repository --repository-name $EcrRepo --image-scanning-configuration scanOnPush=true --tags "Key=Name,Value=$CostTagValue" --region $Region | Out-Null
     Assert-AwsOk
 }
 $RepoArn = (aws ecr describe-repositories --repository-names $EcrRepo --query "repositories[0].repositoryArn" --output text --region $Region).Trim()
+aws ecr tag-resource --resource-arn $RepoArn --tags "Key=Name,Value=$CostTagValue" --region $Region | Out-Null
+Assert-AwsOk
 $ImageUri = "$AccountId.dkr.ecr.$Region.amazonaws.com/${EcrRepo}:$ImageTag"
 
 Write-Step "Syncing OpenAI key to Secrets Manager if .env is present"
@@ -146,11 +152,12 @@ if ($OpenAiKey -and $OpenAiKey -notmatch "^coloque_") {
     if ($LASTEXITCODE -eq 0) {
         aws secretsmanager update-secret --secret-id $OpenAiSecretName --secret-string "file://$secretFile" --region $Region | Out-Null
     } else {
-        aws secretsmanager create-secret --name $OpenAiSecretName --secret-string "file://$secretFile" --region $Region | Out-Null
+        aws secretsmanager create-secret --name $OpenAiSecretName --secret-string "file://$secretFile" --tags "Key=Name,Value=$CostTagValue" --region $Region | Out-Null
     }
     Assert-AwsOk
     Remove-Item -LiteralPath $secretFile -Force
     $SecretArn = (aws secretsmanager describe-secret --secret-id $OpenAiSecretName --query ARN --output text --region $Region).Trim()
+    aws secretsmanager tag-resource --secret-id $SecretArn --tags "Key=Name,Value=$CostTagValue" --region $Region | Out-Null
 } else {
     Write-Warning "OPENAI_API_KEY not found in .env. The app will run without AI mapping until the secret is configured."
 }
@@ -238,6 +245,8 @@ Copy-Item -LiteralPath (Join-Path $RepoRoot "requirements.txt") -Destination $St
 Copy-Item -LiteralPath (Join-Path $RepoRoot "Dockerfile") -Destination $StageDir
 Copy-Item -LiteralPath (Join-Path $RepoRoot "buildspec.yml") -Destination $StageDir
 Copy-Item -LiteralPath (Join-Path $RepoRoot "ppt_automator") -Destination (Join-Path $StageDir "ppt_automator") -Recurse
+Copy-Item -LiteralPath (Join-Path $RepoRoot "web") -Destination (Join-Path $StageDir "web") -Recurse
+Copy-Item -LiteralPath (Join-Path $RepoRoot "worker") -Destination (Join-Path $StageDir "worker") -Recurse
 $ZipPath = Join-Path $TempDir "source.zip"
 Compress-Archive -Path (Join-Path $StageDir "*") -DestinationPath $ZipPath -Force
 aws s3 cp $ZipPath "s3://$BucketName/$SourceKey" --region $Region | Out-Null
@@ -264,6 +273,9 @@ Save-JsonFile @{
             @{ name = "IMAGE_TAG"; value = $ImageTag; type = "PLAINTEXT" }
         )
     }
+    tags = @(
+        @{ key = "Name"; value = $CostTagValue }
+    )
 } $CodeBuildConfigPath
 
 aws codebuild batch-get-projects --names $BuildProjectName --query "projects[0].name" --output text --region $Region 2>$null | Out-Null
@@ -288,7 +300,8 @@ if ($BuildStatus -ne "SUCCEEDED") {
 
 Write-Step "Ensuring ECS cluster and networking"
 aws logs create-log-group --log-group-name $LogGroup --region $Region 2>$null | Out-Null
-aws ecs create-cluster --cluster-name $ClusterName --region $Region 2>$null | Out-Null
+aws logs tag-resource --resource-arn "arn:aws:logs:${Region}:${AccountId}:log-group:${LogGroup}" --tags "Name=$CostTagValue" --region $Region 2>$null | Out-Null
+aws ecs create-cluster --cluster-name $ClusterName --tags "key=Name,value=$CostTagValue" --region $Region 2>$null | Out-Null
 
 $VpcId = (aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query "Vpcs[0].VpcId" --output text --region $Region).Trim()
 Assert-AwsOk
@@ -305,9 +318,10 @@ if ($SubnetIds.Count -eq 0) {
 $SecurityGroupName = "$SafeAppName-sg"
 $SgId = (aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VpcId" "Name=group-name,Values=$SecurityGroupName" --query "SecurityGroups[0].GroupId" --output text --region $Region 2>$null).Trim()
 if (-not $SgId -or $SgId -eq "None") {
-    $SgId = (aws ec2 create-security-group --group-name $SecurityGroupName --description "Streamlit access for $SafeAppName" --vpc-id $VpcId --query "GroupId" --output text --region $Region).Trim()
+    $SgId = (aws ec2 create-security-group --group-name $SecurityGroupName --description "FastAPI access for $SafeAppName" --vpc-id $VpcId --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=$CostTagValue}]" --query "GroupId" --output text --region $Region).Trim()
     Assert-AwsOk
 }
+aws ec2 create-tags --resources $SgId --tags "Key=Name,Value=$CostTagValue" --region $Region | Out-Null
 aws ec2 authorize-security-group-ingress --group-id $SgId --protocol tcp --port 8501 --cidr $AllowedCidr --region $Region 2>$null | Out-Null
 
 Write-Step "Registering ECS task definition"
@@ -356,7 +370,7 @@ Save-JsonFile @{
     }
     containerDefinitions = @($ContainerDefinition)
 } $TaskDefPath
-$TaskDefinitionArn = (aws ecs register-task-definition --cli-input-json "file://$TaskDefPath" --query "taskDefinition.taskDefinitionArn" --output text --region $Region).Trim()
+$TaskDefinitionArn = (aws ecs register-task-definition --cli-input-json "file://$TaskDefPath" --tags "key=Name,value=$CostTagValue" --query "taskDefinition.taskDefinitionArn" --output text --region $Region).Trim()
 Assert-AwsOk
 
 Write-Step "Creating or updating Fargate service"
@@ -373,9 +387,15 @@ if ($ExistingService -eq "ACTIVE") {
         --desired-count $DesiredCount `
         --launch-type FARGATE `
         --network-configuration $NetworkConfig `
+        --tags "key=Name,value=$CostTagValue" `
         --region $Region | Out-Null
 }
 Assert-AwsOk
+
+$ServiceArn = (aws ecs describe-services --cluster $ClusterName --services $ServiceName --query "services[0].serviceArn" --output text --region $Region 2>$null).Trim()
+if ($ServiceArn -and $ServiceArn -ne "None") {
+    aws ecs tag-resource --resource-arn $ServiceArn --tags "key=Name,value=$CostTagValue" --region $Region | Out-Null
+}
 
 aws ecs wait services-stable --cluster $ClusterName --services $ServiceName --region $Region
 Assert-AwsOk

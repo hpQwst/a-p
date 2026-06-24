@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 import json
 import os
@@ -64,7 +64,7 @@ def normalize_squad(value: str) -> str:
 
 
 def utc_now() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def ensure_store() -> str:
@@ -170,7 +170,7 @@ def create_project(squad: str, name: str, description: str = "") -> ProjectRef:
 
 def create_run(project: ProjectRef, metadata: dict | None = None) -> RunRef:
     created_at = utc_now()
-    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     run = RunRef(run_id=f"{stamp}_{uuid.uuid4().hex[:8]}", created_at=created_at)
     payload = {
         "run_id": run.run_id,

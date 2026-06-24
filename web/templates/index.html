@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>QWST Auto PPT</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+  </head>
+  <body>
+    <main class="shell wide">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">QWST Auto PPT</p>
+          <h1>Atualizar PowerPoint</h1>
+        </div>
+        <span class="pill">FastAPI</span>
+      </header>
+
+      <section class="steps">
+        <div class="step active"><span>1</span><strong>Projeto</strong><small>Squad e projeto</small></div>
+        <div class="step"><span>2</span><strong>Arquivos</strong><small>PPTX, ZIP e mapeamento</small></div>
+        <div class="step"><span>3</span><strong>Preview</strong><small>Targets e correções</small></div>
+        <div class="step"><span>4</span><strong>Download</strong><small>PPT final</small></div>
+      </section>
+
+      <section class="layout">
+        <form class="panel" action="/preview" method="post" enctype="multipart/form-data">
+          <h2>Etapa 1 - Projeto</h2>
+          <div class="grid two">
+            <label>
+              <span>Usar projeto existente</span>
+              <select name="project_ref">
+                <option value="">Criar novo projeto nesta execução</option>
+                {% for squad, projects in projects_by_squad.items() %}
+                  {% if projects %}
+                    <optgroup label="{{ squad.title() }}">
+                      {% for project in projects %}
+                        <option value="{{ project.squad }}|{{ project.slug }}">{{ project.name }}</option>
+                      {% endfor %}
+                    </optgroup>
+                  {% endif %}
+                {% endfor %}
+              </select>
+            </label>
+            <label>
+              <span>Squad do novo projeto</span>
+              <select name="squad">
+                {% for squad in squads %}
+                  <option value="{{ squad.value }}">{{ squad.label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+
+          <label>
+            <span>Novo projeto</span>
+            <input name="project_name" placeholder="Preencha só se não selecionar um projeto existente">
+          </label>
+
+          <h2>Etapa 2 - Arquivos</h2>
+          <div class="grid two">
+            <label>
+              <span>PowerPoint modelo</span>
+              <input name="pptx" type="file" accept=".pptx" required>
+            </label>
+            <label>
+              <span>ZIP com datasources XLSX</span>
+              <input name="datasources" type="file" accept=".zip" required>
+            </label>
+          </div>
+          <label>
+            <span>Planilha de mapeamento opcional</span>
+            <input name="mapping" type="file" accept=".xlsx">
+          </label>
+          <label class="checkline">
+            <input name="use_ai" type="checkbox" value="1" {% if ai_available %}checked{% endif %}>
+            <span>Usar IA para diagnosticar se cada datasource está no formato certo para o “Editar dados” do PPT</span>
+          </label>
+          {% if not ai_available %}
+            <p class="muted">IA indisponível: configure OPENAI_API_KEY no .env para ativar o diagnóstico automático.</p>
+          {% endif %}
+
+          <button type="submit">Analisar arquivos</button>
+        </form>
+
+        <aside class="side-panel">
+          <h2>Projetos criados</h2>
+          {% for squad, projects in projects_by_squad.items() %}
+            <div class="project-group">
+              <h3>{{ squad.title() }}</h3>
+              {% if projects %}
+                <ul>
+                  {% for project in projects %}
+                    <li>
+                      <strong>{{ project.name }}</strong>
+                      <span>{{ project.slug }}</span>
+                    </li>
+                  {% endfor %}
+                </ul>
+              {% else %}
+                <p class="muted">Nenhum projeto ainda.</p>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </aside>
+      </section>
+    </main>
+  </body>
+</html>

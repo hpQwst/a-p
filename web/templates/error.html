@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Erro - QWST Auto PPT</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">QWST Auto PPT</p>
+          <h1>Não consegui concluir a análise</h1>
+        </div>
+        <a class="button secondary" href="/">Voltar</a>
+      </header>
+      <section class="panel">
+        <div class="notice warn">{{ message }}</div>
+      </section>
+    </main>
+  </body>
+</html>

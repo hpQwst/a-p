@@ -22,6 +22,12 @@ OUTPUT_DIR = ROOT / "outputs"
 
 
 def main() -> None:
+    missing = [path.name for path in [PPT, MAPPING, DATASOURCES] if not path.exists()]
+    if missing:
+        print("legacy_examples_missing=" + ", ".join(missing))
+        print("Smoke legado pulado porque os arquivos de exemplo nao estao no workspace.")
+        return
+
     jobs = build_chart_jobs(PPT, MAPPING, DATASOURCES)
     ok_jobs = [job for job in jobs if job.ok]
     print(f"jobs={len(jobs)} ok={len(ok_jobs)} pending={len(jobs) - len(ok_jobs)}")

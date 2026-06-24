@@ -1,6 +1,8 @@
 # Automatizador de PPT
 
-Ferramenta para atualizar um PowerPoint mapeado a partir de planilhas de dados.
+Ferramenta para atualizar um PowerPoint a partir de planilhas de dados.
+
+O core novo trabalha com `PptTarget` generico, nao apenas grafico. Um slide pode ter varios targets atualizaveis, incluindo grafico real do PowerPoint, tabela PowerPoint e, na evolucao, caixas de texto/shapes numericos.
 
 O modelo atual usa nomes numericos nos graficos do PPT, como `7792738590`, mas os arquivos `.xlsx` dentro do ZIP nao precisam ter esse mesmo nome. Quando o nome bate, o sistema usa isso como atalho. Quando nao bate, ele compara automaticamente colunas, linhas, pergunta da tabela, variavel/abertura do mapeamento e metadados opcionais dentro do XLSX para sugerir o datasource mais provavel.
 
@@ -8,25 +10,38 @@ O modelo atual usa nomes numericos nos graficos do PPT, como `7792738590`, mas o
 
 ```powershell
 pip install -r requirements.txt
-streamlit run app.py
+uvicorn web.main:app --host 0.0.0.0 --port 8501
 ```
 
-Na interface, envie:
+Na interface FastAPI, envie:
 
 - o arquivo `.pptx` modelo;
 - o `.zip` com os datasources.
-- no modo com mapeamento, envie tambem a planilha `.xlsx` de mapeamento.
 
-Depois siga o fluxo guiado no app:
+O fluxo atual da UI web e:
 
-0. `Etapa 0 - Projeto`: escolha `Squad1` a `Squad5` e crie ou selecione um projeto.
-1. `Etapa 1 - Arquivos`: escolha o modo e envie PPT, ZIP e, se necessario, a planilha de mapeamento.
-2. `Etapa 2 - Mapeamento`: confira os pares grafico/datasource e ajuste o datasource escolhido.
-3. `Etapa 3 - Dados`: confira a matriz que sera gravada em cada grafico.
-4. `Etapa 4 - Validacao`: confira qual arquivo alimenta qual slide/grafico, com alertas de linhas, colunas, valores e confianca.
-5. `Etapa 5 - Gerar PPT`: baixe o arquivo atualizado.
+1. `Projeto`: escolha o squad e informe o nome do projeto.
+2. `Arquivos`: envie o PPTX modelo e o ZIP com os XLSX.
+3. `Preview`: confira todos os targets descobertos por slide, com tipo, datasource, acao e matriz final. Se algum match estiver errado, envie um XLSX diretamente no card daquele target.
+4. `Download`: baixe o PPT atualizado.
 
-A coluna `atualizar_grafico` da planilha pode ser usada como filtro pela interface, mas por padrao todos os graficos encontrados com datasource correspondente ficam selecionaveis.
+## Core novo de targets
+
+A nova arquitetura separa as responsabilidades principais:
+
+- `ppt_discovery.py`: descobre targets no PPT, incluindo `chart`, `table`, `text` e `shape`.
+- `xlsx_parser.py`: interpreta XLSX sem assumir layout fixo antigo.
+- `table_normalizer.py`: cria o plano de transformacao e transpõe quando necessario.
+- `ai_mapper.py`: monta o payload estrutural para a IA revisar target, datasource e plano.
+- `ppt_chart_writer.py`: atualiza chart XML e workbook embutido preservando o grafico.
+- `ppt_table_writer.py`: atualiza celulas de tabela PowerPoint preservando estilo.
+- `preview_model.py`: gera o modelo amigavel para a UI.
+- `engine.py`: orquestra analise, preview e geracao do PPT.
+
+Caso coberto pela regressao MB:
+
+- `3334180514`: chart no slide 1, datasource em series nas linhas e meses nas colunas, transposto para meses nas linhas e series nas colunas.
+- `1424058794`: tabela PowerPoint no slide 1, preenchida com uma serie unica formatada em pt-BR.
 
 ## Squads, projetos e execucoes
 
@@ -59,29 +74,45 @@ No modo `Automatico`, a planilha de mapeamento deixa de ser obrigatoria. O siste
 
 Para reforcar o auto-match, um XLSX pode conter nas primeiras linhas pares como `PPT_TAG`, `graph_id`, `var_analise`, `abertura`, `nome_grafico` ou `nome_original`. Isso e opcional; serve apenas como uma pista extra para casos em que duas tabelas sejam muito parecidas.
 
-## IA no mapeamento
+## IA no mapeamento e na normalizacao
 
-O app funciona sem IA, mas quando a chave esta configurada ele usa IA por padrao para revisar o mapeamento. Para habilitar, crie um arquivo `.env` baseado em `.env.example`:
+O app funciona sem IA, mas quando a chave esta configurada ele usa IA por padrao na etapa de preview. Para habilitar, crie um arquivo `.env` baseado em `.env.example`:
 
 ```env
 OPENAI_API_KEY=sua_chave
 OPENAI_MODEL=gpt-5.5
 ```
 
-A IA revisa os pares grafico/datasource em lote e preenche `Datasource escolhido` na tela de conferencia. Se a IA discordar da heuristica com baixa confianca, o item fica sinalizado para revisao antes de gerar o PPT.
+A IA recebe, por target:
+
+- o contrato do PPT extraido do `Editar dados` do grafico ou da tabela PowerPoint;
+- a estrutura detectada do XLSX;
+- a matriz final proposta pelo normalizador;
+- o contexto textual do slide e o nome do shape.
+
+Com isso ela diagnostica se a acao correta e alinhar, transpor ou pedir revisao. A matriz tecnica continua sendo exibida para o usuario antes do download, e a pessoa pode substituir o XLSX de um target diretamente no card do preview.
+
+Antes de subir o servidor, valide a conexao com a OpenAI pelo PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\check_openai.py
+```
+
+Se esse comando retornar `OpenAI: ok`, o app web conseguira usar a IA quando for iniciado pelo mesmo ambiente.
 
 ## Validacao de correspondencias
 
 A etapa `Validacao` substitui a validacao visual. Ela mostra, antes da geracao:
 
-- qual XLSX sera usado em cada slide/grafico;
-- pergunta/titulo detectado no XLSX;
-- contexto de texto encontrado no slide;
-- percentual de linhas e colunas compativeis;
-- percentual de valores preenchidos;
-- alertas para baixa confianca, colunas/linhas pouco compativeis ou valores vazios.
+- todos os targets descobertos em cada slide, incluindo graficos e tabelas;
+- qual XLSX sera usado em cada target;
+- o contrato do PPT, equivalente ao que aparece em `Editar dados`;
+- a estrutura detectada no XLSX;
+- a acao escolhida: alinhar, transpor ou preencher tabela;
+- a matriz final que sera gravada no PowerPoint;
+- o diagnostico da IA quando a chave estiver configurada.
 
-Se a sugestao estiver errada, a etapa `Mapeamento` permite enviar um XLSX correto e aplicar esse arquivo apenas ao grafico escolhido, sem renomear arquivos.
+Se a sugestao estiver errada, o card do target permite enviar um XLSX correto e aplicar esse arquivo apenas ao objeto escolhido, sem renomear arquivos.
 
 ## Formulas no Excel
 
@@ -95,16 +126,19 @@ Os arquivos originais nao sao alterados.
 
 ```powershell
 python scripts/smoke_test.py
+python -m unittest tests.test_mb_update_targets
 ```
 
-Esse teste usa os arquivos de exemplo da pasta, cria um PPT em `outputs/` e tambem valida o auto-match com os datasources renomeados.
+O smoke test usa os arquivos de exemplo da pasta, cria um PPT em `outputs/` e valida o auto-match com os datasources renomeados.
+
+O teste MB usa, por padrao, `C:\Users\HugoRocha\Documents\automatizador-ppt-arquivos\mb` e valida descoberta de chart+tabela, normalizacao/transposicao, escala de percentuais e escrita no PPT final.
 
 ## Deploy AWS
 
-O deploy atual foi preparado para ECS Fargate com build na propria AWS via CodeBuild, entao nao precisa de Docker local:
+O deploy atual foi preparado para ECS Fargate com build na propria AWS via CodeBuild, entao nao precisa de Docker local. A regiao padrao do projeto e `us-east-1`, e os recursos criados pelo script recebem a tag `Name=qwst-auto-ppt`:
 
 ```powershell
-.\infra\aws\deploy_fargate.ps1 -AppName qwst-auto-ppt -Region sa-east-1 -AllowedCidr 0.0.0.0/0
+.\infra\aws\deploy_fargate.ps1 -AppName qwst-auto-ppt -Region us-east-1 -AllowedCidr 0.0.0.0/0
 ```
 
 O script cria/atualiza S3, ECR, CodeBuild, IAM, CloudWatch Logs, ECS Cluster, Security Group, Task Definition e Service. Ele tambem le `OPENAI_API_KEY` do `.env` local e grava no AWS Secrets Manager.
@@ -112,7 +146,7 @@ O script cria/atualiza S3, ECR, CodeBuild, IAM, CloudWatch Logs, ECS Cluster, Se
 Para pausar o servico e reduzir custo quando nao estiver em uso:
 
 ```powershell
-.\infra\aws\stop_fargate.ps1 -AppName qwst-auto-ppt -Region sa-east-1
+.\infra\aws\stop_fargate.ps1 -AppName qwst-auto-ppt -Region us-east-1
 ```
 
 Antes de colocar para todos os times, o ideal e trocar o acesso publico por ALB com HTTPS e autenticacao corporativa.

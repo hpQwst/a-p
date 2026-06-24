@@ -27,7 +27,12 @@ from ppt_automator.project_store import (
     save_project_bytes,
     save_project_json,
 )
-from worker.processor import AnalysisResult, analyze_files
+from worker.processor import (
+    AnalysisResult,
+    analyze_files,
+    apply_ai_recommendations_to_analysis,
+    parse_slide_selection,
+)
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -63,9 +68,11 @@ async def preview(
     datasources: UploadFile = File(...),
     mapping: UploadFile | None = File(None),
     use_ai: str = Form(""),
+    slides_to_update: str = Form(""),
 ) -> HTMLResponse:
     try:
         project = _resolve_project(project_ref, squad, project_name)
+        selected_slides = parse_slide_selection(slides_to_update)
         pptx_bytes = await pptx.read()
         datasource_bytes = await datasources.read()
         mapping_bytes = await mapping.read() if mapping and mapping.filename else b""
@@ -97,6 +104,10 @@ async def preview(
                 "pptx": pptx.filename or "modelo.pptx",
                 "datasources": datasources.filename or "datasources.zip",
                 "mapping": mapping.filename if mapping and mapping.filename else "",
+            },
+            "slides": {
+                "raw": slides_to_update.strip(),
+                "numbers": selected_slides,
             },
             "use_ai": bool(use_ai),
         },
@@ -137,9 +148,17 @@ async def download(job_id: str) -> Response:
         raise HTTPException(status_code=404, detail="Job nao encontrado.")
 
     manual_sources = _manual_sources_for_job(job_dir)
+    selected_slides = _selected_slides_for_job(job_dir)
     pptx_bytes = pptx_path.read_bytes()
     datasource_bytes = datasource_path.read_bytes()
-    analysis = analyze_files(pptx_bytes, datasource_bytes, manual_sources=manual_sources)
+    analysis = analyze_files(
+        pptx_bytes,
+        datasource_bytes,
+        manual_sources=manual_sources,
+        slide_numbers=selected_slides,
+    )
+    ai_diagnostics, _ai_status = _ai_diagnostics_for_job(job_dir, analysis)
+    analysis = apply_ai_recommendations_to_analysis(analysis, ai_diagnostics)
     output = generate_updated_pptx(pptx_bytes, analysis.plans)
     file_name = f"ppt_automatizado_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
     _save_project_run(job_dir, output, analysis, file_name)
@@ -163,16 +182,19 @@ def _render_preview(
 ) -> HTMLResponse:
     job_dir = _job_dir(job_id)
     metadata = _load_job_metadata(job_dir)
+    selected_slides = _selected_slides_for_job(job_dir)
     try:
         analysis = analyze_files(
             (job_dir / "input.pptx").read_bytes(),
             (job_dir / "datasources.zip").read_bytes(),
             manual_sources=_manual_sources_for_job(job_dir),
+            slide_numbers=selected_slides,
         )
     except Exception as exc:
         return _error_response(request, f"Nao consegui analisar os arquivos: {exc}", status_code=400)
 
     ai_diagnostics, ai_status = _ai_diagnostics_for_job(job_dir, analysis)
+    analysis = apply_ai_recommendations_to_analysis(analysis, ai_diagnostics)
     cards_by_slide = _cards_by_slide(analysis, _manual_source_names(job_dir), ai_diagnostics)
     return templates.TemplateResponse(
         request,
@@ -187,6 +209,7 @@ def _render_preview(
             "mapped_count": len(analysis.plans),
             "cards_by_slide": dict(sorted(cards_by_slide.items())),
             "ai_status": ai_status,
+            "slide_selection_label": _slide_selection_label(selected_slides),
             "notice": notice,
             "error": error,
         },
@@ -320,6 +343,7 @@ def _save_project_run(job_dir: Path, output: bytes, analysis: AnalysisResult, fi
             "targets_found": analysis.target_count,
             "plans_generated": len(analysis.plans),
             "manual_overrides": sorted(_manual_source_names(job_dir)),
+            "selected_slides": _selected_slides_for_job(job_dir),
         },
     )
     save_project_bytes(project, ["runs", run.run_id, "inputs"], metadata["files"]["pptx"], (job_dir / "input.pptx").read_bytes())
@@ -347,6 +371,7 @@ def _save_project_run(job_dir: Path, output: bytes, analysis: AnalysisResult, fi
         {
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "output": output_location,
+            "selected_slides": _selected_slides_for_job(job_dir),
             "targets": [
                 {
                     "target": plan.target_id,
@@ -378,6 +403,20 @@ def _manual_sources_for_job(job_dir: Path) -> dict[str, tuple[str, bytes]]:
 
 def _manual_source_names(job_dir: Path) -> dict[str, str]:
     return {target_id: filename for target_id, (filename, _data) in _manual_sources_for_job(job_dir).items()}
+
+
+def _selected_slides_for_job(job_dir: Path) -> list[int]:
+    metadata = _load_job_metadata(job_dir)
+    slides = metadata.get("slides") or {}
+    if isinstance(slides, dict):
+        return [int(item) for item in slides.get("numbers") or []]
+    return []
+
+
+def _slide_selection_label(selected_slides: list[int]) -> str:
+    if not selected_slides:
+        return "Todos os slides"
+    return ", ".join(str(slide) for slide in selected_slides)
 
 
 def _job_dir(job_id: str, create: bool = False) -> Path:

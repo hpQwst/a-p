@@ -23,7 +23,7 @@ def analyze_update_package(
     datasources_zip: InputFile,
     formula_mode: str = "auto",
 ) -> tuple[list[PptTarget], list[ParsedXlsxTable], list[TransformPlan]]:
-    targets = discover_ppt_targets(pptx_file)
+    targets = discover_ppt_targets(pptx_file, numeric_only=False, include_text_shapes=False)
     sources = parse_datasource_zip(datasources_zip, formula_mode=formula_mode)
     plans = build_transform_plans(targets, sources)
     return targets, sources, plans

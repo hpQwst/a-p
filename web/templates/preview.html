@@ -7,13 +7,13 @@
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
   </head>
   <body>
-    <main class="shell wide">
-      <header class="topbar">
+    <main class="app-shell preview-shell">
+      <header class="product-header preview-header">
         <div>
           <p class="eyebrow">{{ squad }} / {{ project_name }}</p>
           <h1>Preview das atualizações</h1>
         </div>
-        <a class="button" href="/jobs/{{ job_id }}/download" data-progress-message="Gerando PPT atualizado...">Baixar PPT atualizado</a>
+        <a class="button" href="/jobs/{{ job_id }}/download" data-progress-message="Gerando PPT atualizado...">Baixar PPT</a>
       </header>
 
       {% if notice %}
@@ -23,258 +23,325 @@
         <div class="notice warn">{{ error }}</div>
       {% endif %}
 
-      <section class="metrics">
-        <div><strong>{{ target_count }}</strong><span>targets no PPT</span></div>
-        <div><strong>{{ source_count }}</strong><span>datasources lidos</span></div>
-        <div><strong>{{ mapped_count }}</strong><span>planos gerados</span></div>
-        <div><strong>{{ slide_selection_label }}</strong><span>slides considerados</span></div>
-      </section>
+      <section class="preview-workbench">
+        <aside class="review-sidebar">
+          <section class="sidebar-card">
+            <p class="eyebrow">Resumo</p>
+            <div class="review-metrics">
+              <div><strong>{{ review_summary.slides }}</strong><span>slides</span></div>
+              <div><strong>{{ review_summary.targets }}</strong><span>targets</span></div>
+              <div><strong>{{ review_summary.mapped }}</strong><span>mapeados</span></div>
+              <div><strong>{{ review_summary.unmapped }}</strong><span>pendentes</span></div>
+            </div>
+          </section>
 
-      <section class="mapping-stage {{ mapping_status.state }}">
-        <div>
-          <strong>Mapeamento salvo</strong>
-          <span>{{ mapping_status.message }}</span>
-        </div>
-        {% if mapping_candidates %}
-          <form action="/jobs/{{ job_id }}/mapping-template" method="post" data-progress-message="Aplicando mapeamento salvo do squad...">
-            <select name="mapping_template_ref">
-              {% for candidate in mapping_candidates %}
-                <option value="{{ candidate.ref }}">
-                  {{ candidate.name }} · {{ candidate.matched_count }} targets · {{ candidate.score }}%
-                </option>
-              {% endfor %}
-            </select>
-            <button type="submit">Aplicar mapeamento</button>
-          </form>
-        {% endif %}
-      </section>
+          <section class="sidebar-card">
+            <p class="eyebrow">Ações</p>
+            <form class="compact-form" action="/jobs/{{ job_id }}/slides" method="post" data-progress-message="Atualizando escopo de slides...">
+              <label>
+                <span>Adicionar slides</span>
+                <input name="slides_to_add" placeholder="Ex.: 2, 7-9">
+              </label>
+              <button type="submit">Adicionar</button>
+            </form>
+          </section>
 
-      <section class="ai-stage {{ ai_status.state }}">
-        <div>
-          <strong>Etapa IA</strong>
-          <span>{{ ai_status.message }}</span>
-        </div>
-        {% if ai_available %}
-          <form action="/jobs/{{ job_id }}/review-ai" method="post" data-progress-message="Revisando mapeamento e matriz com IA...">
-            <button type="submit">Revisar com IA</button>
-          </form>
-        {% endif %}
-      </section>
+          <section class="sidebar-card">
+            <p class="eyebrow">Filtrar</p>
+            <label>
+              <span>Buscar</span>
+              <input type="search" placeholder="Slide, target, datasource..." data-preview-search>
+            </label>
+            <div class="filter-group" data-preview-status>
+              <button type="button" class="filter-chip active" data-status-filter="all">Todos</button>
+              <button type="button" class="filter-chip" data-status-filter="unmapped">Pendentes</button>
+              <button type="button" class="filter-chip" data-status-filter="manual">Manual</button>
+              <button type="button" class="filter-chip" data-status-filter="ai">IA</button>
+            </div>
+            <div class="bulk-actions">
+              <button type="button" class="ghost-button" data-open-all>Expandir</button>
+              <button type="button" class="ghost-button" data-close-all>Recolher</button>
+            </div>
+          </section>
 
-      <form class="scope-form" action="/jobs/{{ job_id }}/slides" method="post" data-progress-message="Atualizando escopo de slides...">
-        <label>
-          <span>Adicionar slides ao escopo deste projeto</span>
-          <input name="slides_to_add" placeholder="Ex.: 2, 7-9">
-        </label>
-        <button type="submit">Adicionar slides</button>
-      </form>
-
-      {% if analysis_warnings %}
-        <section class="warning-list">
-          <strong>Pontos para revisar</strong>
-          {% for warning in analysis_warnings %}
-            <p>{{ warning }}</p>
-          {% endfor %}
-        </section>
-      {% endif %}
-
-      {% if ai_log_entries %}
-        <details class="audit-log">
-          <summary>Auditoria de uso da IA</summary>
-          {% for entry in ai_log_entries %}
-            <article>
-              <strong>{{ entry.operation }} / {{ entry.status }}</strong>
-              <span>{{ entry.sent_at }} → {{ entry.returned_at }} · {{ entry.duration_ms }} ms · {{ entry.target_count }} target(s)</span>
-              {% if entry.returned_count is defined %}
-                <span>retorno: {{ entry.returned_count }}</span>
-              {% endif %}
-              {% if entry.payload_summary %}
-                <pre>{{ entry.payload_summary }}</pre>
-              {% endif %}
-              {% if entry.error %}
-                <p>{{ entry.error }}</p>
-              {% endif %}
-            </article>
-          {% endfor %}
-        </details>
-      {% endif %}
-
-      {% for slide, items in cards_by_slide.items() %}
-        <section class="slide-block">
-          <h2>Slide {{ slide }}</h2>
-          {% for item in items %}
-            <article class="target {% if not item.has_plan %}unmapped{% endif %}">
-              <div class="target-head">
-                <div>
-                  <p class="eyebrow">Target {{ item.target }} / {{ item.object_type }}</p>
-                  <h3>
-                    {% if item.datasource %}
-                      {{ item.datasource }}
-                    {% else %}
-                      Sem datasource automático
-                    {% endif %}
-                  </h3>
-                </div>
-                <span class="pill">{{ item.action }}</span>
-              </div>
-
-              {% if item.manual_file %}
-                <p class="reason"><strong>Correção manual:</strong> {{ item.manual_file }}</p>
-                {% if item.manual_range %}
-                  <p class="reason"><strong>Range manual:</strong> {{ item.manual_range }}</p>
+          <nav class="slide-nav" aria-label="Slides">
+            {% for summary in slide_summaries %}
+              <a href="#slide-{{ summary.slide }}" data-slide-link>
+                <span>Slide {{ summary.slide }}</span>
+                <small>{{ summary.mapped_count }}/{{ summary.target_count }}</small>
+                {% if summary.unmapped_count %}
+                  <em>{{ summary.unmapped_count }}</em>
                 {% endif %}
+              </a>
+            {% endfor %}
+          </nav>
+        </aside>
+
+        <section class="review-main">
+          <div class="status-grid">
+            <section class="mapping-stage {{ mapping_status.state }}">
+              <div>
+                <strong>Mapeamento salvo</strong>
+                <span>{{ mapping_status.message }}</span>
+              </div>
+              {% if mapping_candidates %}
+                <form action="/jobs/{{ job_id }}/mapping-template" method="post" data-progress-message="Aplicando mapeamento salvo do squad...">
+                  <select name="mapping_template_ref">
+                    {% for candidate in mapping_candidates %}
+                      <option value="{{ candidate.ref }}">
+                        {{ candidate.name }} - {{ candidate.matched_count }} targets - {{ candidate.score }}%
+                      </option>
+                    {% endfor %}
+                  </select>
+                  <button type="submit">Aplicar</button>
+                </form>
               {% endif %}
-              <p class="reason">{{ item.reason }}</p>
-              {% if item.ai %}
-                <div class="ai-box">
-                  <strong>Diagnóstico IA: {{ item.ai.status }} / {{ item.ai.confidence }}%</strong>
-                  <p>{{ item.ai.reason }}</p>
-                  {% if item.ai.row_mapping %}
-                    <details>
-                      <summary>Mapeamento de linhas</summary>
-                      <pre>{{ item.ai.row_mapping }}</pre>
-                    </details>
+            </section>
+
+            <section class="ai-stage {{ ai_status.state }}">
+              <div>
+                <strong>IA por target</strong>
+                <span>{{ ai_status.message }}</span>
+              </div>
+            </section>
+          </div>
+
+          {% if analysis_warnings %}
+            <section class="warning-list">
+              <strong>Pontos para revisar</strong>
+              {% for warning in analysis_warnings %}
+                <p>{{ warning }}</p>
+              {% endfor %}
+            </section>
+          {% endif %}
+
+          {% if ai_log_entries %}
+            <details class="audit-log">
+              <summary>Auditoria de uso da IA</summary>
+              {% for entry in ai_log_entries %}
+                <article>
+                  <strong>{{ entry.operation }} / {{ entry.status }}</strong>
+                  <span>{{ entry.sent_at }} -> {{ entry.returned_at }} · {{ entry.duration_ms }} ms · {{ entry.target_count }} target(s)</span>
+                  {% if entry.returned_count is defined %}
+                    <span>retorno: {{ entry.returned_count }}</span>
                   {% endif %}
-                  {% if item.ai.column_mapping %}
-                    <details>
-                      <summary>Mapeamento de colunas</summary>
-                      <pre>{{ item.ai.column_mapping }}</pre>
-                    </details>
+                  {% if entry.payload_summary %}
+                    <pre>{{ entry.payload_summary }}</pre>
                   {% endif %}
-                  {% if item.ai.recommended_edit_data and item.ai.recommended_edit_data.rows %}
-                    <details open>
-                      <summary>Tabela correta sugerida pela IA para o “Editar dados”</summary>
-                      {% if item.ai.recommended_edit_data.orientation %}
-                        <p class="context">Orientação: {{ item.ai.recommended_edit_data.orientation }}</p>
-                      {% endif %}
-                      <div class="table-wrap small ai-correct-table">
-                        <table>
-                          {% if item.ai.recommended_edit_data.headers %}
-                            <thead>
-                              <tr>
-                                {% for header in item.ai.recommended_edit_data.headers %}
-                                  <th>{{ header }}</th>
-                                {% endfor %}
-                              </tr>
-                            </thead>
+                  {% if entry.error %}
+                    <p>{{ entry.error }}</p>
+                  {% endif %}
+                </article>
+              {% endfor %}
+            </details>
+          {% endif %}
+
+          <div class="slides-list" data-preview-list>
+            {% for slide, items in cards_by_slide.items() %}
+              <details class="slide-section" id="slide-{{ slide }}" data-slide-section {% if loop.first %}open{% endif %}>
+                <summary class="slide-summary">
+                  <div>
+                    <span>Slide {{ slide }}</span>
+                    <strong>{{ items|length }} target(s)</strong>
+                  </div>
+                  <small>{{ items|selectattr("has_plan")|list|length }} mapeados</small>
+                </summary>
+
+                <div class="target-list">
+                  {% for item in items %}
+                    <details class="target-card {% if not item.has_plan %}unmapped{% endif %}" data-target-card data-status="{{ item.status }}" data-search="{{ item.search_text }}">
+                      <summary class="target-summary">
+                        <div class="target-title">
+                          <span class="target-kind">{{ item.object_type }}</span>
+                          <strong>{{ item.target }}</strong>
+                        </div>
+                        <div class="target-datasource">
+                          {% if item.datasource %}
+                            <span>{{ item.datasource }}</span>
+                          {% else %}
+                            <span>Sem datasource automático</span>
                           {% endif %}
-                          <tbody>
-                            {% for row in item.ai.recommended_edit_data.rows %}
-                              <tr>
-                                {% for value in row %}
-                                  <td>{{ value }}</td>
-                                {% endfor %}
-                              </tr>
-                            {% endfor %}
-                          </tbody>
-                        </table>
+                          <small>{{ item.action }}</small>
+                        </div>
+                        {% if item.confidence %}
+                          <span class="score-pill">{{ item.confidence }}%</span>
+                        {% endif %}
+                      </summary>
+
+                      <div class="target-detail">
+                        {% if item.manual_file %}
+                          <p class="reason"><strong>Correção manual:</strong> {{ item.manual_file }}</p>
+                          {% if item.manual_range %}
+                            <p class="reason"><strong>Range manual:</strong> {{ item.manual_range }}</p>
+                          {% endif %}
+                        {% endif %}
+                        <p class="reason">{{ item.reason }}</p>
+                        {% if item.nearby_text %}
+                          <p class="context">Contexto no slide: {{ item.nearby_text }}</p>
+                        {% endif %}
+                        {% if ai_available %}
+                          <form class="target-ai-form" action="/jobs/{{ job_id }}/targets/{{ item.target }}/review-ai" method="post" data-progress-message="Revisando somente este target com IA...">
+                            <button class="button secondary" type="submit">Revisar este target com IA</button>
+                          </form>
+                        {% endif %}
+
+                        {% if item.ai %}
+                          <div class="ai-box">
+                            <strong>Diagnostico IA: {{ item.ai.status }} / {{ item.ai.confidence }}%</strong>
+                            <p>{{ item.ai.reason }}</p>
+                            {% if item.ai.row_mapping %}
+                              <details>
+                                <summary>Mapeamento de linhas</summary>
+                                <pre>{{ item.ai.row_mapping }}</pre>
+                              </details>
+                            {% endif %}
+                            {% if item.ai.column_mapping %}
+                              <details>
+                                <summary>Mapeamento de colunas</summary>
+                                <pre>{{ item.ai.column_mapping }}</pre>
+                              </details>
+                            {% endif %}
+                            {% if item.ai.recommended_edit_data and item.ai.recommended_edit_data.rows %}
+                              <details open>
+                                <summary>Tabela sugerida pela IA</summary>
+                                {% if item.ai.recommended_edit_data.orientation %}
+                              <p class="context">Orientação: {{ item.ai.recommended_edit_data.orientation }}</p>
+                                {% endif %}
+                                <div class="table-wrap small ai-correct-table">
+                                  <table>
+                                    {% if item.ai.recommended_edit_data.headers %}
+                                      <thead>
+                                        <tr>
+                                          {% for header in item.ai.recommended_edit_data.headers %}
+                                            <th>{{ header }}</th>
+                                          {% endfor %}
+                                        </tr>
+                                      </thead>
+                                    {% endif %}
+                                    <tbody>
+                                      {% for row in item.ai.recommended_edit_data.rows %}
+                                        <tr>
+                                          {% for value in row %}
+                                            <td>{{ value }}</td>
+                                          {% endfor %}
+                                        </tr>
+                                      {% endfor %}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </details>
+                            {% endif %}
+                          </div>
+                        {% endif %}
+
+                        <div class="diagnostic-grid">
+                          {% if item.ppt_contract and item.ppt_contract.rows %}
+                            <details class="diagnostic">
+                              <summary>Contrato do PPT</summary>
+                              <p class="context">Orientação: {{ item.ppt_contract.orientation }}</p>
+                              <div class="table-wrap small">
+                                <table>
+                                  {% if item.ppt_contract.headers %}
+                                    <thead>
+                                      <tr>
+                                        {% for header in item.ppt_contract.headers %}
+                                          <th>{{ header }}</th>
+                                        {% endfor %}
+                                      </tr>
+                                    </thead>
+                                  {% endif %}
+                                  <tbody>
+                                    {% for row in item.ppt_contract.rows %}
+                                      <tr>
+                                        {% for value in row %}
+                                          <td>{{ value }}</td>
+                                        {% endfor %}
+                                      </tr>
+                                    {% endfor %}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </details>
+                          {% endif %}
+
+                          {% if item.source_detected and item.source_detected.rows %}
+                            <details class="diagnostic">
+                              <summary>Estrutura detectada no XLSX</summary>
+                              <p class="context">Orientação: {{ item.source_detected.orientation }}</p>
+                              <div class="table-wrap small">
+                                <table>
+                                  {% if item.source_detected.headers %}
+                                    <thead>
+                                      <tr>
+                                        {% for header in item.source_detected.headers %}
+                                          <th>{{ header }}</th>
+                                        {% endfor %}
+                                      </tr>
+                                    </thead>
+                                  {% endif %}
+                                  <tbody>
+                                    {% for row in item.source_detected.rows %}
+                                      <tr>
+                                        {% for value in row %}
+                                          <td>{{ value }}</td>
+                                        {% endfor %}
+                                      </tr>
+                                    {% endfor %}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </details>
+                          {% endif %}
+                        </div>
+
+                        {% if item.headers %}
+                          <details class="diagnostic final-matrix">
+                            <summary>Matriz final que será gravada</summary>
+                            <div class="table-wrap">
+                              <table>
+                                <thead>
+                                  <tr>
+                                    {% for header in item.headers %}
+                                      <th>{{ header }}</th>
+                                    {% endfor %}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {% for row in item.rows %}
+                                    <tr>
+                                      {% for value in row %}
+                                        <td>{{ value }}</td>
+                                      {% endfor %}
+                                    </tr>
+                                  {% endfor %}
+                                </tbody>
+                              </table>
+                            </div>
+                          </details>
+                        {% endif %}
+
+                        <form class="inline-form" action="/jobs/{{ job_id }}/targets/{{ item.target }}/override" method="post" enctype="multipart/form-data" data-progress-message="Aplicando XLSX e recalculando somente este target...">
+                          <label>
+                            <span>Trocar XLSX deste target</span>
+                            <input name="datasource" type="file" accept=".xlsx" required>
+                          </label>
+                          <label>
+                            <span>Range opcional</span>
+                            <input name="cell_range" type="text" value="{{ item.manual_range }}" placeholder="D5:G12 ou Aba!D5:G12">
+                          </label>
+                          <button type="submit">Aplicar XLSX</button>
+                        </form>
                       </div>
                     </details>
-                  {% endif %}
+                  {% endfor %}
                 </div>
-              {% endif %}
-              {% if item.nearby_text %}
-                <p class="context">Contexto no slide: {{ item.nearby_text }}</p>
-              {% endif %}
-
-              {% if item.ppt_contract and item.ppt_contract.rows %}
-                <details class="diagnostic" open>
-                  <summary>Contrato do PPT - “Editar dados”</summary>
-                  <p class="context">Orientação: {{ item.ppt_contract.orientation }}</p>
-                  <div class="table-wrap small">
-                    <table>
-                      {% if item.ppt_contract.headers %}
-                        <thead>
-                          <tr>
-                            {% for header in item.ppt_contract.headers %}
-                              <th>{{ header }}</th>
-                            {% endfor %}
-                          </tr>
-                        </thead>
-                      {% endif %}
-                      <tbody>
-                        {% for row in item.ppt_contract.rows %}
-                          <tr>
-                            {% for value in row %}
-                              <td>{{ value }}</td>
-                            {% endfor %}
-                          </tr>
-                        {% endfor %}
-                      </tbody>
-                    </table>
-                  </div>
-                </details>
-              {% endif %}
-
-              {% if item.source_detected and item.source_detected.rows %}
-                <details class="diagnostic">
-                  <summary>Estrutura detectada no XLSX</summary>
-                  <p class="context">Orientação: {{ item.source_detected.orientation }}</p>
-                  <div class="table-wrap small">
-                    <table>
-                      {% if item.source_detected.headers %}
-                        <thead>
-                          <tr>
-                            {% for header in item.source_detected.headers %}
-                              <th>{{ header }}</th>
-                            {% endfor %}
-                          </tr>
-                        </thead>
-                      {% endif %}
-                      <tbody>
-                        {% for row in item.source_detected.rows %}
-                          <tr>
-                            {% for value in row %}
-                              <td>{{ value }}</td>
-                            {% endfor %}
-                          </tr>
-                        {% endfor %}
-                      </tbody>
-                    </table>
-                  </div>
-                </details>
-              {% endif %}
-
-              {% if item.headers %}
-                <h4>Matriz final que será gravada</h4>
-                <div class="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        {% for header in item.headers %}
-                          <th>{{ header }}</th>
-                        {% endfor %}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {% for row in item.rows %}
-                        <tr>
-                          {% for value in row %}
-                            <td>{{ value }}</td>
-                          {% endfor %}
-                        </tr>
-                      {% endfor %}
-                    </tbody>
-                  </table>
-                </div>
-              {% endif %}
-
-              <form class="inline-form" action="/jobs/{{ job_id }}/targets/{{ item.target }}/override" method="post" enctype="multipart/form-data" data-progress-message="Aplicando XLSX e recalculando somente este target...">
-                <label>
-                  <span>Trocar XLSX deste target</span>
-                  <input name="datasource" type="file" accept=".xlsx" required>
-                </label>
-                <label>
-                  <span>Range opcional</span>
-                  <input name="cell_range" type="text" value="{{ item.manual_range }}" placeholder="D5:G12 ou Aba!D5:G12">
-                </label>
-                <button type="submit">Aplicar XLSX</button>
-              </form>
-            </article>
-          {% endfor %}
+              </details>
+            {% endfor %}
+          </div>
         </section>
-      {% endfor %}
+      </section>
     </main>
+
     <div id="progress-overlay" class="progress-overlay" hidden>
       <div>
         <strong>Projeto em andamento</strong>

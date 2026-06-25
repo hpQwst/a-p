@@ -28,7 +28,7 @@ class TransformPlan:
 
     @property
     def target_id(self) -> str:
-        return self.target.shape_name
+        return self.target.target_id
 
     @property
     def object_type(self) -> str:
@@ -223,11 +223,12 @@ def source_match_candidates(
         score = 0.0
         reasons = []
         strong_id_match = False
-        if source.source_id and source.source_id == target.shape_name:
+        target_keys = {target.target_id, target.shape_name}
+        if source.source_id and source.source_id in target_keys:
             score += 0.72
             reasons.append("nome do arquivo bate com o target")
             strong_id_match = True
-        if source.metadata.get("graph_id") == target.shape_name or source.metadata.get("ppt_tag") == target.shape_name:
+        if source.metadata.get("graph_id") in target_keys or source.metadata.get("ppt_tag") in target_keys:
             score += 0.2
             reasons.append("metadado do XLSX bate com o target")
             strong_id_match = True
@@ -280,6 +281,7 @@ def _filename_context_score(target: PptTarget, source: ParsedXlsxTable) -> float
     if not filename or len(_norm(filename)) <= 2:
         return 0.0
     target_texts = [
+        target.target_id,
         target.shape_name,
         target.nearby_text,
         *target.expected_categories,

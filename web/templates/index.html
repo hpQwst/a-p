@@ -7,139 +7,197 @@
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
   </head>
   <body>
-    <main class="shell wide">
-      <header class="topbar">
+    <main class="app-shell home-shell">
+      <header class="product-header">
         <div>
           <p class="eyebrow">QWST Auto PPT</p>
-          <h1>Atualizar PowerPoint</h1>
+          <h1>Central de atualização</h1>
         </div>
-        <span class="pill">FastAPI</span>
+        <div class="header-status">
+          <span class="status-dot"></span>
+          <span>{% if ai_available %}IA ativa{% else %}IA indisponível{% endif %}</span>
+        </div>
       </header>
 
-      <section class="steps">
-        <div class="step active"><span>1</span><strong>Projeto</strong><small>Squad e projeto</small></div>
-        <div class="step"><span>2</span><strong>Arquivos</strong><small>PPTX, ZIP e mapeamento</small></div>
-        <div class="step"><span>3</span><strong>Preview</strong><small>Targets e correções</small></div>
-        <div class="step"><span>4</span><strong>Download</strong><small>PPT final</small></div>
-      </section>
+      <section class="home-layout">
+        <form class="workspace-card upload-workspace" action="/preview" method="post" enctype="multipart/form-data" data-progress-message="Analisando arquivos e preparando preview..." data-large-deck-threshold="{{ large_deck_slide_threshold }}">
+          <div class="workspace-head">
+            <div>
+              <p class="eyebrow">Nova atualização</p>
+              <h2>Preparar PPT</h2>
+            </div>
+            <span class="mini-pill">Squad + projeto</span>
+          </div>
 
-      <section class="layout">
-        <form class="panel" action="/preview" method="post" enctype="multipart/form-data" data-progress-message="Analisando arquivos e salvando checkpoint do projeto...">
-          <h2>Etapa 1 - Projeto</h2>
-          <div class="grid two">
+          <div class="form-section">
+            <div class="section-title">
+                <span>1</span>
+                <strong>Projeto</strong>
+            </div>
+            <div class="grid two">
+              <label>
+                <span>Projeto existente</span>
+                <select name="project_ref" data-project-select>
+                  <option value="" data-squad="">Criar novo projeto</option>
+                  {% for squad, projects in projects_by_squad.items() %}
+                    {% if projects %}
+                      <optgroup label="{{ squad.title() }}">
+                        {% for project in projects %}
+                          <option value="{{ project.squad }}|{{ project.slug }}" data-squad="{{ project.squad }}">{{ project.name }}</option>
+                        {% endfor %}
+                      </optgroup>
+                    {% endif %}
+                  {% endfor %}
+                </select>
+              </label>
+              <label>
+                <span>Squad</span>
+                <select name="squad" data-squad-select>
+                  {% for squad in squads %}
+                    <option value="{{ squad.value }}">{{ squad.label }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+            </div>
             <label>
-              <span>Salvar em projeto existente</span>
-              <select name="project_ref" data-project-select>
-                <option value="" data-squad="">Criar novo projeto</option>
-                {% for squad, projects in projects_by_squad.items() %}
-                  {% if projects %}
+              <span>Nome do novo projeto</span>
+              <input name="project_name" placeholder="Ex.: Relatorio mensal - junho">
+            </label>
+          </div>
+
+          <div class="form-section">
+            <div class="section-title">
+              <span>2</span>
+              <strong>Modelo de mapeamento</strong>
+            </div>
+            <label>
+              <span>Mapeamento salvo</span>
+              <select name="mapping_template_ref" data-mapping-template-select>
+                <option value="" data-squad="">Detectar no preview</option>
+                {% for squad, templates in mapping_templates_by_squad.items() %}
+                  {% if templates %}
                     <optgroup label="{{ squad.title() }}">
-                      {% for project in projects %}
-                        <option value="{{ project.squad }}|{{ project.slug }}" data-squad="{{ project.squad }}">{{ project.name }}</option>
+                      {% for template in templates %}
+                        <option value="{{ template.squad }}|{{ template.slug }}" data-squad="{{ template.squad }}">
+                          {{ template.name }} - {{ template.entry_count }} targets
+                        </option>
                       {% endfor %}
                     </optgroup>
                   {% endif %}
                 {% endfor %}
               </select>
             </label>
-            <label>
-              <span>Squad do novo projeto</span>
-              <select name="squad" data-squad-select>
-                {% for squad in squads %}
-                  <option value="{{ squad.value }}">{{ squad.label }}</option>
-                {% endfor %}
-              </select>
-            </label>
           </div>
 
-          <label>
-            <span>Nome do novo projeto</span>
-            <input name="project_name" placeholder="Preencha quando for criar um projeto novo">
-          </label>
-
-          <label>
-            <span>Mapeamento salvo do squad</span>
-            <select name="mapping_template_ref" data-mapping-template-select>
-              <option value="" data-squad="">Detectar no preview</option>
-              {% for squad, templates in mapping_templates_by_squad.items() %}
-                {% if templates %}
-                  <optgroup label="{{ squad.title() }}">
-                    {% for template in templates %}
-                      <option value="{{ template.squad }}|{{ template.slug }}" data-squad="{{ template.squad }}">
-                        {{ template.name }} · {{ template.entry_count }} targets
-                      </option>
-                    {% endfor %}
-                  </optgroup>
-                {% endif %}
-              {% endfor %}
-            </select>
-          </label>
-
-          <h2>Etapa 2 - Arquivos</h2>
-          <div class="grid two">
-            <label>
-              <span>PowerPoint modelo</span>
-              <input name="pptx" type="file" accept=".pptx" required>
-            </label>
-            <label>
-              <span>ZIP com datasources XLSX</span>
-              <input name="datasources" type="file" accept=".zip" required>
-            </label>
+          <div class="form-section">
+            <div class="section-title">
+              <span>3</span>
+              <strong>Arquivos</strong>
+            </div>
+            <div class="file-grid">
+              <label class="file-card">
+                <span>PowerPoint modelo</span>
+                <input name="pptx" type="file" accept=".pptx" required data-pptx-input>
+              </label>
+              <label class="file-card">
+                <span>ZIP com datasources XLSX</span>
+                <input name="datasources" type="file" accept=".zip" required>
+              </label>
+            </div>
           </div>
-          <label>
-            <span>Planilha de mapeamento opcional</span>
-            <input name="mapping" type="file" accept=".xlsx">
-          </label>
-          <label>
-            <span>Slides para atualizar</span>
-            <input name="slides_to_update" placeholder="Opcional. Ex.: 3, 5, 8-10. Vazio = todos os slides">
-            <small class="muted">A análise, a IA e a geração do PPT vão considerar somente estes slides.</small>
-          </label>
-          {% if ai_available %}
-            <input name="use_ai" type="hidden" value="1">
-            <label class="checkline">
-              <input type="checkbox" checked disabled>
-              <span>IA ativada para mapear e validar se cada datasource está no formato certo para o “Editar dados” do PPT</span>
-            </label>
-          {% else %}
-            <p class="muted">IA indisponível: configure OPENAI_API_KEY no .env para ativar o diagnóstico automático.</p>
-          {% endif %}
 
-          <button type="submit">Analisar arquivos</button>
+          <div class="form-section compact">
+            <div class="section-title">
+                <span>4</span>
+                <strong>Escopo</strong>
+            </div>
+            <label>
+              <span>Slides para atualizar</span>
+              <input name="slides_to_update" placeholder="Ex.: 3, 5, 8-10" data-slide-scope-input>
+            </label>
+            <div class="deck-inspector" data-deck-inspector hidden>
+              <div>
+                <strong data-deck-title>Arquivo PPT</strong>
+                <span data-deck-meta></span>
+              </div>
+              <label class="confirm-line" data-large-deck-confirm hidden>
+                <input name="confirm_large_deck" type="checkbox" value="1" data-large-deck-checkbox>
+                <span>Confirmo que quero analisar este escopo grande.</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit">Gerar preview</button>
+          </div>
         </form>
 
-        <aside class="side-panel project-browser">
-          <div class="side-title">
-            <h2>Continuar projeto</h2>
-            <span class="mini-pill">Squad1 a Squad5</span>
-          </div>
-          {% for squad, cards in project_cards_by_squad.items() %}
-            <details class="project-group" {% if cards %}open{% endif %}>
-              <summary>{{ squad.title() }} <span>{{ cards|length }}</span></summary>
-              {% if cards %}
-                <div class="project-card-list">
-                  {% for card in cards %}
-                    <article class="project-card">
-                      <strong>{{ card.project.name }}</strong>
-                      <span>{{ card.project.slug }}</span>
-                      {% if card.has_checkpoint %}
-                        <p>Status: {{ card.checkpoint_status or "em andamento" }}</p>
-                        <p>Slides: {{ card.selected_slides }}</p>
-                        <a class="button compact" href="{{ card.preview_url }}" data-progress-message="Carregando checkpoint do projeto...">Abrir preview salvo</a>
-                      {% else %}
-                        <p>Sem preview salvo ainda.</p>
-                      {% endif %}
-                    </article>
-                  {% endfor %}
-                </div>
-              {% else %}
-                <p class="muted">Nenhum projeto ainda.</p>
-              {% endif %}
-            </details>
-          {% endfor %}
+        <aside class="library-column">
+          <section class="workspace-card library-card">
+            <div class="workspace-head">
+              <div>
+                <p class="eyebrow">Histórico</p>
+                <h2>Projetos</h2>
+              </div>
+              <span class="mini-pill">Checkpoint</span>
+            </div>
+            {% for squad, cards in project_cards_by_squad.items() %}
+              <details class="project-group" {% if cards %}open{% endif %}>
+                <summary>{{ squad.title() }} <span>{{ cards|length }}</span></summary>
+                {% if cards %}
+                  <div class="project-card-list">
+                    {% for card in cards %}
+                      <article class="project-card">
+                        <div>
+                          <strong>{{ card.project.name }}</strong>
+                          <span>{{ card.project.slug }}</span>
+                        </div>
+                        {% if card.has_checkpoint %}
+                          <p>Status: {{ card.checkpoint_status or "em andamento" }} · Slides: {{ card.selected_slides }}</p>
+                          <a class="button compact" href="{{ card.preview_url }}" data-progress-message="Carregando checkpoint do projeto...">Abrir preview</a>
+                        {% else %}
+                          <p>Sem preview salvo.</p>
+                        {% endif %}
+                      </article>
+                    {% endfor %}
+                  </div>
+                {% else %}
+                  <p class="muted">Nenhum projeto ainda.</p>
+                {% endif %}
+              </details>
+            {% endfor %}
+          </section>
+
+          <section class="workspace-card library-card">
+            <div class="workspace-head">
+              <div>
+                <p class="eyebrow">Memoria</p>
+                <h2>Mapeamentos</h2>
+              </div>
+              <span class="mini-pill">Por squad</span>
+            </div>
+            {% for squad, templates in mapping_templates_by_squad.items() %}
+              <details class="project-group" {% if templates %}open{% endif %}>
+                <summary>{{ squad.title() }} <span>{{ templates|length }}</span></summary>
+                {% if templates %}
+                  <div class="mapping-list">
+                    {% for template in templates %}
+                      <article class="mapping-card">
+                        <strong>{{ template.name }}</strong>
+                        <span>{{ template.entry_count }} targets · {{ template.updated_at }}</span>
+                      </article>
+                    {% endfor %}
+                  </div>
+                {% else %}
+                  <p class="muted">Nenhum mapeamento salvo.</p>
+                {% endif %}
+              </details>
+            {% endfor %}
+          </section>
         </aside>
       </section>
     </main>
+
     <div id="progress-overlay" class="progress-overlay" hidden>
       <div>
         <strong>Projeto em andamento</strong>

@@ -31,7 +31,7 @@ def suggest_source_matches_with_ai(
     eligible_targets = [
         target
         for target in targets
-        if target.object_type in {"chart", "table"} and target.shape_name not in plan_ids
+        if target.object_type in {"chart", "table"} and target.target_id not in plan_ids
     ]
     if not eligible_targets or not sources:
         return []
@@ -39,15 +39,17 @@ def suggest_source_matches_with_ai(
     target_limit = max_targets if max_targets is not None else _env_int("AUTO_PPT_AI_MATCH_TARGET_LIMIT", 40)
     min_confidence = _env_float("AUTO_PPT_AI_MATCH_MIN_CONFIDENCE", 0.55)
     min_local_score = _env_float("AUTO_PPT_AI_MATCH_MIN_LOCAL_SCORE", 0.25)
-    ranked_targets = [
-        target
-        for target in eligible_targets
-        if _top_local_score(target, sources) >= min_local_score
+    scored_targets = [
+        (_top_local_score(target, sources), index, target)
+        for index, target in enumerate(eligible_targets)
     ]
-    request_targets = ranked_targets[: max(target_limit, 1)]
+    scored_targets.sort(key=lambda item: (-item[0], item[1]))
+    ranked_targets = [target for score, _index, target in scored_targets if score >= min_local_score]
+    fallback_targets = [target for score, _index, target in scored_targets if score < min_local_score]
+    request_targets = (ranked_targets + fallback_targets)[: max(target_limit, 1)]
     if not request_targets:
         return []
-    valid_targets = {target.shape_name for target in request_targets}
+    valid_targets = {target.target_id for target in request_targets}
     valid_sources = {source.file_name for source in sources}
 
     client, model = build_openai_client(root)
@@ -60,8 +62,12 @@ def suggest_source_matches_with_ai(
             "targets_sent": len(request_targets),
             "total_unmatched_targets": len(eligible_targets),
             "candidate_filtered_targets": len(ranked_targets),
+            "fallback_targets_sent": sum(1 for target in request_targets if target in fallback_targets),
             "candidates_per_target": candidates_per_target,
-            "rule": "Cada target recebe somente os melhores candidatos locais para reduzir tokens.",
+            "rule": (
+                "Cada target recebe os melhores candidatos locais. "
+                "Quando nenhum target passa no score minimo, ainda enviamos os pendentes para a IA revisar."
+            ),
         },
         "targets": [
             _ai_match_target_payload(target, sources, candidates_per_target)
@@ -145,7 +151,7 @@ def build_ai_mapping_payload(targets: list[PptTarget], sources: list[ParsedXlsxT
         "targets": [_target_payload(target) for target in targets],
         "datasources": [_source_payload(source) for source in sources],
         "expected_response": {
-            "target": "shape_name",
+            "target": "target_id",
             "object_type": "chart|table|text|shape",
             "datasource": "arquivo.xlsx",
             "orientation_xlsx": "series_rows_categories_columns",
@@ -184,6 +190,7 @@ def _target_payload(target: PptTarget) -> dict[str, Any]:
     return {
         "slide_index": target.slide_index,
         "slide_number": target.slide_number,
+        "target_id": target.target_id,
         "shape_name": target.shape_name,
         "shape_id": target.shape_id,
         "object_type": target.object_type,
@@ -244,7 +251,7 @@ def _top_local_score(target: PptTarget, sources: list[ParsedXlsxTable]) -> float
 
 def _target_payload_compact(target: PptTarget) -> dict[str, Any]:
     return {
-        "target": target.shape_name,
+        "target": target.target_id,
         "slide": target.slide_number,
         "object_type": target.object_type,
         "nearby_text": _short(target.nearby_text, 500),

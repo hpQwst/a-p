@@ -116,7 +116,7 @@ def apply_ai_source_matches_to_analysis(
     if not normalized_matches:
         return analysis
 
-    targets_by_id = {target.shape_name: target for target in analysis.targets}
+    targets_by_id = {target.target_id: target for target in analysis.targets}
     sources_by_file = {source.file_name: source for source in analysis.sources}
     plans_by_id = {plan.target_id: plan for plan in analysis.plans}
 
@@ -138,8 +138,8 @@ def apply_ai_source_matches_to_analysis(
 
     ordered_ids = [plan.target_id for plan in analysis.plans]
     for target in analysis.targets:
-        if target.shape_name in plans_by_id and target.shape_name not in ordered_ids:
-            ordered_ids.append(target.shape_name)
+        if target.target_id in plans_by_id and target.target_id not in ordered_ids:
+            ordered_ids.append(target.target_id)
     plans = [plans_by_id[target_id] for target_id in ordered_ids]
     return AnalysisResult(
         plans=plans,
@@ -162,7 +162,7 @@ def apply_saved_source_matches_to_analysis(
     if not normalized_matches:
         return analysis
 
-    targets_by_id = {target.shape_name: target for target in analysis.targets}
+    targets_by_id = {target.target_id: target for target in analysis.targets}
     sources_by_name = _sources_by_match_name(analysis.sources)
     plans_by_id = {plan.target_id: plan for plan in analysis.plans}
 
@@ -182,8 +182,8 @@ def apply_saved_source_matches_to_analysis(
 
     ordered_ids = [plan.target_id for plan in analysis.plans]
     for target in analysis.targets:
-        if target.shape_name in plans_by_id and target.shape_name not in ordered_ids:
-            ordered_ids.append(target.shape_name)
+        if target.target_id in plans_by_id and target.target_id not in ordered_ids:
+            ordered_ids.append(target.target_id)
     plans = [plans_by_id[target_id] for target_id in ordered_ids]
     return AnalysisResult(
         plans=plans,
@@ -219,7 +219,7 @@ def _select_slides(
     if not selected:
         return targets, plans
     chosen_targets = [target for target in targets if target.slide_number in selected]
-    allowed_targets = {target.shape_name for target in chosen_targets}
+    allowed_targets = {target.target_id for target in chosen_targets}
     chosen_plans = [plan for plan in plans if plan.target_id in allowed_targets]
     return chosen_targets, chosen_plans
 
@@ -233,7 +233,7 @@ def _apply_manual_sources(
     if not manual_sources:
         return plans, sources
 
-    targets_by_id = {target.shape_name: target for target in targets}
+    targets_by_id = {target.target_id: target for target in targets}
     plans_by_id = {plan.target_id: plan for plan in plans}
     source_output = list(sources)
 
@@ -338,7 +338,7 @@ def _analysis_warnings(
 ) -> list[str]:
     warnings: list[str] = []
     updatable_targets = [target for target in targets if target.object_type in {"chart", "table"}]
-    target_counts = Counter(target.shape_name for target in updatable_targets)
+    target_counts = Counter(target.target_id for target in updatable_targets)
     duplicate_targets = sorted(target_id for target_id, count in target_counts.items() if count > 1)
     if duplicate_targets:
         warnings.append(
@@ -357,7 +357,7 @@ def _analysis_warnings(
         )
 
     mapped_ids = {plan.target_id for plan in plans}
-    missing_count = sum(1 for target in updatable_targets if target.shape_name not in mapped_ids)
+    missing_count = sum(1 for target in updatable_targets if target.target_id not in mapped_ids)
     if updatable_targets and not plans:
         warnings.append(
             "Nenhum match automatico foi aceito. Ative a IA ou use Trocar XLSX deste target com range manual."

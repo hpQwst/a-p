@@ -86,9 +86,12 @@ def _write_matrix_with_excel(worksheet: Any, matrix: list[list[Any]]) -> None:
         for row in range(row_count)
     ]
 
-    worksheet.UsedRange.ClearContents()
     target_range = worksheet.Range(worksheet.Cells(1, 1), worksheet.Cells(row_count, col_count))
-    target_range.Value = data
 
     if worksheet.ListObjects.Count:
-        worksheet.ListObjects(1).Resize(target_range)
+        table = worksheet.ListObjects(1)
+        table.Resize(target_range)
+    else:
+        target_range.ClearContents()
+
+    target_range.Value = data

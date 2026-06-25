@@ -2,16 +2,19 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 import json
 import os
 import re
 import shutil
 import time
+from zipfile import ZipFile
+import xml.etree.ElementTree as ET
 import uuid
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -50,7 +53,12 @@ from worker.processor import (
 APP_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_ROOT.parent
 RUNTIME_ROOT = Path(os.getenv("AUTO_PPT_RUNTIME_ROOT", PROJECT_ROOT / "workspace_data" / "web_jobs")).resolve()
-RENDER_CACHE_VERSION = 4
+RENDER_CACHE_VERSION = 5
+PPT_XML_NS = {
+    "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+}
 
 app = FastAPI(title="QWST Auto PPT")
 app.mount("/static", StaticFiles(directory=APP_ROOT / "static"), name="static")
@@ -69,7 +77,25 @@ async def index(request: Request) -> HTMLResponse:
             "project_cards_by_squad": _project_cards_by_squad(),
             "mapping_templates_by_squad": _mapping_templates_by_squad(),
             "ai_available": ai_configured(PROJECT_ROOT),
+            "large_deck_slide_threshold": _large_deck_slide_threshold(),
         },
+    )
+
+
+@app.post("/ppt-summary")
+async def ppt_summary(pptx: UploadFile = File(...)) -> JSONResponse:
+    try:
+        _validate_upload(pptx, ".pptx", "Envie um arquivo PPTX.")
+        summary = _inspect_ppt_upload(await pptx.read())
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    threshold = _large_deck_slide_threshold()
+    return JSONResponse(
+        {
+            **summary,
+            "large_slide_threshold": threshold,
+            "requires_confirmation": summary["slide_count"] > threshold,
+        }
     )
 
 
@@ -85,6 +111,7 @@ async def preview(
     mapping_template_ref: str = Form(""),
     use_ai: str = Form(""),
     slides_to_update: str = Form(""),
+    confirm_large_deck: str = Form(""),
 ) -> HTMLResponse:
     try:
         project = _resolve_project(project_ref, squad, project_name)
@@ -97,6 +124,11 @@ async def preview(
         _validate_upload(datasources, ".zip", "Envie um ZIP com os XLSX.")
         if mapping and mapping.filename:
             _validate_upload(mapping, ".xlsx", "A planilha de mapeamento precisa ser XLSX.")
+        ppt_summary = _inspect_ppt_upload(pptx_bytes)
+        _validate_slide_scope(ppt_summary, selected_slides)
+        requires_large_confirmation = _large_scope_requires_confirmation(ppt_summary, selected_slides)
+        if requires_large_confirmation and not bool(confirm_large_deck):
+            raise ValueError(_large_deck_confirmation_message(ppt_summary, selected_slides))
     except Exception as exc:
         return _error_response(request, str(exc), status_code=400)
 
@@ -126,8 +158,11 @@ async def preview(
                 "raw": slides_to_update.strip(),
                 "numbers": selected_slides,
             },
+            "ppt_summary": ppt_summary,
+            "large_deck_slide_threshold": _large_deck_slide_threshold(),
+            "large_deck_confirmed": bool(confirm_large_deck),
             "mapping_template": _mapping_template_metadata(mapping_template),
-            "use_ai": (bool(use_ai) or ai_configured(PROJECT_ROOT)) and not bool(mapping_template),
+            "use_ai": bool(use_ai) and not bool(mapping_template),
             "ignore_mapping_candidates": False,
         },
     )
@@ -165,7 +200,7 @@ async def update_job_slides(
         if not added_slides:
             raise ValueError("Informe ao menos um slide. Ex.: 2 ou 2, 5-7.")
         metadata = _load_job_metadata(job_dir)
-        metadata["use_ai"] = ai_configured(PROJECT_ROOT) or bool(metadata.get("use_ai"))
+        metadata["use_ai"] = False
         current = set(_selected_slides_for_job(job_dir))
         if current:
             merged = sorted(current | set(added_slides))
@@ -223,14 +258,38 @@ async def review_job_with_ai(request: Request, job_id: str) -> HTMLResponse:
         metadata = _load_job_metadata(job_dir)
         if not ai_configured(PROJECT_ROOT):
             raise ValueError("IA indisponivel: configure OPENAI_API_KEY no .env.")
-        metadata["use_ai"] = True
         metadata["ignore_mapping_candidates"] = True
+        metadata["use_ai"] = False
         _save_job_metadata(job_dir, metadata)
         _clear_render_cache(job_dir)
         _save_project_checkpoint(job_dir, status="in_progress")
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc))
-    return _render_preview(request, job_id, notice="IA revisando o preview deste projeto.", allow_ai=True)
+    return _render_preview(
+        request,
+        job_id,
+        notice="A revisao com IA agora e feita por target. Abra um card e clique em Revisar este target com IA.",
+        allow_ai=False,
+    )
+
+
+@app.post("/jobs/{job_id}/targets/{target_id}/review-ai", response_class=HTMLResponse)
+async def review_target_with_ai(request: Request, job_id: str, target_id: str) -> HTMLResponse:
+    try:
+        job_dir = _job_dir(job_id)
+        _validate_target_id(target_id)
+        if not ai_configured(PROJECT_ROOT):
+            raise ValueError("IA indisponivel: configure OPENAI_API_KEY no .env.")
+        metadata = _load_job_metadata(job_dir)
+        metadata["use_ai"] = False
+        metadata["ignore_mapping_candidates"] = True
+        _save_job_metadata(job_dir, metadata)
+        _clear_render_cache(job_dir)
+        notice = _run_target_ai_review(job_dir, target_id)
+        _save_project_checkpoint(job_dir, status="in_progress")
+    except Exception as exc:
+        return _render_preview(request, job_id, error=str(exc), allow_ai=False)
+    return _render_preview(request, job_id, notice=notice, allow_ai=False)
 
 
 @app.post("/jobs/{job_id}/targets/{target_id}/override", response_class=HTMLResponse)
@@ -259,10 +318,17 @@ async def override_target_datasource(
         elif range_path.exists():
             range_path.unlink()
         metadata = _load_job_metadata(job_dir)
-        metadata["use_ai"] = ai_configured(PROJECT_ROOT) or bool(metadata.get("use_ai"))
+        metadata["use_ai"] = False
+        metadata["ignore_mapping_candidates"] = True
         _save_job_metadata(job_dir, metadata)
         _clear_ai_cache(job_dir, target_id=target_id)
         _clear_render_cache(job_dir)
+        ai_notice = ""
+        if ai_configured(PROJECT_ROOT):
+            try:
+                ai_notice = " " + _run_target_ai_review(job_dir, target_id)
+            except Exception as ai_exc:
+                ai_notice = f" IA nao conseguiu revisar este target agora: {ai_exc}"
         _save_project_checkpoint(job_dir, status="in_progress")
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc))
@@ -270,10 +336,8 @@ async def override_target_datasource(
     return _render_preview(
         request,
         job_id,
-        notice=f"Datasource {filename}{range_notice} aplicado ao target {target_id}.",
-        allow_ai=True,
-        allow_ai_source_matches=False,
-        ai_diagnostic_target_ids={target_id},
+        notice=f"Datasource {filename}{range_notice} aplicado ao target {target_id}.{ai_notice}",
+        allow_ai=False,
     )
 
 
@@ -344,34 +408,24 @@ def _render_preview(
     metadata = _load_job_metadata(job_dir)
     selected_slides = _selected_slides_for_job(job_dir)
     try:
-        analysis = analyze_files(
-            (job_dir / "input.pptx").read_bytes(),
-            (job_dir / "datasources.zip").read_bytes(),
-            manual_sources=_manual_sources_for_job(job_dir),
-            slide_numbers=selected_slides,
-        )
+        analysis, mapping_status, mapping_candidates, pause_for_mapping = _analysis_for_job(job_dir)
     except Exception as exc:
         return _error_response(request, f"Nao consegui analisar os arquivos: {exc}", status_code=400)
 
-    mapping_candidates = []
-    selected_mapping_template = _selected_mapping_template(metadata)
-    if selected_mapping_template:
-        analysis, mapping_status = _apply_mapping_template_to_analysis(
+    target_ai_requested = ai_diagnostic_target_ids is not None
+    effective_allow_ai = allow_ai and target_ai_requested and ai_configured(PROJECT_ROOT) and not pause_for_mapping
+    if effective_allow_ai:
+        analysis, _mapping_status, _mapping_candidates, _pause_for_mapping = _analysis_for_job(
+            job_dir,
+            apply_cached_diagnostics=False,
+        )
+        source_match_ai = effective_allow_ai if allow_ai_source_matches is None else allow_ai_source_matches
+        ai_matches, ai_match_status = _ai_source_matches_for_job(
             job_dir,
             analysis,
-            skip_targets=set(_manual_source_names(job_dir)),
+            allow_ai=source_match_ai,
+            target_ids=ai_diagnostic_target_ids,
         )
-    else:
-        mapping_candidates = _mapping_template_candidates(metadata["project"]["squad"], analysis.targets)
-        mapping_status = _mapping_status_without_selection(mapping_candidates)
-
-    pause_for_mapping = bool(mapping_candidates) and not bool(metadata.get("ignore_mapping_candidates"))
-    ai_enabled = bool(metadata.get("use_ai")) and ai_configured(PROJECT_ROOT)
-    effective_allow_ai = allow_ai and ai_enabled and not pause_for_mapping
-
-    if effective_allow_ai:
-        source_match_ai = effective_allow_ai if allow_ai_source_matches is None else allow_ai_source_matches
-        ai_matches, ai_match_status = _ai_source_matches_for_job(job_dir, analysis, allow_ai=source_match_ai)
         analysis = apply_ai_source_matches_to_analysis(analysis, ai_matches)
         ai_diagnostics, ai_diagnostic_status = _ai_diagnostics_for_job(
             job_dir,
@@ -400,11 +454,13 @@ def _render_preview(
         "source_count": analysis.source_count,
         "mapped_count": len(analysis.plans),
         "cards_by_slide": dict(sorted(cards_by_slide.items())),
+        "slide_summaries": _slide_summaries(cards_by_slide),
+        "review_summary": _review_summary(cards_by_slide),
         "mapping_status": mapping_status,
         "mapping_candidates": mapping_candidates,
         "ai_status": ai_status,
         "ai_available": ai_configured(PROJECT_ROOT),
-        "ai_enabled": effective_allow_ai,
+        "ai_enabled": False,
         "analysis_warnings": analysis.warnings,
         "slide_selection_label": _slide_selection_label(selected_slides),
         "notice": notice,
@@ -414,6 +470,116 @@ def _render_preview(
     _save_render_cache(job_dir, context)
     _save_project_checkpoint(job_dir, status="in_progress")
     return templates.TemplateResponse(request, "preview.html", context)
+
+
+def _analysis_for_job(
+    job_dir: Path,
+    apply_cached_source_matches: bool = True,
+    apply_cached_diagnostics: bool = True,
+) -> tuple[AnalysisResult, dict, list[dict], bool]:
+    metadata = _load_job_metadata(job_dir)
+    selected_slides = _selected_slides_for_job(job_dir)
+    analysis = analyze_files(
+        (job_dir / "input.pptx").read_bytes(),
+        (job_dir / "datasources.zip").read_bytes(),
+        manual_sources=_manual_sources_for_job(job_dir),
+        slide_numbers=selected_slides,
+    )
+    mapping_candidates = []
+    selected_mapping_template = _selected_mapping_template(metadata)
+    if selected_mapping_template:
+        analysis, mapping_status = _apply_mapping_template_to_analysis(
+            job_dir,
+            analysis,
+            skip_targets=set(_manual_source_names(job_dir)),
+        )
+    else:
+        mapping_candidates = _mapping_template_candidates(metadata["project"]["squad"], analysis.targets)
+        mapping_status = _mapping_status_without_selection(mapping_candidates)
+    pause_for_mapping = bool(mapping_candidates) and not bool(metadata.get("ignore_mapping_candidates"))
+
+    if apply_cached_source_matches:
+        analysis = apply_ai_source_matches_to_analysis(analysis, _load_ai_source_matches(job_dir))
+    if apply_cached_diagnostics:
+        analysis = apply_ai_recommendations_to_analysis(analysis, _load_ai_diagnostics(job_dir))
+    return analysis, mapping_status, mapping_candidates, pause_for_mapping
+
+
+def _run_target_ai_review(job_dir: Path, target_id: str) -> str:
+    analysis, _mapping_status, _mapping_candidates, _pause_for_mapping = _analysis_for_job(
+        job_dir,
+        apply_cached_source_matches=True,
+        apply_cached_diagnostics=False,
+    )
+    targets_by_id = {target.target_id: target for target in analysis.targets}
+    target = targets_by_id.get(target_id)
+    if target is None or target.object_type not in {"chart", "table"}:
+        raise ValueError("Target nao encontrado no escopo atual.")
+
+    messages: list[str] = []
+    plan_by_id = {plan.target_id: plan for plan in analysis.plans}
+    if target_id not in plan_by_id:
+        _clear_ai_cache(job_dir, target_id=target_id)
+        analysis, _mapping_status, _mapping_candidates, _pause_for_mapping = _analysis_for_job(
+            job_dir,
+            apply_cached_source_matches=True,
+            apply_cached_diagnostics=False,
+        )
+        ai_matches, source_status = _ai_source_matches_for_job(
+            job_dir,
+            analysis,
+            allow_ai=True,
+            target_ids={target_id},
+        )
+        analysis = apply_ai_source_matches_to_analysis(analysis, ai_matches)
+        messages.append(source_status.get("message", ""))
+    else:
+        _clear_ai_cache(job_dir, target_id=target_id, cache_names=("ai_diagnostics.json",))
+
+    plan_by_id = {plan.target_id: plan for plan in analysis.plans}
+    if target_id in plan_by_id:
+        _clear_ai_cache(job_dir, target_id=target_id, cache_names=("ai_diagnostics.json",))
+        _ai_diagnostics, diagnostic_status = _ai_diagnostics_for_job(
+            job_dir,
+            analysis,
+            allow_ai=True,
+            target_ids={target_id},
+        )
+        messages.append(diagnostic_status.get("message", ""))
+    else:
+        messages.append("IA nao encontrou um datasource confiavel para este target.")
+
+    _clear_render_cache(job_dir)
+    clean_messages = [message for index, message in enumerate(messages) if message and message not in messages[:index]]
+    return " ".join(clean_messages) or "Revisao IA concluida para este target."
+
+
+def _review_summary(cards_by_slide: dict[int, list[dict]]) -> dict:
+    cards = [item for items in cards_by_slide.values() for item in items]
+    return {
+        "slides": len(cards_by_slide),
+        "targets": len(cards),
+        "mapped": sum(1 for item in cards if item["has_plan"]),
+        "unmapped": sum(1 for item in cards if not item["has_plan"]),
+        "manual": sum(1 for item in cards if item["manual_file"]),
+        "ai": sum(1 for item in cards if item["ai"]),
+    }
+
+
+def _slide_summaries(cards_by_slide: dict[int, list[dict]]) -> list[dict]:
+    summaries = []
+    for slide, items in sorted(cards_by_slide.items()):
+        summaries.append(
+            {
+                "slide": slide,
+                "target_count": len(items),
+                "mapped_count": sum(1 for item in items if item["has_plan"]),
+                "unmapped_count": sum(1 for item in items if not item["has_plan"]),
+                "manual_count": sum(1 for item in items if item["manual_file"]),
+                "ai_count": sum(1 for item in items if item["ai"]),
+            }
+        )
+    return summaries
 
 
 def _resolve_mapping_template(project, mapping_template_ref: str) -> dict:
@@ -463,7 +629,7 @@ def _apply_mapping_template_to_analysis(
 
     skip_targets = skip_targets or set()
     entries = template.get("entries") or {}
-    target_ids = {target.shape_name for target in analysis.targets if target.object_type in {"chart", "table"}}
+    target_ids = {target.target_id for target in analysis.targets if target.object_type in {"chart", "table"}}
     present_entries = {
         target_id: entry
         for target_id, entry in entries.items()
@@ -503,7 +669,7 @@ def _apply_mapping_template_to_analysis(
 
 
 def _mapping_template_candidates(squad: str, targets: list) -> list[dict]:
-    target_ids = {target.shape_name for target in targets if target.object_type in {"chart", "table"}}
+    target_ids = {target.target_id for target in targets if target.object_type in {"chart", "table"}}
     if not target_ids:
         return []
     candidates = []
@@ -566,6 +732,13 @@ def _load_ai_diagnostics(job_dir: Path) -> dict:
     return json.loads(cache_path.read_text(encoding="utf-8"))
 
 
+def _load_ai_source_matches(job_dir: Path) -> dict:
+    cache_path = job_dir / "ai_source_matches.json"
+    if not cache_path.exists():
+        return {}
+    return json.loads(cache_path.read_text(encoding="utf-8"))
+
+
 def _ai_waiting_status(pause_for_mapping: bool) -> tuple[dict[str, str], dict[str, str]]:
     if not ai_configured(PROJECT_ROOT):
         status = {"state": "disabled", "message": "IA indisponivel: configure OPENAI_API_KEY no .env."}
@@ -573,10 +746,10 @@ def _ai_waiting_status(pause_for_mapping: bool) -> tuple[dict[str, str], dict[st
     if pause_for_mapping:
         status = {
             "state": "disabled",
-            "message": "IA aguardando: selecione o mapeamento salvo ou clique em Revisar com IA.",
+            "message": "IA aguardando: selecione o mapeamento salvo ou revise um target especifico com IA.",
         }
         return status, status
-    status = {"state": "disabled", "message": "IA aguardando comando Revisar com IA."}
+    status = {"state": "disabled", "message": "IA disponivel por target. Abra um card e clique em Revisar este target com IA."}
     return status, status
 
 
@@ -590,26 +763,45 @@ def _cards_by_slide(
     plan_by_target = {plan.target_id: plan for plan in analysis.plans}
     cards: dict[int, list[dict]] = defaultdict(list)
     for target in analysis.targets:
-        item = preview_by_target.get(target.shape_name)
-        plan = plan_by_target.get(target.shape_name)
+        item = preview_by_target.get(target.target_id)
+        plan = plan_by_target.get(target.target_id)
+        datasource = item.datasource if item else ""
+        status = "mapped" if item else "unmapped"
+        if manual_names.get(target.target_id):
+            status = "manual"
+        elif ai_diagnostics.get(target.target_id):
+            status = "ai"
         cards[target.slide_number].append(
             {
                 "slide": target.slide_number,
-                "target": target.shape_name,
+                "target": target.target_id,
+                "shape_name": target.shape_name,
                 "object_type": target.object_type,
                 "nearby_text": target.nearby_text,
                 "has_plan": item is not None,
-                "datasource": item.datasource if item else "",
+                "datasource": datasource,
                 "action": item.action if item else "aguardando_datasource",
                 "reason": item.reason if item else "Nenhum datasource compativel foi escolhido automaticamente.",
                 "confidence": item.confidence if item else None,
                 "headers": item.headers if item else [],
                 "rows": item.rows if item else [],
-                "manual_file": manual_names.get(target.shape_name, ""),
-                "manual_range": manual_ranges.get(target.shape_name, ""),
+                "manual_file": manual_names.get(target.target_id, ""),
+                "manual_range": manual_ranges.get(target.target_id, ""),
                 "ppt_contract": _ppt_contract_for_target(target),
                 "source_detected": _source_detected_for_plan(plan) if plan else None,
-                "ai": ai_diagnostics.get(target.shape_name),
+                "ai": ai_diagnostics.get(target.target_id),
+                "status": status,
+                "search_text": " ".join(
+                    [
+                        str(target.slide_number),
+                        target.target_id,
+                        target.shape_name,
+                        target.object_type,
+                        datasource,
+                        target.nearby_text,
+                        item.reason if item else "",
+                    ]
+                ).lower(),
             }
         )
     return cards
@@ -642,11 +834,14 @@ def _ai_diagnostics_for_job(
             "state": "cached" if payload else "warn",
             "message": f"Preview usou apenas dados salvos; {len(missing_plans)} target(s) sem diagnostico cached nao foram enviados para IA.",
         }
+    batch_limit = _ai_diagnostic_batch_limit()
+    plans_to_send = missing_plans[:batch_limit]
+    remaining_count = max(len(missing_plans) - len(plans_to_send), 0)
     try:
         sent_at = _now_iso()
         started = time.perf_counter()
-        payload_summary = _diagnostic_payload_summary(missing_plans)
-        diagnostics = suggest_transform_diagnostics(missing_plans, root=PROJECT_ROOT)
+        payload_summary = _diagnostic_payload_summary(plans_to_send)
+        diagnostics = suggest_transform_diagnostics(plans_to_send, root=PROJECT_ROOT)
         duration_ms = round((time.perf_counter() - started) * 1000)
         payload.update(
             {
@@ -662,7 +857,7 @@ def _ai_diagnostics_for_job(
                 for item in diagnostics
             }
         )
-        for plan in missing_plans:
+        for plan in plans_to_send:
             payload.setdefault(
                 plan.target_id,
                 {
@@ -684,12 +879,19 @@ def _ai_diagnostics_for_job(
                 "sent_at": sent_at,
                 "returned_at": _now_iso(),
                 "duration_ms": duration_ms,
-                "target_count": len(missing_plans),
+                "target_count": len(plans_to_send),
                 "returned_count": len(diagnostics),
+                "remaining_count": remaining_count,
                 "payload_summary": payload_summary,
             },
         )
-        return payload, {"state": "ok", "message": f"Diagnostico IA concluiu {len(diagnostics)} target(s) novo(s)."}
+        message = (
+            f"Diagnostico IA concluiu {len(diagnostics)} target(s) novo(s) "
+            f"neste lote de {len(plans_to_send)}."
+        )
+        if remaining_count:
+            message += f" Restam {remaining_count} target(s); clique em Revisar com IA para continuar."
+        return payload, {"state": "ok", "message": message}
     except Exception as exc:
         _append_ai_log(
             job_dir,
@@ -699,9 +901,10 @@ def _ai_diagnostics_for_job(
                 "sent_at": sent_at if "sent_at" in locals() else _now_iso(),
                 "returned_at": _now_iso(),
                 "duration_ms": round((time.perf_counter() - started) * 1000) if "started" in locals() else 0,
-                "target_count": len(missing_plans),
+                "target_count": len(plans_to_send),
                 "error": format_ai_error(exc),
-                "payload_summary": _diagnostic_payload_summary(missing_plans),
+                "remaining_count": remaining_count,
+                "payload_summary": _diagnostic_payload_summary(plans_to_send),
             },
         )
         return payload, {"state": "warn", "message": f"IA indisponivel nesta analise: {format_ai_error(exc)}"}
@@ -711,6 +914,7 @@ def _ai_source_matches_for_job(
     job_dir: Path,
     analysis: AnalysisResult,
     allow_ai: bool = True,
+    target_ids: set[str] | None = None,
 ) -> tuple[dict[str, dict], dict[str, str]]:
     if not ai_configured(PROJECT_ROOT):
         return {}, {"state": "disabled", "message": "IA indisponivel: configure OPENAI_API_KEY no .env."}
@@ -718,8 +922,10 @@ def _ai_source_matches_for_job(
     unmatched = [
         target
         for target in analysis.targets
-        if target.object_type in {"chart", "table"} and target.shape_name not in planned_targets
+        if target.object_type in {"chart", "table"} and target.target_id not in planned_targets
     ]
+    if target_ids is not None:
+        unmatched = [target for target in unmatched if target.target_id in target_ids]
     if not unmatched:
         return {}, {"state": "ok", "message": "IA nao precisou criar novos matches de datasource."}
 
@@ -727,7 +933,7 @@ def _ai_source_matches_for_job(
     payload: dict[str, dict] = {}
     if cache_path.exists():
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
-    missing_targets = [target for target in unmatched if target.shape_name not in payload]
+    missing_targets = [target for target in unmatched if target.target_id not in payload]
     if not missing_targets:
         return payload, {"state": "cached", "message": f"Matches IA carregados do cache ({len(payload)} sugestao/oes)."}
     if not allow_ai:
@@ -735,20 +941,23 @@ def _ai_source_matches_for_job(
             "state": "cached" if payload else "warn",
             "message": f"Download usou cache de IA; {len(missing_targets)} target(s) sem match cached nao foram enviados para IA.",
         }
+    batch_limit = _ai_source_match_batch_limit()
+    targets_to_send = missing_targets[:batch_limit]
+    remaining_count = max(len(missing_targets) - len(targets_to_send), 0)
     try:
         sent_at = _now_iso()
         started = time.perf_counter()
-        payload_summary = _match_payload_summary(missing_targets, analysis.sources)
+        payload_summary = _match_payload_summary(targets_to_send, analysis.sources)
         suggestions = suggest_source_matches_with_ai(
-            missing_targets,
+            targets_to_send,
             analysis.sources,
             existing_plan_ids=planned_targets,
             root=PROJECT_ROOT,
         )
         duration_ms = round((time.perf_counter() - started) * 1000)
-        for target in missing_targets:
+        for target in targets_to_send:
             payload.setdefault(
-                target.shape_name,
+                target.target_id,
                 {
                     "datasource": "",
                     "confidence": 0,
@@ -776,16 +985,24 @@ def _ai_source_matches_for_job(
                 "sent_at": sent_at,
                 "returned_at": _now_iso(),
                 "duration_ms": duration_ms,
-                "target_count": len(missing_targets),
+                "target_count": len(targets_to_send),
                 "returned_count": len(suggestions),
+                "remaining_count": remaining_count,
                 "payload_summary": payload_summary,
             },
         )
+        suffix = ""
+        if remaining_count:
+            suffix = f" Restam {remaining_count} target(s); clique em Revisar com IA para continuar."
         if suggestions:
-            return payload, {"state": "ok", "message": f"IA criou {len(suggestions)} match(es) novo(s) de datasource."}
-        if payload:
-            return payload, {"state": "cached", "message": f"Matches IA carregados do cache ({len(payload)} sugestao/oes)."}
-        return {}, {"state": "warn", "message": "IA nao encontrou novos matches confiaveis de datasource."}
+            return payload, {
+                "state": "ok",
+                "message": f"IA criou {len(suggestions)} match(es) novo(s) de datasource neste lote de {len(targets_to_send)}.{suffix}",
+            }
+        return payload, {
+            "state": "warn",
+            "message": f"IA revisou {len(targets_to_send)} target(s), mas nao encontrou novos matches confiaveis de datasource.{suffix}",
+        }
     except Exception as exc:
         _append_ai_log(
             job_dir,
@@ -795,9 +1012,10 @@ def _ai_source_matches_for_job(
                 "sent_at": sent_at if "sent_at" in locals() else _now_iso(),
                 "returned_at": _now_iso(),
                 "duration_ms": round((time.perf_counter() - started) * 1000) if "started" in locals() else 0,
-                "target_count": len(missing_targets),
+                "target_count": len(targets_to_send),
                 "error": format_ai_error(exc),
-                "payload_summary": _match_payload_summary(missing_targets, analysis.sources),
+                "remaining_count": remaining_count,
+                "payload_summary": _match_payload_summary(targets_to_send, analysis.sources),
             },
         )
         return payload, {"state": "warn", "message": f"IA indisponivel para match de datasource: {format_ai_error(exc)}"}
@@ -869,7 +1087,7 @@ def _match_payload_summary(targets: list, sources: list) -> dict:
     return {
         "targets": [
             {
-                "target": target.shape_name,
+                "target": target.target_id,
                 "slide": target.slide_number,
                 "object_type": target.object_type,
                 "nearby_text": _short_text(target.nearby_text, 240),
@@ -930,8 +1148,12 @@ def _clear_render_cache(job_dir: Path) -> None:
         cache_path.unlink()
 
 
-def _clear_ai_cache(job_dir: Path, target_id: str | None = None) -> None:
-    for cache_name in ("ai_diagnostics.json", "ai_source_matches.json"):
+def _clear_ai_cache(
+    job_dir: Path,
+    target_id: str | None = None,
+    cache_names: tuple[str, ...] = ("ai_diagnostics.json", "ai_source_matches.json"),
+) -> None:
+    for cache_name in cache_names:
         cache_path = job_dir / cache_name
         if not cache_path.exists():
             continue
@@ -1062,7 +1284,7 @@ def _restore_project_checkpoint(project) -> str:
 
     metadata.setdefault("project", {"squad": project.squad, "slug": project.slug, "name": project.name})
     metadata["job_id"] = job_id
-    metadata["use_ai"] = ai_configured(PROJECT_ROOT) or bool(metadata.get("use_ai"))
+    metadata["use_ai"] = False
     _save_job_metadata(job_dir, metadata)
 
     overrides_root = job_dir / "overrides"
@@ -1251,6 +1473,61 @@ def _slide_selection_label(selected_slides: list[int]) -> str:
     return ", ".join(str(slide) for slide in selected_slides)
 
 
+def _inspect_ppt_upload(pptx_bytes: bytes) -> dict:
+    with ZipFile(BytesIO(pptx_bytes)) as zf:
+        slide_paths = sorted(
+            [name for name in zf.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)],
+            key=lambda name: int(re.search(r"slide(\d+)\.xml", name).group(1)),
+        )
+        chart_count = 0
+        table_count = 0
+        for slide_path in slide_paths:
+            root = ET.fromstring(zf.read(slide_path))
+            for frame in root.findall(".//p:graphicFrame", PPT_XML_NS):
+                if frame.find(".//c:chart", PPT_XML_NS) is not None:
+                    chart_count += 1
+                elif frame.find(".//a:tbl", PPT_XML_NS) is not None:
+                    table_count += 1
+    return {
+        "slide_count": len(slide_paths),
+        "chart_count": chart_count,
+        "table_count": table_count,
+        "target_count": chart_count + table_count,
+    }
+
+
+def _validate_slide_scope(ppt_summary: dict, selected_slides: list[int]) -> None:
+    slide_count = int(ppt_summary.get("slide_count") or 0)
+    if not selected_slides or not slide_count:
+        return
+    invalid = [slide for slide in selected_slides if slide > slide_count]
+    if invalid:
+        raise ValueError(
+            f"O PPT tem {slide_count} slide(s), mas o escopo inclui slide(s) fora do arquivo: "
+            f"{', '.join(str(slide) for slide in invalid[:8])}."
+        )
+
+
+def _large_scope_requires_confirmation(ppt_summary: dict, selected_slides: list[int]) -> bool:
+    threshold = _large_deck_slide_threshold()
+    selected_count = len(selected_slides)
+    if selected_count:
+        return selected_count > threshold
+    return int(ppt_summary.get("slide_count") or 0) > threshold
+
+
+def _large_deck_confirmation_message(ppt_summary: dict, selected_slides: list[int]) -> str:
+    threshold = _large_deck_slide_threshold()
+    slide_count = int(ppt_summary.get("slide_count") or 0)
+    target_count = int(ppt_summary.get("target_count") or 0)
+    scope_count = len(selected_slides) or slide_count
+    return (
+        f"Este escopo tem {scope_count} slide(s) e o limite de confirmacao e {threshold}. "
+        f"O PPT completo tem {slide_count} slide(s) e {target_count} target(s). "
+        "Selecione um intervalo menor ou confirme que deseja analisar todos estes slides."
+    )
+
+
 def _job_dir(job_id: str, create: bool = False) -> Path:
     if not re.fullmatch(r"[a-f0-9]{32}", job_id):
         raise HTTPException(status_code=404, detail="Job nao encontrado.")
@@ -1288,6 +1565,29 @@ def _save_job_metadata(job_dir: Path, payload: dict) -> None:
 
 def _load_job_metadata(job_dir: Path) -> dict:
     return json.loads((job_dir / "metadata.json").read_text(encoding="utf-8"))
+
+
+def _large_deck_slide_threshold() -> int:
+    return max(_env_int("AUTO_PPT_LARGE_DECK_SLIDE_THRESHOLD", 10), 1)
+
+
+def _ai_source_match_batch_limit() -> int:
+    default_limit = _env_int("AUTO_PPT_AI_MATCH_TARGET_LIMIT", 10)
+    return max(_env_int("AUTO_PPT_AI_SOURCE_MATCH_BATCH_TARGETS", default_limit), 1)
+
+
+def _ai_diagnostic_batch_limit() -> int:
+    return max(_env_int("AUTO_PPT_AI_DIAGNOSTIC_BATCH_TARGETS", 10), 1)
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 def _projects_by_squad() -> dict[str, list]:
@@ -1354,6 +1654,7 @@ def _error_response(request: Request, message: str, status_code: int = 400) -> H
             "project_cards_by_squad": _project_cards_by_squad(),
             "mapping_templates_by_squad": _mapping_templates_by_squad(),
             "ai_available": ai_configured(PROJECT_ROOT),
+            "large_deck_slide_threshold": _large_deck_slide_threshold(),
         },
         status_code=status_code,
     )

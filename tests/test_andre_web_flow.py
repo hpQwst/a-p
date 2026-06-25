@@ -102,7 +102,12 @@ class AndreWebFlowTests(unittest.TestCase):
             )
         response = client.post(
             "/preview",
-            data={"project_ref": "", "squad": "squad1", "project_name": "Andre regressao"},
+            data={
+                "project_ref": "",
+                "squad": "squad1",
+                "project_name": "Andre regressao",
+                "confirm_large_deck": "1",
+            },
             files=files,
         )
         self.assertEqual(response.status_code, 200)

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from io import BytesIO
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable
 from zipfile import ZipFile
+import os
 import posixpath
 import re
 import unicodedata
@@ -74,10 +75,11 @@ class PptTarget:
     expected_values: list[list[Any]] = field(default_factory=list)
     table_cells: list[list[str]] = field(default_factory=list)
     text: str = ""
+    target_key: str = ""
 
     @property
     def target_id(self) -> str:
-        return self.shape_name
+        return self.target_key or self.shape_name
 
 
 @dataclass(frozen=True)
@@ -100,7 +102,11 @@ def read_bytes(file: InputFile) -> bytes:
     return data if isinstance(data, bytes) else bytes(data)
 
 
-def discover_ppt_targets(pptx_file: InputFile, numeric_only: bool = True) -> list[PptTarget]:
+def discover_ppt_targets(
+    pptx_file: InputFile,
+    numeric_only: bool = True,
+    include_text_shapes: bool = True,
+) -> list[PptTarget]:
     ppt_bytes = read_bytes(pptx_file)
     targets: list[PptTarget] = []
     with ZipFile(BytesIO(ppt_bytes)) as zf:
@@ -162,6 +168,9 @@ def discover_ppt_targets(pptx_file: InputFile, numeric_only: bool = True) -> lis
                         )
                     )
 
+            if not include_text_shapes:
+                continue
+
             for shape in slide_root.findall(".//p:sp", NS):
                 cnv = shape.find("./p:nvSpPr/p:cNvPr", NS)
                 if cnv is None:
@@ -189,7 +198,7 @@ def discover_ppt_targets(pptx_file: InputFile, numeric_only: bool = True) -> lis
                         text=text,
                     )
                 )
-    return sorted(targets, key=lambda item: (item.slide_number, item.top_in, item.left_in, item.shape_name))
+    return _with_target_keys(sorted(targets, key=lambda item: (item.slide_number, item.top_in, item.left_in, item.shape_name)))
 
 
 def _chart_target(
@@ -257,34 +266,44 @@ def _chart_target(
 
 def _read_chart_structure(zf: ZipFile, chart_path: str, workbook_path: str) -> dict[str, Any]:
     chart_root = ET.fromstring(zf.read(chart_path))
-    workbook_bytes = zf.read(workbook_path) if workbook_path and workbook_path in zf.namelist() else b""
-    workbook = openpyxl.load_workbook(BytesIO(workbook_bytes), data_only=True) if workbook_bytes else None
     series_elements = chart_root.findall(".//c:ser", NS)
     series_labels: list[str] = []
     categories: list[str] = []
     values_by_series: list[list[Any]] = []
     first_cat_formula = ""
     first_val_formula = ""
-    sheet_name = workbook.worksheets[0].title if workbook else ""
+    workbook = None
+    sheet_name = ""
+    load_workbook = _chart_workbook_lookup_enabled()
 
     for ser in series_elements:
         tx_formula = _node_text(ser.find("./c:tx//c:f", NS))
         tx_label = _node_text(ser.find("./c:tx//c:v", NS))
+        if not sheet_name:
+            sheet_name = _formula_sheet_name(tx_formula)
+        if load_workbook and not tx_label and tx_formula and workbook is None:
+            workbook = _load_chart_workbook(zf, workbook_path)
         if not tx_label and tx_formula and workbook:
             tx_label = _formula_single_value(workbook, tx_formula)
         series_labels.append(_text(tx_label))
 
         cat_formula = _node_text(ser.find("./c:cat//c:f", NS))
         val_formula = _node_text(ser.find("./c:val//c:f", NS))
+        if not sheet_name:
+            sheet_name = _formula_sheet_name(cat_formula) or _formula_sheet_name(val_formula)
         if not first_cat_formula:
             first_cat_formula = cat_formula
         if not first_val_formula:
             first_val_formula = val_formula
         if not categories:
             categories = _cache_values(ser, "./c:cat//c:pt/c:v")
+            if load_workbook and not categories and workbook is None:
+                workbook = _load_chart_workbook(zf, workbook_path)
             if not categories and cat_formula and workbook:
                 categories = [_text(value) for value in _formula_range_values(workbook, cat_formula)]
         vals = _cache_values(ser, "./c:val//c:pt/c:v", numeric=True)
+        if load_workbook and not vals and workbook is None:
+            workbook = _load_chart_workbook(zf, workbook_path)
         if not vals and val_formula and workbook:
             vals = _formula_range_values(workbook, val_formula)
         values_by_series.append(vals)
@@ -295,12 +314,29 @@ def _read_chart_structure(zf: ZipFile, chart_path: str, workbook_path: str) -> d
     else:
         values = values_by_series
     return {
-        "sheet_name": sheet_name,
+        "sheet_name": sheet_name or (workbook.worksheets[0].title if workbook else ""),
         "categories": categories,
         "series": series_labels,
         "values": values,
         "orientation": orientation,
     }
+
+
+def _load_chart_workbook(zf: ZipFile, workbook_path: str):
+    workbook_bytes = zf.read(workbook_path) if workbook_path and workbook_path in zf.namelist() else b""
+    return openpyxl.load_workbook(BytesIO(workbook_bytes), data_only=True) if workbook_bytes else None
+
+
+def _chart_workbook_lookup_enabled() -> bool:
+    return os.getenv("AUTO_PPT_LOAD_CHART_WORKBOOKS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _formula_sheet_name(formula: str) -> str:
+    text = _text(formula).replace("$", "")
+    if "!" not in text:
+        return ""
+    sheet, _ref = text.split("!", 1)
+    return sheet.strip("'")
 
 
 def _chart_orientation(cat_formula: str, val_formula: str) -> str:
@@ -388,6 +424,30 @@ def _table_cells(table_el: ET.Element) -> list[list[str]]:
 
 def _is_update_name(value: str) -> bool:
     return bool(re.fullmatch(r"\d{4,}", _text(value)))
+
+
+def _with_target_keys(targets: list[PptTarget]) -> list[PptTarget]:
+    counts: dict[str, int] = {}
+    for target in targets:
+        counts[target.shape_name] = counts.get(target.shape_name, 0) + 1
+
+    output: list[PptTarget] = []
+    for ordinal, target in enumerate(targets, start=1):
+        if _is_update_name(target.shape_name) and counts.get(target.shape_name, 0) == 1:
+            output.append(target)
+            continue
+        if target.object_type not in {"chart", "table"}:
+            output.append(target)
+            continue
+        key = _canonical_target_key(target, ordinal)
+        output.append(replace(target, target_key=key))
+    return output
+
+
+def _canonical_target_key(target: PptTarget, ordinal: int) -> str:
+    shape_id = re.sub(r"[^A-Za-z0-9]+", "_", target.shape_id).strip("_")
+    suffix = shape_id or str(ordinal)
+    return f"slide{target.slide_number:03d}_{target.object_type}_{suffix}"
 
 
 def _sorted_slide_paths(zf: ZipFile) -> list[str]:

@@ -87,6 +87,73 @@ class AiMapperTests(unittest.TestCase):
         self.assertEqual(len(request_payload["targets"][0]["candidates"]), 1)
         self.assertNotIn("pptx_bytes", request_payload)
 
+    def test_ai_matcher_still_sends_targets_with_low_local_score(self) -> None:
+        target = PptTarget(
+            slide_index=0,
+            slide_number=1,
+            slide_path="ppt/slides/slide1.xml",
+            shape_name="Grafico 3",
+            shape_id="3",
+            object_type="chart",
+            left_in=0,
+            top_in=0,
+            width_in=1,
+            height_in=1,
+            target_key="slide001_chart_3",
+            nearby_text="Sem termos em comum",
+            expected_orientation="categories_rows_series_columns",
+            expected_categories=["A", "B"],
+            expected_series=["Serie"],
+            expected_values=[[1], [2]],
+        )
+        source = ParsedXlsxTable(
+            source_id="",
+            file_name="dados_estranhos.xlsx",
+            sheet_name="Sheet1",
+            orientation="categories_rows_series_columns",
+            categories=["X", "Y"],
+            series=["Valor"],
+            values=[[10], [20]],
+            preview_rows=[["", "Valor"], ["X", 10]],
+        )
+        captured: dict[str, object] = {}
+
+        class FakeResponses:
+            def create(self, **kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(
+                    output_text=json.dumps(
+                        {
+                            "suggestions": [
+                                {
+                                    "target": "slide001_chart_3",
+                                    "datasource": "dados_estranhos.xlsx",
+                                    "confidence": 0.8,
+                                    "reason": "Mesmo com score local baixo, e o melhor candidato disponivel.",
+                                }
+                            ]
+                        }
+                    )
+                )
+
+        class FakeOpenAI:
+            def __init__(self, **_kwargs):
+                self.responses = FakeResponses()
+
+        env = {
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_MODEL": "test-model",
+            "AUTO_PPT_AI_MATCH_MIN_LOCAL_SCORE": "0.99",
+        }
+        with patch.dict(os.environ, env):
+            with patch.dict("sys.modules", {"openai": SimpleNamespace(OpenAI=FakeOpenAI)}):
+                suggestions = suggest_source_matches_with_ai([target], [source], candidates_per_target=1)
+
+        self.assertEqual([item.target for item in suggestions], ["slide001_chart_3"])
+        request_payload = json.loads(captured["input"][1]["content"])
+        self.assertEqual(request_payload["cost_control"]["candidate_filtered_targets"], 0)
+        self.assertEqual(request_payload["cost_control"]["fallback_targets_sent"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -207,6 +207,29 @@ def save_project_json(project: ProjectRef, parts: list[str], filename: str, payl
     return save_project_bytes(project, parts, filename, data)
 
 
+def load_project_bytes(project: ProjectRef, parts: list[str], filename: str) -> bytes:
+    filename = safe_filename(filename)
+    backend = storage_backend()
+    if backend == "local":
+        path = _local_project_path(project, parts, filename)
+        if not path.exists():
+            raise FileNotFoundError(str(path))
+        return path.read_bytes()
+    if backend == "s3":
+        key = _s3_project_prefix(project.squad, project.slug, *parts, filename)
+        client = _s3_client()
+        try:
+            response = client.get_object(Bucket=_s3_bucket(required=True), Key=key)
+        except client.exceptions.NoSuchKey as exc:
+            raise FileNotFoundError(key) from exc
+        return response["Body"].read()
+    raise ValueError(f"Backend de storage nao suportado: {backend}")
+
+
+def load_project_json(project: ProjectRef, parts: list[str], filename: str):
+    return json.loads(load_project_bytes(project, parts, filename).decode("utf-8"))
+
+
 def append_memory_correction(project: ProjectRef, correction: dict) -> str:
     corrections = load_memory_corrections(project)
     corrections.append(correction)

@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any
 import re
 
 from ppt_automator import analyze_update_package, generate_updated_pptx
+from ppt_automator.ai_mapper import AiSourceMatchSuggestion
 from ppt_automator.ppt_discovery import PptTarget
 from ppt_automator.preview_model import PreviewTarget, build_preview
 from ppt_automator.table_normalizer import TransformPlan, normalize_to_target
 from ppt_automator.xlsx_parser import ParsedXlsxTable, parse_xlsx_table
 
 
-ManualSourceMap = dict[str, tuple[str, bytes]]
+ManualSourcePayload = tuple[str, bytes] | tuple[str, bytes, str]
+ManualSourceMap = dict[str, ManualSourcePayload]
 
 
 @dataclass(frozen=True)
@@ -22,6 +25,7 @@ class AnalysisResult:
     sources: list[ParsedXlsxTable]
     target_count: int
     source_count: int
+    warnings: list[str]
 
 
 def analyze_files(
@@ -40,6 +44,7 @@ def analyze_files(
         sources=sources,
         target_count=len(targets),
         source_count=len(sources),
+        warnings=_analysis_warnings(targets, sources, plans),
     )
 
 
@@ -95,6 +100,53 @@ def apply_ai_recommendations_to_analysis(
         sources=analysis.sources,
         target_count=analysis.target_count,
         source_count=analysis.source_count,
+        warnings=analysis.warnings,
+    )
+
+
+def apply_ai_source_matches_to_analysis(
+    analysis: AnalysisResult,
+    ai_matches: dict[str, dict[str, Any]] | list[AiSourceMatchSuggestion],
+) -> AnalysisResult:
+    if not ai_matches:
+        return analysis
+    normalized_matches = _normalize_ai_matches(ai_matches)
+    if not normalized_matches:
+        return analysis
+
+    targets_by_id = {target.shape_name: target for target in analysis.targets}
+    sources_by_file = {source.file_name: source for source in analysis.sources}
+    plans_by_id = {plan.target_id: plan for plan in analysis.plans}
+
+    for target_id, match in normalized_matches.items():
+        if target_id in plans_by_id:
+            continue
+        target = targets_by_id.get(target_id)
+        source = sources_by_file.get(str(match.get("datasource") or ""))
+        if target is None or source is None:
+            continue
+        confidence = float(match.get("confidence") or 0)
+        reason = str(match.get("reason") or "IA escolheu este datasource por compatibilidade.")
+        plans_by_id[target_id] = normalize_to_target(
+            target,
+            source,
+            confidence=confidence,
+            match_reason=f"IA sugeriu {source.file_name}: {reason}",
+        )
+
+    ordered_ids = [plan.target_id for plan in analysis.plans]
+    for target in analysis.targets:
+        if target.shape_name in plans_by_id and target.shape_name not in ordered_ids:
+            ordered_ids.append(target.shape_name)
+    plans = [plans_by_id[target_id] for target_id in ordered_ids]
+    return AnalysisResult(
+        plans=plans,
+        preview=build_preview(plans),
+        targets=analysis.targets,
+        sources=analysis.sources,
+        target_count=analysis.target_count,
+        source_count=analysis.source_count,
+        warnings=_analysis_warnings(analysis.targets, analysis.sources, plans),
     )
 
 
@@ -139,7 +191,8 @@ def _apply_manual_sources(
     plans_by_id = {plan.target_id: plan for plan in plans}
     source_output = list(sources)
 
-    for target_id, (filename, data) in manual_sources.items():
+    for target_id, payload in manual_sources.items():
+        filename, data, cell_range = _manual_payload(payload)
         target = targets_by_id.get(target_id)
         if target is None:
             continue
@@ -147,13 +200,15 @@ def _apply_manual_sources(
             data,
             file_name=f"upload_manual/{target_id}_{filename}",
             formula_mode="auto",
+            cell_range=cell_range,
         )
         source_output.append(source)
+        range_text = f" usando o range {cell_range}" if cell_range else ""
         plans_by_id[target_id] = normalize_to_target(
             target,
             source,
             confidence=1.0,
-            match_reason=f"Datasource enviado manualmente para o target {target_id}.",
+            match_reason=f"Datasource enviado manualmente para o target {target_id}{range_text}.",
         )
 
     ordered_ids = [plan.target_id for plan in plans]
@@ -161,6 +216,67 @@ def _apply_manual_sources(
         if target_id not in ordered_ids:
             ordered_ids.append(target_id)
     return [plans_by_id[target_id] for target_id in ordered_ids], source_output
+
+
+def _manual_payload(payload: ManualSourcePayload) -> tuple[str, bytes, str]:
+    if len(payload) == 2:
+        filename, data = payload
+        return filename, data, ""
+    filename, data, cell_range = payload
+    return filename, data, str(cell_range or "").strip()
+
+
+def _normalize_ai_matches(
+    ai_matches: dict[str, dict[str, Any]] | list[AiSourceMatchSuggestion],
+) -> dict[str, dict[str, Any]]:
+    if isinstance(ai_matches, dict):
+        return ai_matches
+    return {
+        item.target: {
+            "datasource": item.datasource,
+            "confidence": item.confidence,
+            "reason": item.reason,
+        }
+        for item in ai_matches
+    }
+
+
+def _analysis_warnings(
+    targets: list[PptTarget],
+    sources: list[ParsedXlsxTable],
+    plans: list[TransformPlan],
+) -> list[str]:
+    warnings: list[str] = []
+    updatable_targets = [target for target in targets if target.object_type in {"chart", "table"}]
+    target_counts = Counter(target.shape_name for target in updatable_targets)
+    duplicate_targets = sorted(target_id for target_id, count in target_counts.items() if count > 1)
+    if duplicate_targets:
+        warnings.append(
+            "Existem targets chart/table com identificador repetido no PPT: "
+            + ", ".join(duplicate_targets[:12])
+            + ". Renomeie os shapes no PowerPoint ou use override por target para evitar ambiguidade."
+        )
+
+    source_counts = Counter(source.source_id for source in sources if source.source_id)
+    duplicate_sources = sorted(source_id for source_id, count in source_counts.items() if count > 1)
+    if duplicate_sources:
+        warnings.append(
+            "Existem XLSX com o mesmo identificador numerico: "
+            + ", ".join(duplicate_sources[:12])
+            + ". O sistema usa estrutura e contexto como desempate, mas vale revisar o preview."
+        )
+
+    mapped_ids = {plan.target_id for plan in plans}
+    missing_count = sum(1 for target in updatable_targets if target.shape_name not in mapped_ids)
+    if updatable_targets and not plans:
+        warnings.append(
+            "Nenhum match automatico foi aceito. Ative a IA ou use Trocar XLSX deste target com range manual."
+        )
+    elif missing_count:
+        warnings.append(
+            f"{missing_count} target(s) chart/table ainda estao sem datasource. Revise os cards sem datasource automatico."
+        )
+    return warnings
 
 
 def _plan_from_ai_edit_data(plan: TransformPlan, diagnostic: dict[str, Any]) -> TransformPlan | None:

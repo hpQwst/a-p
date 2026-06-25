@@ -13,7 +13,7 @@
           <p class="eyebrow">{{ squad }} / {{ project_name }}</p>
           <h1>Preview das atualizações</h1>
         </div>
-        <a class="button" href="/jobs/{{ job_id }}/download">Baixar PPT atualizado</a>
+        <a class="button" href="/jobs/{{ job_id }}/download" data-progress-message="Gerando PPT atualizado...">Baixar PPT atualizado</a>
       </header>
 
       {% if notice %}
@@ -33,6 +33,44 @@
         <strong>Etapa IA</strong>
         <span>{{ ai_status.message }}</span>
       </section>
+
+      <form class="scope-form" action="/jobs/{{ job_id }}/slides" method="post" data-progress-message="Atualizando escopo de slides...">
+        <label>
+          <span>Adicionar slides ao escopo deste projeto</span>
+          <input name="slides_to_add" placeholder="Ex.: 2, 7-9">
+        </label>
+        <button type="submit">Adicionar slides</button>
+      </form>
+
+      {% if analysis_warnings %}
+        <section class="warning-list">
+          <strong>Pontos para revisar</strong>
+          {% for warning in analysis_warnings %}
+            <p>{{ warning }}</p>
+          {% endfor %}
+        </section>
+      {% endif %}
+
+      {% if ai_log_entries %}
+        <details class="audit-log">
+          <summary>Auditoria de uso da IA</summary>
+          {% for entry in ai_log_entries %}
+            <article>
+              <strong>{{ entry.operation }} / {{ entry.status }}</strong>
+              <span>{{ entry.sent_at }} → {{ entry.returned_at }} · {{ entry.duration_ms }} ms · {{ entry.target_count }} target(s)</span>
+              {% if entry.returned_count is defined %}
+                <span>retorno: {{ entry.returned_count }}</span>
+              {% endif %}
+              {% if entry.payload_summary %}
+                <pre>{{ entry.payload_summary }}</pre>
+              {% endif %}
+              {% if entry.error %}
+                <p>{{ entry.error }}</p>
+              {% endif %}
+            </article>
+          {% endfor %}
+        </details>
+      {% endif %}
 
       {% for slide, items in cards_by_slide.items() %}
         <section class="slide-block">
@@ -55,6 +93,9 @@
 
               {% if item.manual_file %}
                 <p class="reason"><strong>Correção manual:</strong> {{ item.manual_file }}</p>
+                {% if item.manual_range %}
+                  <p class="reason"><strong>Range manual:</strong> {{ item.manual_range }}</p>
+                {% endif %}
               {% endif %}
               <p class="reason">{{ item.reason }}</p>
               {% if item.ai %}
@@ -191,10 +232,14 @@
                 </div>
               {% endif %}
 
-              <form class="inline-form" action="/jobs/{{ job_id }}/targets/{{ item.target }}/override" method="post" enctype="multipart/form-data">
+              <form class="inline-form" action="/jobs/{{ job_id }}/targets/{{ item.target }}/override" method="post" enctype="multipart/form-data" data-progress-message="Aplicando XLSX e recalculando somente este target...">
                 <label>
                   <span>Trocar XLSX deste target</span>
                   <input name="datasource" type="file" accept=".xlsx" required>
+                </label>
+                <label>
+                  <span>Range opcional</span>
+                  <input name="cell_range" type="text" value="{{ item.manual_range }}" placeholder="D5:G12 ou Aba!D5:G12">
                 </label>
                 <button type="submit">Aplicar XLSX</button>
               </form>
@@ -203,5 +248,12 @@
         </section>
       {% endfor %}
     </main>
+    <div id="progress-overlay" class="progress-overlay" hidden>
+      <div>
+        <strong>Projeto em andamento</strong>
+        <p id="progress-message">Processando...</p>
+      </div>
+    </div>
+    <script src="{{ url_for('static', path='/app.js') }}"></script>
   </body>
 </html>

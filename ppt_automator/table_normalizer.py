@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable
 import re
 import unicodedata
@@ -32,6 +33,14 @@ class TransformPlan:
     @property
     def object_type(self) -> str:
         return self.target.object_type
+
+
+@dataclass(frozen=True)
+class SourceMatchCandidate:
+    source: ParsedXlsxTable
+    score: float
+    reason: str
+    strong_id_match: bool = False
 
 
 def build_transform_plans(
@@ -147,16 +156,41 @@ def _best_source_for_target(
     target: PptTarget,
     sources: list[ParsedXlsxTable],
 ) -> tuple[ParsedXlsxTable | None, float, str]:
-    scored: list[tuple[float, ParsedXlsxTable, str]] = []
+    candidates = source_match_candidates(target, sources)
+    if not candidates:
+        return None, 0.0, ""
+    best = candidates[0]
+    reason = best.reason
+    if len(candidates) > 1 and best.score - candidates[1].score <= 0.08 and candidates[1].score >= 0.45:
+        reason += f"; atenção: datasource parecido também encontrado ({candidates[1].source.file_name}, score {candidates[1].score:.0%})"
+    threshold = 0.35 if best.strong_id_match or target.object_type == "table" else 0.45
+    if best.score < threshold:
+        return None, best.score, reason
+    return best.source, best.score, reason
+
+
+def source_match_candidates(
+    target: PptTarget,
+    sources: list[ParsedXlsxTable],
+    limit: int | None = None,
+) -> list[SourceMatchCandidate]:
+    scored: list[SourceMatchCandidate] = []
     for source in sources:
         score = 0.0
         reasons = []
+        strong_id_match = False
         if source.source_id and source.source_id == target.shape_name:
             score += 0.72
             reasons.append("nome do arquivo bate com o target")
+            strong_id_match = True
         if source.metadata.get("graph_id") == target.shape_name or source.metadata.get("ppt_tag") == target.shape_name:
             score += 0.2
             reasons.append("metadado do XLSX bate com o target")
+            strong_id_match = True
+        filename_score = _filename_context_score(target, source)
+        if filename_score >= 0.55:
+            score += 0.18 * filename_score
+            reasons.append(f"nome do arquivo/contexto {filename_score:.0%}")
         if target.object_type == "chart":
             cat_score = max(
                 _coverage_score(target.expected_categories, source.categories),
@@ -166,27 +200,66 @@ def _best_source_for_target(
                 _coverage_score([s for s in target.expected_series if s], source.series),
                 _coverage_score([s for s in target.expected_series if s], source.categories),
             )
-            score += 0.16 * cat_score + 0.12 * series_score
+            if min(cat_score, series_score) >= 0.45:
+                score += 0.35 * cat_score + 0.3 * series_score
+            else:
+                score += 0.18 * cat_score + 0.16 * series_score
+            if not strong_id_match and _requires_comparison_series(target.expected_series) and series_score < 0.8:
+                score -= 0.25
+                reasons.append("series de comparativo incompletas")
             reasons.append(f"categorias {cat_score:.0%}, series {series_score:.0%}")
         if target.object_type == "table" and target.table_cells:
             cell_count = max((len(row) for row in target.table_cells), default=0)
             if cell_count and len(source.categories) == cell_count:
                 score += 0.18
                 reasons.append("quantidade de colunas/celulas compativel")
-        scored.append((min(score, 1.0), source, "; ".join(reasons)))
-    if not scored:
-        return None, 0.0, ""
-    scored.sort(key=lambda item: item[0], reverse=True)
-    score, source, reason = scored[0]
-    if score < 0.35:
-        return None, score, reason
-    return source, score, reason
+        scored.append(
+            SourceMatchCandidate(
+                source=source,
+                score=max(0.0, min(score, 1.0)),
+                reason="; ".join(reasons),
+                strong_id_match=strong_id_match,
+            )
+        )
+    scored.sort(key=lambda item: item.score, reverse=True)
+    return scored[:limit] if limit else scored
 
 
 def _source_axes(source: ParsedXlsxTable) -> tuple[list[str], list[str]]:
     if source.orientation in {"series_rows_categories_columns", "single_series_row_categories_columns"}:
         return list(source.series), list(source.categories)
     return list(source.categories), list(source.series)
+
+
+def _filename_context_score(target: PptTarget, source: ParsedXlsxTable) -> float:
+    filename = Path(source.file_name).stem
+    if not filename or len(_norm(filename)) <= 2:
+        return 0.0
+    target_texts = [
+        target.shape_name,
+        target.nearby_text,
+        *target.expected_categories,
+        *target.expected_series,
+        *[cell for row in target.table_cells[:4] for cell in row[:8]],
+    ]
+    metadata_text = " ".join(str(value) for value in source.metadata.values())
+    source_texts = [
+        filename,
+        metadata_text,
+        *source.categories,
+        *source.series,
+    ]
+    target_context = " ".join(str(value) for value in target_texts if _norm(value))
+    source_context = " ".join(str(value) for value in source_texts if _norm(value))
+    return max(
+        _soft_text_score(filename, target_context),
+        _soft_text_score(filename, target.nearby_text),
+        _soft_text_score(target.nearby_text, source_context),
+    )
+
+
+def _requires_comparison_series(labels: list[str]) -> bool:
+    return sum(1 for label in labels if "COMP" in _norm(label)) >= 2
 
 
 def _target_axes(target: PptTarget, source: ParsedXlsxTable) -> tuple[list[str], list[str]]:
@@ -377,6 +450,7 @@ def _to_number(value: Any) -> float | None:
 
 def _norm(value: Any) -> str:
     text = "" if value is None else str(value).strip()
+    text = text.replace("+", " PLUS ")
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     text = text.upper()

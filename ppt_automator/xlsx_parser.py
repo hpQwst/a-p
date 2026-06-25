@@ -9,6 +9,7 @@ import re
 import unicodedata
 
 import openpyxl
+from openpyxl.utils.cell import range_boundaries
 
 from .core import prepare_workbook_values, read_bytes
 
@@ -53,16 +54,22 @@ def parse_xlsx_table(
     workbook_file: InputFile,
     file_name: str = "",
     formula_mode: str = "auto",
+    cell_range: str = "",
 ) -> ParsedXlsxTable:
     original_bytes = read_bytes(workbook_file)
     calculated_bytes = prepare_workbook_values(original_bytes, formula_mode=formula_mode)
     data_wb = openpyxl.load_workbook(BytesIO(calculated_bytes), data_only=True, read_only=True)
     formula_wb = openpyxl.load_workbook(BytesIO(original_bytes), data_only=False, read_only=True)
-    data_ws = data_wb.worksheets[0]
+    data_ws, range_ref = _select_worksheet(data_wb, cell_range)
     formula_ws = formula_wb[data_ws.title] if data_ws.title in formula_wb.sheetnames else formula_wb.worksheets[0]
-    raw_rows = [list(row) for row in data_ws.iter_rows(values_only=True)]
-    formula_rows = [list(row) for row in formula_ws.iter_rows(values_only=True)]
-    trimmed_rows, used_range = _trim_table(raw_rows)
+    if range_ref:
+        trimmed_rows, used_range = _rows_from_range(data_ws, range_ref)
+        formula_rows, _formula_used_range = _rows_from_range(formula_ws, range_ref)
+    else:
+        raw_rows = [list(row) for row in data_ws.iter_rows(values_only=True)]
+        formula_all_rows = [list(row) for row in formula_ws.iter_rows(values_only=True)]
+        trimmed_rows, used_range = _trim_table(raw_rows)
+        formula_rows = _slice_rows(formula_all_rows, used_range)
     metadata = _extract_metadata(trimmed_rows)
     parsed = _parse_rectangular_table(
         trimmed_rows,
@@ -75,6 +82,66 @@ def parse_xlsx_table(
     data_wb.close()
     formula_wb.close()
     return parsed
+
+
+def _select_worksheet(workbook: Any, cell_range: str) -> tuple[Any, str]:
+    sheet_name, range_ref = _split_range_ref(cell_range)
+    if sheet_name:
+        if sheet_name not in workbook.sheetnames:
+            raise ValueError(f"Aba '{sheet_name}' nao encontrada no XLSX.")
+        return workbook[sheet_name], range_ref
+    return workbook.worksheets[0], range_ref
+
+
+def _split_range_ref(cell_range: str) -> tuple[str, str]:
+    text = (cell_range or "").strip().replace("$", "")
+    if not text:
+        return "", ""
+    if "!" in text:
+        sheet_name, range_ref = text.split("!", 1)
+        sheet_name = sheet_name.strip().strip("'")
+    else:
+        sheet_name, range_ref = "", text
+    try:
+        range_boundaries(range_ref)
+    except Exception as exc:
+        raise ValueError("Range invalido. Use algo como D5:G12 ou Planilha1!D5:G12.") from exc
+    return sheet_name, range_ref
+
+
+def _rows_from_range(worksheet: Any, range_ref: str) -> tuple[list[list[Any]], tuple[int, int, int, int]]:
+    min_col, min_row, max_col, max_row = range_boundaries(range_ref)
+    rows = [
+        list(row)
+        for row in worksheet.iter_rows(
+            min_row=min_row,
+            max_row=max_row,
+            min_col=min_col,
+            max_col=max_col,
+            values_only=True,
+        )
+    ]
+    trimmed_rows, trimmed_range = _trim_table(rows)
+    if trimmed_range is None:
+        return [], (min_row, min_col, max_row, max_col)
+    trim_min_row, trim_min_col, trim_max_row, trim_max_col = trimmed_range
+    absolute_range = (
+        min_row + trim_min_row - 1,
+        min_col + trim_min_col - 1,
+        min_row + trim_max_row - 1,
+        min_col + trim_max_col - 1,
+    )
+    return trimmed_rows, absolute_range
+
+
+def _slice_rows(rows: list[list[Any]], used_range: tuple[int, int, int, int] | None) -> list[list[Any]]:
+    if used_range is None:
+        return []
+    min_row, min_col, max_row, max_col = used_range
+    output = []
+    for row in rows[min_row - 1 : max_row]:
+        output.append(list(row[min_col - 1 : max_col]))
+    return output
 
 
 def _parse_rectangular_table(

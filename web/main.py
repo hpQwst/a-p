@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 
 from ppt_automator import generate_updated_pptx
 from ppt_automator.ai import ai_configured, format_ai_error
+from ppt_automator.embedded_workbook_writer import EmbeddedWorkbookWriterUnavailable
 from ppt_automator.ai_transform import suggest_transform_diagnostics
 from ppt_automator.project_store import (
     SQUADS,
@@ -159,7 +160,10 @@ async def download(job_id: str) -> Response:
     )
     ai_diagnostics, _ai_status = _ai_diagnostics_for_job(job_dir, analysis)
     analysis = apply_ai_recommendations_to_analysis(analysis, ai_diagnostics)
-    output = generate_updated_pptx(pptx_bytes, analysis.plans)
+    try:
+        output = generate_updated_pptx(pptx_bytes, analysis.plans)
+    except EmbeddedWorkbookWriterUnavailable as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     file_name = f"ppt_automatizado_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
     _save_project_run(job_dir, output, analysis, file_name)
     return Response(

@@ -122,6 +122,18 @@ O motor tenta primeiro usar o Excel instalado no Windows via `pywin32`, calculan
 
 Os arquivos originais nao sao alterados.
 
+## Graficos editaveis e Excel embutido
+
+Para preservar o comando `Editar dados` do PowerPoint, o sistema nao usa fallback de escrita XML manual no workbook embutido dos graficos. A via validada e abrir o XLSX embutido original com Microsoft Excel via COM, atualizar a matriz, redimensionar a tabela interna quando existir e salvar pelo proprio Excel.
+
+Isso significa:
+
+- em desenvolvimento Windows, rode pelo PowerShell com Excel instalado;
+- em Linux/Docker/Fargate Linux, a geracao final de PPT com graficos editaveis deve falhar em vez de gerar arquivo quebrado;
+- na AWS, mantenha o FastAPI em Fargate para UI/API, mas envie a geracao final para um worker Windows com Excel/Office instalado e licenciado.
+
+Essa decisao evita entregar PPT aparentemente correto que depois quebra quando o usuario clica em `Editar dados`.
+
 ## Teste rapido
 
 ```powershell

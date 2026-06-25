@@ -76,13 +76,13 @@ def generate_updated_pptx(pptx_file: InputFile, plans: list[TransformPlan]) -> b
 
 def _workbook_matrix(plan: TransformPlan) -> list[list[Any]]:
     if plan.orientation_ppt == "series_rows_categories_columns":
-        matrix = [[None, *plan.categories]]
+        matrix = [[" ", *plan.categories]]
         for index, series_name in enumerate(plan.series):
             values = plan.values[index] if index < len(plan.values) else []
             matrix.append([series_name, *values])
         return matrix
 
-    matrix = [[None, *plan.series]]
+    matrix = [[" ", *plan.series]]
     for index, category in enumerate(plan.categories):
         values = plan.values[index] if index < len(plan.values) else []
         matrix.append([category, *values])

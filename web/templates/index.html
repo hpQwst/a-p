@@ -29,13 +29,13 @@
           <div class="grid two">
             <label>
               <span>Salvar em projeto existente</span>
-              <select name="project_ref">
-                <option value="">Criar novo projeto</option>
+              <select name="project_ref" data-project-select>
+                <option value="" data-squad="">Criar novo projeto</option>
                 {% for squad, projects in projects_by_squad.items() %}
                   {% if projects %}
                     <optgroup label="{{ squad.title() }}">
                       {% for project in projects %}
-                        <option value="{{ project.squad }}|{{ project.slug }}">{{ project.name }}</option>
+                        <option value="{{ project.squad }}|{{ project.slug }}" data-squad="{{ project.squad }}">{{ project.name }}</option>
                       {% endfor %}
                     </optgroup>
                   {% endif %}
@@ -44,7 +44,7 @@
             </label>
             <label>
               <span>Squad do novo projeto</span>
-              <select name="squad">
+              <select name="squad" data-squad-select>
                 {% for squad in squads %}
                   <option value="{{ squad.value }}">{{ squad.label }}</option>
                 {% endfor %}
@@ -55,6 +55,24 @@
           <label>
             <span>Nome do novo projeto</span>
             <input name="project_name" placeholder="Preencha quando for criar um projeto novo">
+          </label>
+
+          <label>
+            <span>Mapeamento salvo do squad</span>
+            <select name="mapping_template_ref" data-mapping-template-select>
+              <option value="" data-squad="">Detectar no preview</option>
+              {% for squad, templates in mapping_templates_by_squad.items() %}
+                {% if templates %}
+                  <optgroup label="{{ squad.title() }}">
+                    {% for template in templates %}
+                      <option value="{{ template.squad }}|{{ template.slug }}" data-squad="{{ template.squad }}">
+                        {{ template.name }} · {{ template.entry_count }} targets
+                      </option>
+                    {% endfor %}
+                  </optgroup>
+                {% endif %}
+              {% endfor %}
+            </select>
           </label>
 
           <h2>Etapa 2 - Arquivos</h2>

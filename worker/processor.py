@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 import re
 
@@ -15,6 +16,7 @@ from ppt_automator.xlsx_parser import ParsedXlsxTable, parse_xlsx_table
 
 ManualSourcePayload = tuple[str, bytes] | tuple[str, bytes, str]
 ManualSourceMap = dict[str, ManualSourcePayload]
+SavedSourceMatchMap = dict[str, dict[str, Any] | str]
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,50 @@ def apply_ai_source_matches_to_analysis(
     )
 
 
+def apply_saved_source_matches_to_analysis(
+    analysis: AnalysisResult,
+    saved_matches: SavedSourceMatchMap,
+) -> AnalysisResult:
+    if not saved_matches:
+        return analysis
+    normalized_matches = _normalize_saved_matches(saved_matches)
+    if not normalized_matches:
+        return analysis
+
+    targets_by_id = {target.shape_name: target for target in analysis.targets}
+    sources_by_name = _sources_by_match_name(analysis.sources)
+    plans_by_id = {plan.target_id: plan for plan in analysis.plans}
+
+    for target_id, match in normalized_matches.items():
+        target = targets_by_id.get(target_id)
+        source = sources_by_name.get(_source_match_key(match.get("datasource")))
+        if target is None or source is None:
+            continue
+        confidence = float(match.get("confidence") or 1.0)
+        reason = str(match.get("reason") or "Mapeamento salvo aplicado para este target.")
+        plans_by_id[target_id] = normalize_to_target(
+            target,
+            source,
+            confidence=confidence,
+            match_reason=reason,
+        )
+
+    ordered_ids = [plan.target_id for plan in analysis.plans]
+    for target in analysis.targets:
+        if target.shape_name in plans_by_id and target.shape_name not in ordered_ids:
+            ordered_ids.append(target.shape_name)
+    plans = [plans_by_id[target_id] for target_id in ordered_ids]
+    return AnalysisResult(
+        plans=plans,
+        preview=build_preview(plans),
+        targets=analysis.targets,
+        sources=analysis.sources,
+        target_count=analysis.target_count,
+        source_count=analysis.source_count,
+        warnings=_analysis_warnings(analysis.targets, analysis.sources, plans),
+    )
+
+
 def apply_ai_recommendations(
     plans: list[TransformPlan],
     ai_diagnostics: dict[str, dict],
@@ -239,6 +285,50 @@ def _normalize_ai_matches(
         }
         for item in ai_matches
     }
+
+
+def _normalize_saved_matches(saved_matches: SavedSourceMatchMap) -> dict[str, dict[str, Any]]:
+    output: dict[str, dict[str, Any]] = {}
+    for target_id, match in saved_matches.items():
+        clean_target_id = str(target_id or "").strip()
+        if not clean_target_id:
+            continue
+        if isinstance(match, dict):
+            datasource = str(match.get("datasource") or match.get("file_name") or "").strip()
+            confidence = match.get("confidence", 1.0)
+            reason = str(match.get("reason") or "Mapeamento salvo aplicado para este target.")
+        else:
+            datasource = str(match or "").strip()
+            confidence = 1.0
+            reason = "Mapeamento salvo aplicado para este target."
+        if not datasource:
+            continue
+        output[clean_target_id] = {
+            "datasource": datasource,
+            "confidence": confidence,
+            "reason": reason,
+        }
+    return output
+
+
+def _sources_by_match_name(sources: list[ParsedXlsxTable]) -> dict[str, ParsedXlsxTable]:
+    output: dict[str, ParsedXlsxTable] = {}
+    for source in sources:
+        keys = {
+            _source_match_key(source.file_name),
+            _source_match_key(Path(source.file_name).name),
+        }
+        for key in keys:
+            if key and key not in output:
+                output[key] = source
+    return output
+
+
+def _source_match_key(value: Any) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    return Path(text).name.lower()
 
 
 def _analysis_warnings(

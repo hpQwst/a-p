@@ -49,6 +49,7 @@ O produto organiza o trabalho assim:
 
 - `Squad1` a `Squad5`: divisao inicial dos times.
 - `Projetos`: cada squad cria quantos projetos quiser.
+- `Modelos de mapeamento`: memoria reutilizavel por squad, separada dos projetos. Um mapeamento criado no Squad2 nunca aparece como candidato para projetos do Squad1.
 - `Execucoes`: cada geracao salva uma nova pasta/objeto com inputs, PPT final e relatorio JSON.
 - `Memoria`: correcoes manuais de mapeamento ficam salvas no projeto para auditoria e evolucao futura.
 
@@ -65,10 +66,13 @@ AUTO_PPT_S3_PREFIX=auto-ppt
 O fluxo mais amigavel e:
 
 - enviar o PPT modelo;
+- selecionar um modelo de mapeamento salvo do squad, quando existir, ou deixar o preview sugerir candidatos do proprio squad;
 - enviar um ZIP com todos os XLSX, mesmo com nomes aleatorios;
 - conferir a tela de correspondencias, olhando o score, o contexto do slide e os candidatos quando houver duvida;
 - trocar o `Datasource escolhido` diretamente na tela se a sugestao nao estiver correta;
 - gerar o PPT.
+
+Depois de um download bem-sucedido, o sistema cria ou atualiza automaticamente o modelo de mapeamento usado pelo projeto. Na proxima atualizacao, se o PPT tiver os mesmos targets e os datasources mantiverem os mesmos nomes, o template aplica o de-para antes da IA. Targets novos ficam visiveis no preview para serem adicionados ao mesmo modelo.
 
 No modo `Automatico`, a planilha de mapeamento deixa de ser obrigatoria. O sistema olha todos os graficos do PPT, compara com todos os XLSX e monta os melhores pares um-para-um.
 

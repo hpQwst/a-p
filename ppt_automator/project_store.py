@@ -26,6 +26,21 @@ class ProjectRef:
 
 
 @dataclass(frozen=True)
+class MappingTemplateRef:
+    template_id: str
+    squad: str
+    slug: str
+    name: str
+    description: str
+    created_at: str
+    updated_at: str
+    entry_count: int
+    source_project_slug: str
+    source_project_name: str
+    backend: str
+
+
+@dataclass(frozen=True)
 class RunRef:
     run_id: str
     created_at: str
@@ -73,6 +88,7 @@ def ensure_store() -> str:
         root = data_root()
         for squad in SQUADS:
             (root / "squads" / squad / "projects").mkdir(parents=True, exist_ok=True)
+            (root / "squads" / squad / "mapping_templates").mkdir(parents=True, exist_ok=True)
         return str(root)
     if backend == "s3":
         bucket = _s3_bucket()
@@ -166,6 +182,116 @@ def create_project(squad: str, name: str, description: str = "") -> ProjectRef:
     else:
         raise ValueError(f"Backend de storage nao suportado: {backend}")
     return _project_from_meta(meta, backend)
+
+
+def list_mapping_templates(squad: str) -> list[MappingTemplateRef]:
+    squad = normalize_squad(squad)
+    backend = storage_backend()
+    if backend == "local":
+        templates_root = data_root() / "squads" / squad / "mapping_templates"
+        if not templates_root.exists():
+            return []
+        templates = []
+        for template_dir in sorted(templates_root.iterdir()):
+            meta_path = template_dir / "template.json"
+            if meta_path.exists():
+                templates.append(_mapping_template_from_payload(_read_json_file(meta_path), backend))
+        return sorted(templates, key=lambda item: item.updated_at, reverse=True)
+    if backend == "s3":
+        client = _s3_client()
+        bucket = _s3_bucket(required=True)
+        prefix = _s3_mapping_template_prefix(squad, "")
+        templates = []
+        token = None
+        while True:
+            kwargs = {"Bucket": bucket, "Prefix": prefix}
+            if token:
+                kwargs["ContinuationToken"] = token
+            response = client.list_objects_v2(**kwargs)
+            for item in response.get("Contents", []):
+                key = item.get("Key", "")
+                if key.endswith("/template.json"):
+                    templates.append(_mapping_template_from_payload(_read_json_s3(key), backend))
+            if not response.get("IsTruncated"):
+                break
+            token = response.get("NextContinuationToken")
+        return sorted(templates, key=lambda item: item.updated_at, reverse=True)
+    raise ValueError(f"Backend de storage nao suportado: {backend}")
+
+
+def load_mapping_template(squad: str, slug: str) -> dict | None:
+    squad = normalize_squad(squad)
+    slug = slugify(slug)
+    backend = storage_backend()
+    if backend == "local":
+        path = data_root() / "squads" / squad / "mapping_templates" / slug / "template.json"
+        if not path.exists():
+            return None
+        return _read_json_file(path)
+    if backend == "s3":
+        key = _s3_mapping_template_prefix(squad, slug, "template.json")
+        try:
+            return _read_json_s3(key)
+        except FileNotFoundError:
+            return None
+    raise ValueError(f"Backend de storage nao suportado: {backend}")
+
+
+def save_mapping_template(
+    project: ProjectRef,
+    name: str,
+    entries: dict,
+    slug: str = "",
+    description: str = "",
+    metadata: dict | None = None,
+) -> MappingTemplateRef:
+    squad = normalize_squad(project.squad)
+    backend = storage_backend()
+    clean_entries = _normalize_mapping_entries(entries)
+    template_slug = slugify(slug or name or project.name)
+    existing = load_mapping_template(squad, template_slug)
+    if not slug:
+        base_slug = template_slug
+        counter = 2
+        while existing:
+            template_slug = f"{base_slug}-{counter}"
+            existing = load_mapping_template(squad, template_slug)
+            counter += 1
+    now = utc_now()
+    origin_project = (existing or {}).get("origin_project") or {
+        "squad": project.squad,
+        "slug": project.slug,
+        "name": project.name,
+    }
+    payload = {
+        "schema_version": 1,
+        "id": str((existing or {}).get("id") or uuid.uuid4()),
+        "squad": squad,
+        "slug": template_slug,
+        "name": (name or (existing or {}).get("name") or project.name).strip(),
+        "description": (description or (existing or {}).get("description") or "").strip(),
+        "created_at": str((existing or {}).get("created_at") or now),
+        "updated_at": now,
+        "origin_project": origin_project,
+        "last_project": {
+            "squad": project.squad,
+            "slug": project.slug,
+            "name": project.name,
+        },
+        "entry_count": len(clean_entries),
+        "entries": clean_entries,
+        "metadata": {
+            **((existing or {}).get("metadata") or {}),
+            **(metadata or {}),
+        },
+    }
+    if backend == "local":
+        _write_json_file(data_root() / "squads" / squad / "mapping_templates" / template_slug / "template.json", payload)
+    elif backend == "s3":
+        _write_json_s3(_s3_mapping_template_prefix(squad, template_slug, "template.json"), payload)
+    else:
+        raise ValueError(f"Backend de storage nao suportado: {backend}")
+    return _mapping_template_from_payload(payload, backend)
 
 
 def create_run(project: ProjectRef, metadata: dict | None = None) -> RunRef:
@@ -265,6 +391,42 @@ def _project_from_meta(meta: dict, backend: str) -> ProjectRef:
     )
 
 
+def _mapping_template_from_payload(payload: dict, backend: str) -> MappingTemplateRef:
+    origin_project = payload.get("origin_project") or payload.get("last_project") or {}
+    return MappingTemplateRef(
+        template_id=str(payload.get("id") or ""),
+        squad=str(payload.get("squad") or ""),
+        slug=str(payload.get("slug") or ""),
+        name=str(payload.get("name") or payload.get("slug") or ""),
+        description=str(payload.get("description") or ""),
+        created_at=str(payload.get("created_at") or ""),
+        updated_at=str(payload.get("updated_at") or ""),
+        entry_count=int(payload.get("entry_count") or len(payload.get("entries") or {})),
+        source_project_slug=str(origin_project.get("slug") or ""),
+        source_project_name=str(origin_project.get("name") or ""),
+        backend=backend,
+    )
+
+
+def _normalize_mapping_entries(entries: dict) -> dict:
+    output = {}
+    for target_id, entry in (entries or {}).items():
+        clean_target_id = str(target_id or "").strip()
+        if not clean_target_id:
+            continue
+        if isinstance(entry, dict):
+            clean_entry = {
+                str(key): value
+                for key, value in entry.items()
+                if isinstance(value, (str, int, float, bool, list, dict)) or value is None
+            }
+        else:
+            clean_entry = {"datasource": str(entry or "").strip()}
+        clean_entry["target_id"] = clean_target_id
+        output[clean_target_id] = clean_entry
+    return output
+
+
 def _touch_project(project: ProjectRef) -> None:
     meta = {
         "squad": project.squad,
@@ -305,6 +467,14 @@ def _s3_bucket(required: bool = False) -> str:
 
 def _s3_project_prefix(squad: str, slug: str, *parts: str) -> str:
     segments = [storage_prefix(), "squads", squad, "projects"]
+    if slug:
+        segments.append(slug)
+    segments.extend(part.strip("/") for part in parts if part)
+    return "/".join(segment for segment in segments if segment)
+
+
+def _s3_mapping_template_prefix(squad: str, slug: str, *parts: str) -> str:
+    segments = [storage_prefix(), "squads", squad, "mapping_templates"]
     if slug:
         segments.append(slug)
     segments.extend(part.strip("/") for part in parts if part)

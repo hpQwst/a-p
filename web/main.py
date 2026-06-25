@@ -28,9 +28,12 @@ from ppt_automator.project_store import (
     ensure_store,
     load_project_bytes,
     load_project_json,
+    list_mapping_templates,
     list_projects,
+    load_mapping_template,
     load_project,
     safe_filename,
+    save_mapping_template,
     save_project_bytes,
     save_project_json,
 )
@@ -39,6 +42,7 @@ from worker.processor import (
     analyze_files,
     apply_ai_source_matches_to_analysis,
     apply_ai_recommendations_to_analysis,
+    apply_saved_source_matches_to_analysis,
     parse_slide_selection,
 )
 
@@ -46,7 +50,7 @@ from worker.processor import (
 APP_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_ROOT.parent
 RUNTIME_ROOT = Path(os.getenv("AUTO_PPT_RUNTIME_ROOT", PROJECT_ROOT / "workspace_data" / "web_jobs")).resolve()
-RENDER_CACHE_VERSION = 3
+RENDER_CACHE_VERSION = 4
 
 app = FastAPI(title="QWST Auto PPT")
 app.mount("/static", StaticFiles(directory=APP_ROOT / "static"), name="static")
@@ -63,6 +67,7 @@ async def index(request: Request) -> HTMLResponse:
             "squads": _squad_labels(),
             "projects_by_squad": _projects_by_squad(),
             "project_cards_by_squad": _project_cards_by_squad(),
+            "mapping_templates_by_squad": _mapping_templates_by_squad(),
             "ai_available": ai_configured(PROJECT_ROOT),
         },
     )
@@ -77,11 +82,13 @@ async def preview(
     pptx: UploadFile = File(...),
     datasources: UploadFile = File(...),
     mapping: UploadFile | None = File(None),
+    mapping_template_ref: str = Form(""),
     use_ai: str = Form(""),
     slides_to_update: str = Form(""),
 ) -> HTMLResponse:
     try:
         project = _resolve_project(project_ref, squad, project_name)
+        mapping_template = _resolve_mapping_template(project, mapping_template_ref)
         selected_slides = parse_slide_selection(slides_to_update)
         pptx_bytes = await pptx.read()
         datasource_bytes = await datasources.read()
@@ -119,7 +126,9 @@ async def preview(
                 "raw": slides_to_update.strip(),
                 "numbers": selected_slides,
             },
-            "use_ai": bool(use_ai) or ai_configured(PROJECT_ROOT),
+            "mapping_template": _mapping_template_metadata(mapping_template),
+            "use_ai": (bool(use_ai) or ai_configured(PROJECT_ROOT)) and not bool(mapping_template),
+            "ignore_mapping_candidates": False,
         },
     )
     _save_project_checkpoint(job_dir, status="in_progress")
@@ -172,6 +181,56 @@ async def update_job_slides(
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc))
     return _render_preview(request, job_id, notice=f"Slides adicionados ao escopo: {', '.join(str(slide) for slide in added_slides)}.")
+
+
+@app.post("/jobs/{job_id}/mapping-template", response_class=HTMLResponse)
+async def apply_job_mapping_template(
+    request: Request,
+    job_id: str,
+    mapping_template_ref: str = Form(""),
+) -> HTMLResponse:
+    try:
+        job_dir = _job_dir(job_id)
+        metadata = _load_job_metadata(job_dir)
+        project_meta = metadata.get("project") or {}
+        project = load_project(project_meta.get("squad", ""), project_meta.get("slug", ""))
+        if project is None:
+            raise ValueError("Projeto nao encontrado.")
+        mapping_template = _resolve_mapping_template(project, mapping_template_ref)
+        if not mapping_template:
+            raise ValueError("Selecione um mapeamento salvo.")
+        metadata["mapping_template"] = _mapping_template_metadata(mapping_template)
+        metadata["use_ai"] = False
+        metadata["ignore_mapping_candidates"] = False
+        _save_job_metadata(job_dir, metadata)
+        _clear_ai_cache(job_dir)
+        _clear_render_cache(job_dir)
+        _save_project_checkpoint(job_dir, status="in_progress")
+    except Exception as exc:
+        return _render_preview(request, job_id, error=str(exc))
+    return _render_preview(
+        request,
+        job_id,
+        notice=f"Mapeamento '{mapping_template.get('name')}' aplicado neste projeto.",
+        allow_ai=False,
+    )
+
+
+@app.post("/jobs/{job_id}/review-ai", response_class=HTMLResponse)
+async def review_job_with_ai(request: Request, job_id: str) -> HTMLResponse:
+    try:
+        job_dir = _job_dir(job_id)
+        metadata = _load_job_metadata(job_dir)
+        if not ai_configured(PROJECT_ROOT):
+            raise ValueError("IA indisponivel: configure OPENAI_API_KEY no .env.")
+        metadata["use_ai"] = True
+        metadata["ignore_mapping_candidates"] = True
+        _save_job_metadata(job_dir, metadata)
+        _clear_render_cache(job_dir)
+        _save_project_checkpoint(job_dir, status="in_progress")
+    except Exception as exc:
+        return _render_preview(request, job_id, error=str(exc))
+    return _render_preview(request, job_id, notice="IA revisando o preview deste projeto.", allow_ai=True)
 
 
 @app.post("/jobs/{job_id}/targets/{target_id}/override", response_class=HTMLResponse)
@@ -236,6 +295,11 @@ async def download(job_id: str) -> Response:
         manual_sources=manual_sources,
         slide_numbers=selected_slides,
     )
+    analysis, _mapping_status = _apply_mapping_template_to_analysis(
+        job_dir,
+        analysis,
+        skip_targets=set(manual_sources),
+    )
     ai_matches, _ai_match_status = _ai_source_matches_for_job(job_dir, analysis, allow_ai=False)
     analysis = apply_ai_source_matches_to_analysis(analysis, ai_matches)
     ai_diagnostics, _ai_status = _ai_diagnostics_for_job(job_dir, analysis, allow_ai=False)
@@ -289,16 +353,37 @@ def _render_preview(
     except Exception as exc:
         return _error_response(request, f"Nao consegui analisar os arquivos: {exc}", status_code=400)
 
-    source_match_ai = allow_ai if allow_ai_source_matches is None else allow_ai_source_matches
-    ai_matches, ai_match_status = _ai_source_matches_for_job(job_dir, analysis, allow_ai=source_match_ai)
-    analysis = apply_ai_source_matches_to_analysis(analysis, ai_matches)
-    ai_diagnostics, ai_diagnostic_status = _ai_diagnostics_for_job(
-        job_dir,
-        analysis,
-        allow_ai=allow_ai,
-        target_ids=ai_diagnostic_target_ids,
-    )
-    analysis = apply_ai_recommendations_to_analysis(analysis, ai_diagnostics)
+    mapping_candidates = []
+    selected_mapping_template = _selected_mapping_template(metadata)
+    if selected_mapping_template:
+        analysis, mapping_status = _apply_mapping_template_to_analysis(
+            job_dir,
+            analysis,
+            skip_targets=set(_manual_source_names(job_dir)),
+        )
+    else:
+        mapping_candidates = _mapping_template_candidates(metadata["project"]["squad"], analysis.targets)
+        mapping_status = _mapping_status_without_selection(mapping_candidates)
+
+    pause_for_mapping = bool(mapping_candidates) and not bool(metadata.get("ignore_mapping_candidates"))
+    ai_enabled = bool(metadata.get("use_ai")) and ai_configured(PROJECT_ROOT)
+    effective_allow_ai = allow_ai and ai_enabled and not pause_for_mapping
+
+    if effective_allow_ai:
+        source_match_ai = effective_allow_ai if allow_ai_source_matches is None else allow_ai_source_matches
+        ai_matches, ai_match_status = _ai_source_matches_for_job(job_dir, analysis, allow_ai=source_match_ai)
+        analysis = apply_ai_source_matches_to_analysis(analysis, ai_matches)
+        ai_diagnostics, ai_diagnostic_status = _ai_diagnostics_for_job(
+            job_dir,
+            analysis,
+            allow_ai=effective_allow_ai,
+            target_ids=ai_diagnostic_target_ids,
+        )
+        analysis = apply_ai_recommendations_to_analysis(analysis, ai_diagnostics)
+    else:
+        ai_diagnostics = _load_ai_diagnostics(job_dir)
+        ai_match_status, ai_diagnostic_status = _ai_waiting_status(pause_for_mapping)
+
     ai_status = _combine_ai_status(ai_match_status, ai_diagnostic_status)
     cards_by_slide = _cards_by_slide(
         analysis,
@@ -315,7 +400,11 @@ def _render_preview(
         "source_count": analysis.source_count,
         "mapped_count": len(analysis.plans),
         "cards_by_slide": dict(sorted(cards_by_slide.items())),
+        "mapping_status": mapping_status,
+        "mapping_candidates": mapping_candidates,
         "ai_status": ai_status,
+        "ai_available": ai_configured(PROJECT_ROOT),
+        "ai_enabled": effective_allow_ai,
         "analysis_warnings": analysis.warnings,
         "slide_selection_label": _slide_selection_label(selected_slides),
         "notice": notice,
@@ -325,6 +414,170 @@ def _render_preview(
     _save_render_cache(job_dir, context)
     _save_project_checkpoint(job_dir, status="in_progress")
     return templates.TemplateResponse(request, "preview.html", context)
+
+
+def _resolve_mapping_template(project, mapping_template_ref: str) -> dict:
+    text = (mapping_template_ref or "").strip()
+    if not text:
+        return {}
+    if "|" not in text:
+        raise ValueError("Mapeamento salvo invalido.")
+    squad, slug = text.split("|", 1)
+    squad = _normalize_squad_form(squad)
+    if squad != project.squad:
+        raise ValueError("Este mapeamento pertence a outro squad e nao pode ser usado neste projeto.")
+    template = load_mapping_template(squad, slug)
+    if not template:
+        raise ValueError("Mapeamento salvo nao encontrado.")
+    return template
+
+
+def _mapping_template_metadata(template: dict) -> dict:
+    if not template:
+        return {}
+    return {
+        "squad": str(template.get("squad") or ""),
+        "slug": str(template.get("slug") or ""),
+        "name": str(template.get("name") or template.get("slug") or ""),
+    }
+
+
+def _selected_mapping_template(metadata: dict) -> dict:
+    selected = metadata.get("mapping_template") or {}
+    squad = str(selected.get("squad") or "")
+    slug = str(selected.get("slug") or "")
+    if not squad or not slug:
+        return {}
+    return load_mapping_template(squad, slug) or {}
+
+
+def _apply_mapping_template_to_analysis(
+    job_dir: Path,
+    analysis: AnalysisResult,
+    skip_targets: set[str] | None = None,
+) -> tuple[AnalysisResult, dict]:
+    metadata = _load_job_metadata(job_dir)
+    template = _selected_mapping_template(metadata)
+    if not template:
+        return analysis, {"state": "disabled", "message": "Nenhum mapeamento salvo selecionado."}
+
+    skip_targets = skip_targets or set()
+    entries = template.get("entries") or {}
+    target_ids = {target.shape_name for target in analysis.targets if target.object_type in {"chart", "table"}}
+    present_entries = {
+        target_id: entry
+        for target_id, entry in entries.items()
+        if target_id in target_ids and target_id not in skip_targets
+    }
+    saved_matches = {}
+    missing_sources = []
+    for target_id, entry in present_entries.items():
+        datasource = str((entry or {}).get("datasource") or (entry or {}).get("datasource_basename") or "")
+        source = _find_source_for_saved_datasource(analysis.sources, datasource)
+        if source is None:
+            missing_sources.append(datasource or target_id)
+            continue
+        saved_matches[target_id] = {
+            "datasource": source.file_name,
+            "confidence": 1.0,
+            "reason": f"Mapeamento salvo '{template.get('name')}' aplicou {source.file_name}.",
+        }
+
+    mapped_analysis = apply_saved_source_matches_to_analysis(analysis, saved_matches)
+    new_targets = sorted(target_ids - set(entries))
+    message = (
+        f"Mapeamento '{template.get('name')}' aplicado: {len(saved_matches)} target(s) reconhecido(s)."
+    )
+    if new_targets:
+        message += f" {len(new_targets)} target(s) novo(s) fora do mapeamento."
+    if missing_sources:
+        message += f" {len(missing_sources)} datasource(s) salvo(s) nao apareceram no ZIP atual."
+    return mapped_analysis, {
+        "state": "ok" if saved_matches else "warn",
+        "message": message,
+        "template": _mapping_template_metadata(template),
+        "matched_count": len(saved_matches),
+        "missing_source_count": len(missing_sources),
+        "new_target_count": len(new_targets),
+    }
+
+
+def _mapping_template_candidates(squad: str, targets: list) -> list[dict]:
+    target_ids = {target.shape_name for target in targets if target.object_type in {"chart", "table"}}
+    if not target_ids:
+        return []
+    candidates = []
+    for template_ref in list_mapping_templates(squad):
+        template = load_mapping_template(squad, template_ref.slug) or {}
+        entries = template.get("entries") or {}
+        entry_ids = set(entries)
+        matched = sorted(target_ids & entry_ids)
+        if not matched:
+            continue
+        candidates.append(
+            {
+                "ref": f"{template_ref.squad}|{template_ref.slug}",
+                "name": template_ref.name,
+                "slug": template_ref.slug,
+                "updated_at": template_ref.updated_at,
+                "entry_count": template_ref.entry_count,
+                "matched_count": len(matched),
+                "new_target_count": len(target_ids - entry_ids),
+                "score": round(len(matched) / len(target_ids) * 100, 1),
+            }
+        )
+    return sorted(candidates, key=lambda item: (item["score"], item["matched_count"]), reverse=True)
+
+
+def _mapping_status_without_selection(candidates: list[dict]) -> dict:
+    if not candidates:
+        return {"state": "disabled", "message": "Nenhum mapeamento salvo do squad atual bateu com este PPT."}
+    best = candidates[0]
+    return {
+        "state": "suggested",
+        "message": (
+            f"Mapeamento salvo encontrado no squad atual: {best['name']} "
+            f"({best['matched_count']} target(s), {best['score']}%)."
+        ),
+    }
+
+
+def _find_source_for_saved_datasource(sources: list, datasource: str):
+    key = _source_file_key(datasource)
+    if not key:
+        return None
+    for source in sources:
+        if _source_file_key(source.file_name) == key:
+            return source
+    return None
+
+
+def _source_file_key(value: str) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    return Path(text).name.lower()
+
+
+def _load_ai_diagnostics(job_dir: Path) -> dict:
+    cache_path = job_dir / "ai_diagnostics.json"
+    if not cache_path.exists():
+        return {}
+    return json.loads(cache_path.read_text(encoding="utf-8"))
+
+
+def _ai_waiting_status(pause_for_mapping: bool) -> tuple[dict[str, str], dict[str, str]]:
+    if not ai_configured(PROJECT_ROOT):
+        status = {"state": "disabled", "message": "IA indisponivel: configure OPENAI_API_KEY no .env."}
+        return status, status
+    if pause_for_mapping:
+        status = {
+            "state": "disabled",
+            "message": "IA aguardando: selecione o mapeamento salvo ou clique em Revisar com IA.",
+        }
+        return status, status
+    status = {"state": "disabled", "message": "IA aguardando comando Revisar com IA."}
+    return status, status
 
 
 def _cards_by_slide(
@@ -865,6 +1118,7 @@ def _save_project_run(job_dir: Path, output: bytes, analysis: AnalysisResult, fi
             "plans_generated": len(analysis.plans),
             "manual_overrides": sorted(_manual_source_names(job_dir)),
             "selected_slides": _selected_slides_for_job(job_dir),
+            "mapping_template": metadata.get("mapping_template") or {},
         },
     )
     save_project_bytes(project, ["runs", run.run_id, "inputs"], metadata["files"]["pptx"], (job_dir / "input.pptx").read_bytes())
@@ -909,6 +1163,50 @@ def _save_project_run(job_dir: Path, output: bytes, analysis: AnalysisResult, fi
             ],
         },
     )
+    _save_or_update_mapping_template(job_dir, project, analysis)
+
+
+def _save_or_update_mapping_template(job_dir: Path, project, analysis: AnalysisResult) -> None:
+    metadata = _load_job_metadata(job_dir)
+    selected_template = _selected_mapping_template(metadata)
+    existing_entries = dict((selected_template or {}).get("entries") or {})
+    manual_names = _manual_source_names(job_dir)
+    now = _now_iso()
+    for plan in analysis.plans:
+        datasource = manual_names.get(plan.target_id) or plan.datasource.file_name
+        existing_entries[plan.target_id] = {
+            "target_id": plan.target_id,
+            "object_type": plan.object_type,
+            "slide": plan.target.slide_number,
+            "datasource": datasource,
+            "datasource_basename": Path(datasource).name,
+            "action": plan.action,
+            "confidence": round(plan.confidence, 4),
+            "reason": plan.reason,
+            "updated_at": now,
+        }
+    if not existing_entries:
+        return
+    template_name = str((selected_template or {}).get("name") or f"{project.name} - mapeamento")
+    template_slug = str((selected_template or {}).get("slug") or "")
+    template_ref = save_mapping_template(
+        project,
+        template_name,
+        existing_entries,
+        slug=template_slug,
+        metadata={
+            "last_job_id": metadata.get("job_id"),
+            "last_pptx": (metadata.get("files") or {}).get("pptx", ""),
+            "last_datasources": (metadata.get("files") or {}).get("datasources", ""),
+            "selected_slides": _selected_slides_for_job(job_dir),
+        },
+    )
+    metadata["mapping_template"] = {
+        "squad": template_ref.squad,
+        "slug": template_ref.slug,
+        "name": template_ref.name,
+    }
+    _save_job_metadata(job_dir, metadata)
 
 
 def _manual_sources_for_job(job_dir: Path) -> dict[str, tuple[str, bytes, str]]:
@@ -996,6 +1294,10 @@ def _projects_by_squad() -> dict[str, list]:
     return {squad: list_projects(squad) for squad in SQUADS}
 
 
+def _mapping_templates_by_squad() -> dict[str, list]:
+    return {squad: list_mapping_templates(squad) for squad in SQUADS}
+
+
 def _project_cards_by_squad() -> dict[str, list[dict]]:
     output: dict[str, list[dict]] = {}
     for squad in SQUADS:
@@ -1050,6 +1352,7 @@ def _error_response(request: Request, message: str, status_code: int = 400) -> H
             "squads": _squad_labels(),
             "projects_by_squad": _projects_by_squad(),
             "project_cards_by_squad": _project_cards_by_squad(),
+            "mapping_templates_by_squad": _mapping_templates_by_squad(),
             "ai_available": ai_configured(PROJECT_ROOT),
         },
         status_code=status_code,

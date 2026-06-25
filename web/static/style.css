@@ -367,6 +367,7 @@ button,
   padding: 8px;
 }
 
+.mapping-stage,
 .ai-stage,
 .ai-box {
   border: 1px solid var(--line);
@@ -377,10 +378,43 @@ button,
   color: #173b64;
 }
 
+.mapping-stage,
 .ai-stage {
   display: flex;
   justify-content: space-between;
   gap: 14px;
+  align-items: center;
+}
+
+.mapping-stage form,
+.ai-stage form {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.mapping-stage select {
+  min-width: 260px;
+}
+
+.mapping-stage.ok {
+  background: #eef6f2;
+  color: #135f45;
+}
+
+.mapping-stage.suggested {
+  background: #eef4fb;
+  color: #173b64;
+}
+
+.mapping-stage.warn {
+  background: #fff7e7;
+  color: #7a4b00;
+}
+
+.mapping-stage.disabled {
+  background: #f2f4f7;
+  color: var(--muted);
 }
 
 .ai-stage.warn {
@@ -569,5 +603,17 @@ tbody tr:last-child td {
   .inline-form,
   .scope-form {
     grid-template-columns: 1fr;
+  }
+
+  .mapping-stage,
+  .ai-stage,
+  .mapping-stage form,
+  .ai-stage form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .mapping-stage select {
+    min-width: 0;
   }
 }

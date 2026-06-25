@@ -29,9 +29,36 @@
         <div><strong>{{ mapped_count }}</strong><span>planos gerados</span></div>
         <div><strong>{{ slide_selection_label }}</strong><span>slides considerados</span></div>
       </section>
+
+      <section class="mapping-stage {{ mapping_status.state }}">
+        <div>
+          <strong>Mapeamento salvo</strong>
+          <span>{{ mapping_status.message }}</span>
+        </div>
+        {% if mapping_candidates %}
+          <form action="/jobs/{{ job_id }}/mapping-template" method="post" data-progress-message="Aplicando mapeamento salvo do squad...">
+            <select name="mapping_template_ref">
+              {% for candidate in mapping_candidates %}
+                <option value="{{ candidate.ref }}">
+                  {{ candidate.name }} · {{ candidate.matched_count }} targets · {{ candidate.score }}%
+                </option>
+              {% endfor %}
+            </select>
+            <button type="submit">Aplicar mapeamento</button>
+          </form>
+        {% endif %}
+      </section>
+
       <section class="ai-stage {{ ai_status.state }}">
-        <strong>Etapa IA</strong>
-        <span>{{ ai_status.message }}</span>
+        <div>
+          <strong>Etapa IA</strong>
+          <span>{{ ai_status.message }}</span>
+        </div>
+        {% if ai_available %}
+          <form action="/jobs/{{ job_id }}/review-ai" method="post" data-progress-message="Revisando mapeamento e matriz com IA...">
+            <button type="submit">Revisar com IA</button>
+          </form>
+        {% endif %}
       </section>
 
       <form class="scope-form" action="/jobs/{{ job_id }}/slides" method="post" data-progress-message="Atualizando escopo de slides...">

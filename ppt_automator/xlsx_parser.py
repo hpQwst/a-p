@@ -167,6 +167,21 @@ def _parse_rectangular_table(
 
     header_row_index, header_start_col, header_end_col = _find_header_row(rows)
     if header_row_index is None:
+        key_value = _parse_key_value_rows(rows)
+        if key_value:
+            categories, values = key_value
+            return ParsedXlsxTable(
+                source_id=_graph_id(Path(file_name).stem),
+                file_name=file_name,
+                sheet_name=sheet_name,
+                orientation="key_value_rows",
+                categories=categories,
+                series=["Valor"],
+                values=values,
+                used_range=used_range,
+                metadata=metadata,
+                preview_rows=_preview_rows(categories, ["Valor"], values, "categories_rows_series_columns"),
+            )
         return ParsedXlsxTable(
             source_id=_graph_id(Path(file_name).stem),
             file_name=file_name,
@@ -229,6 +244,35 @@ def _parse_rectangular_table(
         metadata=metadata,
         preview_rows=_preview_rows(categories, series, values, orientation),
     )
+
+
+def _parse_key_value_rows(rows: list[list[Any]]) -> tuple[list[str], list[list[Any]]] | None:
+    if len(rows) < 2:
+        return None
+    max_cols = max((len(row) for row in rows), default=0)
+    if max_cols < 2:
+        return None
+
+    best: tuple[int, int, list[str], list[list[Any]]] | None = None
+    for label_col in range(max_cols - 1):
+        value_col = label_col + 1
+        categories: list[str] = []
+        values: list[list[Any]] = []
+        for row in rows:
+            label = _text(row[label_col] if label_col < len(row) else "")
+            if not label or _to_number(label) is not None:
+                continue
+            value = row[value_col] if value_col < len(row) else None
+            categories.append(label)
+            values.append([value])
+        value_count = sum(1 for row in values if _text(row[0]) or _to_number(row[0]) is not None)
+        if len(categories) >= 2 and value_count >= 1:
+            score = len(categories) + value_count
+            if best is None or score > best[0]:
+                best = (score, value_col, categories, values)
+    if best is None:
+        return None
+    return best[2], best[3]
 
 
 def _find_header_row(rows: list[list[Any]]) -> tuple[int | None, int, int]:

@@ -66,6 +66,8 @@ def _plan_is_percentage(plan: TransformPlan) -> bool:
 
 
 def _display_value(value: Any, percentage: bool) -> Any:
+    if value is None:
+        return ""
     if not percentage:
         return value
     parsed = _to_number(value)

@@ -46,6 +46,7 @@ from worker.processor import (
 APP_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_ROOT.parent
 RUNTIME_ROOT = Path(os.getenv("AUTO_PPT_RUNTIME_ROOT", PROJECT_ROOT / "workspace_data" / "web_jobs")).resolve()
+RENDER_CACHE_VERSION = 3
 
 app = FastAPI(title="QWST Auto PPT")
 app.mount("/static", StaticFiles(directory=APP_ROOT / "static"), name="static")
@@ -134,7 +135,13 @@ async def resume_project_preview(request: Request, squad: str, slug: str) -> HTM
         job_id = _restore_project_checkpoint(project)
     except Exception as exc:
         return _error_response(request, str(exc), status_code=400)
-    return _render_preview(request, job_id, notice="Checkpoint do projeto carregado.", prefer_cache=True)
+    return _render_preview(
+        request,
+        job_id,
+        notice="Checkpoint do projeto carregado.",
+        prefer_cache=True,
+        allow_ai=False,
+    )
 
 
 @app.post("/jobs/{job_id}/slides", response_class=HTMLResponse)
@@ -201,7 +208,14 @@ async def override_target_datasource(
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc))
     range_notice = f" com range {cell_range.strip()}" if cell_range.strip() else ""
-    return _render_preview(request, job_id, notice=f"Datasource {filename}{range_notice} aplicado ao target {target_id}.")
+    return _render_preview(
+        request,
+        job_id,
+        notice=f"Datasource {filename}{range_notice} aplicado ao target {target_id}.",
+        allow_ai=True,
+        allow_ai_source_matches=False,
+        ai_diagnostic_target_ids={target_id},
+    )
 
 
 @app.get("/jobs/{job_id}/download")
@@ -251,6 +265,9 @@ def _render_preview(
     notice: str = "",
     error: str = "",
     prefer_cache: bool = False,
+    allow_ai: bool = True,
+    allow_ai_source_matches: bool | None = None,
+    ai_diagnostic_target_ids: set[str] | None = None,
 ) -> HTMLResponse:
     job_dir = _job_dir(job_id)
     if prefer_cache:
@@ -272,9 +289,15 @@ def _render_preview(
     except Exception as exc:
         return _error_response(request, f"Nao consegui analisar os arquivos: {exc}", status_code=400)
 
-    ai_matches, ai_match_status = _ai_source_matches_for_job(job_dir, analysis)
+    source_match_ai = allow_ai if allow_ai_source_matches is None else allow_ai_source_matches
+    ai_matches, ai_match_status = _ai_source_matches_for_job(job_dir, analysis, allow_ai=source_match_ai)
     analysis = apply_ai_source_matches_to_analysis(analysis, ai_matches)
-    ai_diagnostics, ai_diagnostic_status = _ai_diagnostics_for_job(job_dir, analysis)
+    ai_diagnostics, ai_diagnostic_status = _ai_diagnostics_for_job(
+        job_dir,
+        analysis,
+        allow_ai=allow_ai,
+        target_ids=ai_diagnostic_target_ids,
+    )
     analysis = apply_ai_recommendations_to_analysis(analysis, ai_diagnostics)
     ai_status = _combine_ai_status(ai_match_status, ai_diagnostic_status)
     cards_by_slide = _cards_by_slide(
@@ -343,6 +366,7 @@ def _ai_diagnostics_for_job(
     job_dir: Path,
     analysis: AnalysisResult,
     allow_ai: bool = True,
+    target_ids: set[str] | None = None,
 ) -> tuple[dict[str, dict], dict[str, str]]:
     if not ai_configured(PROJECT_ROOT):
         return {}, {"state": "disabled", "message": "IA indisponivel: configure OPENAI_API_KEY no .env."}
@@ -352,13 +376,18 @@ def _ai_diagnostics_for_job(
     payload: dict[str, dict] = {}
     if cache_path.exists():
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
-    missing_plans = [plan for plan in analysis.plans if plan.target_id not in payload]
+    eligible_plans = analysis.plans
+    if target_ids is not None:
+        eligible_plans = [plan for plan in analysis.plans if plan.target_id in target_ids]
+        if not eligible_plans:
+            return payload, {"state": "warn", "message": "Target alterado nao tem plano para diagnostico IA."}
+    missing_plans = [plan for plan in eligible_plans if plan.target_id not in payload]
     if not missing_plans:
         return payload, {"state": "cached", "message": "Diagnostico IA carregado do cache."}
     if not allow_ai:
         return payload, {
             "state": "cached" if payload else "warn",
-            "message": f"Download usou cache de IA; {len(missing_plans)} target(s) sem diagnostico cached nao foram enviados para IA.",
+            "message": f"Preview usou apenas dados salvos; {len(missing_plans)} target(s) sem diagnostico cached nao foram enviados para IA.",
         }
     try:
         sent_at = _now_iso()
@@ -377,8 +406,8 @@ def _ai_diagnostics_for_job(
                     "column_mapping": item.column_mapping,
                     "recommended_edit_data": item.recommended_edit_data,
                 }
+                for item in diagnostics
             }
-            for item in diagnostics
         )
         for plan in missing_plans:
             payload.setdefault(
@@ -422,7 +451,7 @@ def _ai_diagnostics_for_job(
                 "payload_summary": _diagnostic_payload_summary(missing_plans),
             },
         )
-        return {}, {"state": "warn", "message": f"IA indisponível nesta análise: {format_ai_error(exc)}"}
+        return payload, {"state": "warn", "message": f"IA indisponivel nesta analise: {format_ai_error(exc)}"}
 
 
 def _ai_source_matches_for_job(
@@ -482,8 +511,8 @@ def _ai_source_matches_for_job(
                     "reason": item.reason,
                     "status": "matched",
                 }
+                for item in suggestions
             }
-            for item in suggestions
         )
         cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         _append_ai_log(
@@ -518,7 +547,7 @@ def _ai_source_matches_for_job(
                 "payload_summary": _match_payload_summary(missing_targets, analysis.sources),
             },
         )
-        return {}, {"state": "warn", "message": f"IA indisponivel para match de datasource: {format_ai_error(exc)}"}
+        return payload, {"state": "warn", "message": f"IA indisponivel para match de datasource: {format_ai_error(exc)}"}
 
 
 def _combine_ai_status(*statuses: dict[str, str]) -> dict[str, str]:
@@ -625,6 +654,7 @@ def _render_cache_path(job_dir: Path) -> Path:
 
 def _save_render_cache(job_dir: Path, context: dict) -> None:
     cached = dict(context)
+    cached["render_cache_version"] = RENDER_CACHE_VERSION
     cached["notice"] = ""
     cached["error"] = ""
     cached["ai_log_entries"] = []
@@ -635,7 +665,10 @@ def _load_render_cache(job_dir: Path) -> dict:
     cache_path = _render_cache_path(job_dir)
     if not cache_path.exists():
         return {}
-    return json.loads(cache_path.read_text(encoding="utf-8"))
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    if payload.get("render_cache_version") != RENDER_CACHE_VERSION:
+        return {}
+    return payload
 
 
 def _clear_render_cache(job_dir: Path) -> None:
@@ -685,9 +718,13 @@ def _ppt_contract_for_target(target) -> dict:
 def _source_detected_for_plan(plan) -> dict:
     return {
         "orientation": plan.datasource.orientation,
-        "headers": plan.datasource.preview_rows[0] if plan.datasource.preview_rows else [],
-        "rows": plan.datasource.preview_rows[1:9] if plan.datasource.preview_rows else [],
+        "headers": _display_row(plan.datasource.preview_rows[0]) if plan.datasource.preview_rows else [],
+        "rows": [_display_row(row) for row in plan.datasource.preview_rows[1:9]] if plan.datasource.preview_rows else [],
     }
+
+
+def _display_row(row: list) -> list:
+    return ["" if value is None else value for value in row]
 
 
 def _resolve_project(project_ref: str, squad: str, project_name: str):

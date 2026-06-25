@@ -129,6 +129,9 @@ def _normalize_table(
     confidence: float,
     match_reason: str,
 ) -> TransformPlan:
+    if source.orientation == "key_value_rows":
+        return _normalize_key_value_table(target, source, confidence, match_reason)
+
     categories = list(source.categories)
     if source.orientation == "categories_rows_series_columns":
         values = source.values[:1]
@@ -148,6 +151,47 @@ def _normalize_table(
         values=values,
         confidence=confidence,
         reason=match_reason or "Tabela PowerPoint compativel com a matriz do XLSX.",
+        number_format=number_format,
+    )
+
+
+def _normalize_key_value_table(
+    target: PptTarget,
+    source: ParsedXlsxTable,
+    confidence: float,
+    match_reason: str,
+) -> TransformPlan:
+    value_map = {
+        _norm(category): (source.values[index][0] if index < len(source.values) and source.values[index] else "")
+        for index, category in enumerate(source.categories)
+    }
+    if target.table_cells and all(len(row) >= 2 and _norm(row[0]) for row in target.table_cells):
+        values = []
+        for row in target.table_cells:
+            label = row[0]
+            value = value_map.get(_norm(label), "")
+            values.append([label, "" if value is None else value])
+        categories = ["", source.series[0] if source.series else "Valor"]
+        series = [row[0] for row in target.table_cells]
+    else:
+        categories = ["", source.series[0] if source.series else "Valor"]
+        series = list(source.categories)
+        values = [
+            [category, "" if row_values[0] is None else row_values[0]]
+            for category, row_values in zip(source.categories, source.values)
+        ]
+    number_format = "thousands_pt_br" if _looks_like_thousands(values) else ""
+    return TransformPlan(
+        target=target,
+        datasource=source,
+        action="fill_table_cells",
+        orientation_xlsx=source.orientation,
+        orientation_ppt="table_cells",
+        categories=categories,
+        series=series,
+        values=values,
+        confidence=confidence,
+        reason=match_reason or "Tabela PowerPoint preenchida por linhas chave-valor do XLSX.",
         number_format=number_format,
     )
 

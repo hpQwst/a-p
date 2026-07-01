@@ -43,6 +43,7 @@ class TableKeyValueUpdateTests(unittest.TestCase):
         self.assertEqual(plan.values, [["Base:", ""], ["Total", 50], ["Natura", 20], ["Avon", 30]])
         self.assertEqual(values, [["Base:", ""], ["Total", "50"], ["Natura", "20"], ["Avon", "30"]])
         self.assertNotIn("None", updated.decode("utf-8"))
+        self.assertEqual(_paragraph_child_names(updated, row_index=2, cell_index=2), ["pPr", "r", "endParaRPr"])
 
 
 def _key_value_workbook() -> bytes:
@@ -66,7 +67,7 @@ def _slide_with_table() -> bytes:
         f"""
         <a:tr h="370840">
           <a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{label}</a:t></a:r></a:p></a:txBody></a:tc>
-          <a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t></a:t></a:r></a:p></a:txBody></a:tc>
+          <a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr/><a:endParaRPr lang="pt-BR" sz="800"/></a:p></a:txBody></a:tc>
         </a:tr>
         """
         for label in ["Base:", "Total", "Natura", "Avon"]
@@ -91,6 +92,15 @@ def _table_values(slide_xml: bytes) -> list[list[str]]:
         ["".join(text.text or "" for text in cell.findall(".//a:t", NS)) for cell in row.findall("./a:tc", NS)]
         for row in root.findall(".//a:tbl/a:tr", NS)
     ]
+
+
+def _paragraph_child_names(slide_xml: bytes, row_index: int, cell_index: int) -> list[str]:
+    root = ET.fromstring(slide_xml)
+    row = root.findall(".//a:tbl/a:tr", NS)[row_index - 1]
+    cell = row.findall("./a:tc", NS)[cell_index - 1]
+    paragraph = cell.find("./a:txBody/a:p", NS)
+    assert paragraph is not None
+    return [child.tag.split("}", 1)[-1] for child in list(paragraph)]
 
 
 if __name__ == "__main__":

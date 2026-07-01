@@ -19,7 +19,7 @@ class HugoMatchingTests(unittest.TestCase):
         cls.targets, cls.sources, cls.plans = analyze_update_package(PPT, DATASOURCES)
 
     def test_letter_named_xlsx_files_match_by_edit_data_contract(self) -> None:
-        plan_by_target = {plan.target_id: plan for plan in self.plans}
+        plan_by_shape = {plan.target.shape_name: plan for plan in self.plans}
         expected = {
             "7792738590": "j.xlsx",
             "5977261166": "g.xlsx",
@@ -34,9 +34,9 @@ class HugoMatchingTests(unittest.TestCase):
         }
         for target_id, filename in expected.items():
             with self.subTest(target_id=target_id):
-                self.assertIn(target_id, plan_by_target)
-                self.assertEqual(plan_by_target[target_id].datasource.file_name, filename)
-                self.assertGreaterEqual(plan_by_target[target_id].confidence, 0.45)
+                self.assertIn(target_id, plan_by_shape)
+                self.assertEqual(plan_by_shape[target_id].datasource.file_name, filename)
+                self.assertGreaterEqual(plan_by_shape[target_id].confidence, 0.45)
 
 
 if __name__ == "__main__":

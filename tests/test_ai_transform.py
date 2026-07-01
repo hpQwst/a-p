@@ -20,7 +20,7 @@ DATASOURCES = ANDRE_DIR / "datasources.zip"
 class AiTransformTests(unittest.TestCase):
     def test_ai_receives_ppt_edit_data_contract_and_xlsx_structure(self) -> None:
         _targets, _sources, plans = analyze_update_package(PPT, DATASOURCES)
-        plan = next(item for item in plans if item.target_id == "7792738590")
+        plan = next(item for item in plans if item.target.shape_name == "7792738590")
         captured: dict[str, object] = {}
 
         class FakeResponses:
@@ -31,7 +31,7 @@ class AiTransformTests(unittest.TestCase):
                         {
                             "diagnostics": [
                                 {
-                                    "target": "7792738590",
+                                    "target": plan.target_id,
                                     "status": "ok",
                                     "confidence": 0.91,
                                     "action": "align",
@@ -58,7 +58,7 @@ class AiTransformTests(unittest.TestCase):
             with patch.dict("sys.modules", {"openai": SimpleNamespace(OpenAI=FakeOpenAI)}):
                 diagnostics = suggest_transform_diagnostics([plan])
 
-        self.assertEqual(diagnostics[0].target, "7792738590")
+        self.assertEqual(diagnostics[0].target, plan.target_id)
         self.assertEqual(diagnostics[0].action, "align")
         request_payload = json.loads(captured["input"][1]["content"])
         ai_plan = request_payload["plans"][0]

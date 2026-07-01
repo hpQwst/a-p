@@ -159,7 +159,7 @@ def _chart_value_text(value: Any, numeric: bool, number_format: str = "") -> str
     if value is None:
         return "0" if numeric else ""
     if numeric:
-        parsed = _numeric_value(value, percentage=bool(number_format))
+        parsed = _numeric_value(value, percentage="%" in number_format)
         if parsed is not None:
             return f"{parsed:.12g}"
     if isinstance(value, float):
@@ -170,6 +170,8 @@ def _chart_value_text(value: Any, numeric: bool, number_format: str = "") -> str
 
 
 def _plan_number_format(plan: TransformPlan) -> str:
+    if plan.number_format:
+        return plan.number_format
     if plan.preserve_percentage_decimal:
         return PERCENT_FORMAT
     values = [value for row in plan.values for value in row]
@@ -185,7 +187,10 @@ def _plan_number_format(plan: TransformPlan) -> str:
 
 def _numeric_value(value: Any, percentage: bool = False) -> float | None:
     if isinstance(value, (int, float)):
-        return float(value)
+        number = float(value)
+        if percentage and abs(number) > 1:
+            return number / 100
+        return number
     text = str(value).strip()
     if not text:
         return None

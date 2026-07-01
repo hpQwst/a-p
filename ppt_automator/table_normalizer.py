@@ -24,6 +24,7 @@ class TransformPlan:
     reason: str
     preserve_percentage_decimal: bool = False
     number_format: str = ""
+    typed_edit_data: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -90,12 +91,14 @@ def _normalize_chart(
             output_row.append(_aligned_value(source, axis_alignment, row_label, col_label))
         values.append(output_row)
 
+    output_rows = [_source_label_for_target_axis(axis_alignment, "row", label) for label in target_rows]
+    output_cols = [_source_label_for_target_axis(axis_alignment, "col", label) for label in target_cols]
     if orientation_ppt == "series_rows_categories_columns":
-        series = target_rows
-        categories = target_cols
+        series = output_rows
+        categories = output_cols
     else:
-        categories = target_rows
-        series = target_cols
+        categories = output_rows
+        series = output_cols
 
     action = "transpose" if axis_alignment["mode"] == "cross" else "align"
     warnings = []
@@ -169,10 +172,13 @@ def _normalize_key_value_table(
         values = []
         for row in target.table_cells:
             label = row[0]
-            value = value_map.get(_norm(label), "")
-            values.append([label, "" if value is None else value])
+            source_label = _best_match(label, source.categories)
+            if _soft_text_score(label, source_label) < 0.68:
+                source_label = label
+            value = value_map.get(_norm(source_label), "")
+            values.append([source_label, "" if value is None else value])
         categories = ["", source.series[0] if source.series else "Valor"]
-        series = [row[0] for row in target.table_cells]
+        series = [row[0] for row in values]
     else:
         categories = ["", source.series[0] if source.series else "Valor"]
         series = list(source.categories)
@@ -379,6 +385,11 @@ def _aligned_value(source: ParsedXlsxTable, alignment: dict[str, Any], target_ro
         return source.values[row_index][col_index]
     except IndexError:
         return None
+
+
+def _source_label_for_target_axis(alignment: dict[str, Any], axis: str, target_label: str) -> str:
+    mapping = alignment["row_map"] if axis == "row" else alignment["col_map"]
+    return mapping.get(target_label) or target_label
 
 
 def _label_map(targets: list[str], choices: list[str]) -> dict[str, str]:

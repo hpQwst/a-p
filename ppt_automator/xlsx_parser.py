@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -284,7 +285,7 @@ def _find_header_row(rows: list[list[Any]]) -> tuple[int | None, int, int]:
         start = header_cols[0]
         end = header_cols[-1]
         if start == 0 and len(header_cols) > 1:
-            if not _looks_like_period(row[0]) and not _is_likely_header_label(row[0]):
+            if not _looks_like_period(row[0]):
                 start = header_cols[1]
         data_score = 0
         for next_row in rows[row_index + 1 : row_index + 5]:
@@ -451,15 +452,24 @@ def _graph_id(value: Any) -> str:
     text = _text(value)
     if re.fullmatch(r"\d+\.0", text):
         text = text[:-2]
+    text = re.sub(r"(?:^|[\s_-])(?:slide|s)0*\d+$", "", text, flags=re.IGNORECASE).strip()
     return re.sub(r"\D", "", text)
 
 
 def _text(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, (datetime, date)):
+        return _date_period_label(value)
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value).strip()
+
+
+def _date_period_label(value: datetime | date) -> str:
+    months = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+    year_suffix = value.day if value.day >= 13 else value.year % 100
+    return f"{months[value.month - 1]}/{year_suffix:02d}"
 
 
 def _norm(value: Any) -> str:

@@ -23,25 +23,6 @@ NS = {
 }
 
 
-def excel_com_available() -> bool:
-    try:
-        import pythoncom
-        import win32com.client
-
-        pythoncom.CoInitialize()
-        excel = win32com.client.DispatchEx("Excel.Application")
-        excel.DisplayAlerts = False
-        excel.Quit()
-        pythoncom.CoUninitialize()
-        return True
-    except Exception:
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
-        return False
-
-
 @unittest.skipUnless(PPT.exists() and DATASOURCES.exists(), "Arquivos MB de regressao nao encontrados.")
 class MbUpdateTargetTests(unittest.TestCase):
     @classmethod
@@ -79,8 +60,6 @@ class MbUpdateTargetTests(unittest.TestCase):
         self.assertEqual(source.values[0], [13126.0, 12626.0, 8483.0, 9401.0, 11929.0])
 
     def test_generated_ppt_updates_chart_and_powerpoint_table(self) -> None:
-        if not excel_com_available():
-            self.skipTest("Excel COM indisponivel neste ambiente.")
         output = generate_updated_pptx(PPT, self.plans)
         with ZipFile(BytesIO(output)) as zf:
             wb = openpyxl.load_workbook(BytesIO(zf.read("ppt/embeddings/Microsoft_Excel_Worksheet.xlsx")), data_only=True)
@@ -90,7 +69,8 @@ class MbUpdateTargetTests(unittest.TestCase):
             self.assertAlmostEqual(ws.cell(2, 2).value, 0.2008989791254)
             self.assertAlmostEqual(ws.cell(2, 5).value, 44.67469145207984)
 
-            table_values = self._table_values(zf.read("ppt/slides/slide1.xml"), "1424058794")
+            table_plan = self._plan("1424058794")
+            table_values = self._table_values(zf.read("ppt/slides/slide1.xml"), table_plan.target.target_id)
             self.assertEqual(table_values, [["13.126", "12.626", "8.483", "9.401", "11.929"]])
 
             chart_root = ET.fromstring(zf.read("ppt/charts/chart1.xml"))
@@ -104,7 +84,7 @@ class MbUpdateTargetTests(unittest.TestCase):
         return next(source for source in self.sources if source.source_id == graph_id)
 
     def _plan(self, target_id: str):
-        return next(plan for plan in self.plans if plan.target_id == target_id)
+        return next(plan for plan in self.plans if plan.target.shape_name == target_id)
 
     def _table_values(self, slide_xml: bytes, shape_name: str) -> list[list[str]]:
         root = ET.fromstring(slide_xml)

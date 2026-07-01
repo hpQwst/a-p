@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable
@@ -198,7 +198,9 @@ def discover_ppt_targets(
                         text=text,
                     )
                 )
-    return _with_target_keys(sorted(targets, key=lambda item: (item.slide_number, item.top_in, item.left_in, item.shape_name)))
+    from .target_labeler import assign_slide_target_ids
+
+    return assign_slide_target_ids(sorted(targets, key=lambda item: (item.slide_number, item.top_in, item.left_in, item.shape_name)))
 
 
 def _chart_target(
@@ -424,30 +426,6 @@ def _table_cells(table_el: ET.Element) -> list[list[str]]:
 
 def _is_update_name(value: str) -> bool:
     return bool(re.fullmatch(r"\d{4,}", _text(value)))
-
-
-def _with_target_keys(targets: list[PptTarget]) -> list[PptTarget]:
-    counts: dict[str, int] = {}
-    for target in targets:
-        counts[target.shape_name] = counts.get(target.shape_name, 0) + 1
-
-    output: list[PptTarget] = []
-    for ordinal, target in enumerate(targets, start=1):
-        if _is_update_name(target.shape_name) and counts.get(target.shape_name, 0) == 1:
-            output.append(target)
-            continue
-        if target.object_type not in {"chart", "table"}:
-            output.append(target)
-            continue
-        key = _canonical_target_key(target, ordinal)
-        output.append(replace(target, target_key=key))
-    return output
-
-
-def _canonical_target_key(target: PptTarget, ordinal: int) -> str:
-    shape_id = re.sub(r"[^A-Za-z0-9]+", "_", target.shape_id).strip("_")
-    suffix = shape_id or str(ordinal)
-    return f"slide{target.slide_number:03d}_{target.object_type}_{suffix}"
 
 
 def _sorted_slide_paths(zf: ZipFile) -> list[str]:

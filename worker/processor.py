@@ -11,6 +11,7 @@ from ppt_automator.ai_mapper import AiSourceMatchSuggestion
 from ppt_automator.ppt_discovery import PptTarget
 from ppt_automator.preview_model import PreviewTarget, build_preview
 from ppt_automator.table_normalizer import TransformPlan, normalize_to_target
+from ppt_automator.typed_matrix import normalize_typed_edit_data, numeric_value
 from ppt_automator.xlsx_parser import ParsedXlsxTable, parse_xlsx_table
 
 
@@ -59,7 +60,7 @@ def generate_file(
     targets, sources, plans = analyze_update_package(pptx_bytes, datasource_zip_bytes)
     targets, plans = _select_slides(targets, plans, slide_numbers)
     plans, _sources = _apply_manual_sources(targets, sources, plans, manual_sources or {})
-    return generate_updated_pptx(pptx_bytes, plans)
+    return generate_updated_pptx(pptx_bytes, plans, targets=targets)
 
 
 def parse_slide_selection(value: str) -> list[int]:
@@ -103,6 +104,47 @@ def apply_ai_recommendations_to_analysis(
         target_count=analysis.target_count,
         source_count=analysis.source_count,
         warnings=analysis.warnings,
+    )
+
+
+def apply_typed_outputs_to_analysis(
+    analysis: AnalysisResult,
+    target_outputs: dict[str, dict[str, Any]],
+) -> AnalysisResult:
+    if not target_outputs:
+        return analysis
+    targets_by_id = {target.target_id: target for target in analysis.targets}
+    sources_by_name = _sources_by_match_name(analysis.sources)
+    plans_by_id = {plan.target_id: plan for plan in analysis.plans}
+
+    for target_id, output in target_outputs.items():
+        target = targets_by_id.get(target_id)
+        if target is None:
+            continue
+        source_file = str(output.get("source_file") or "")
+        source = sources_by_name.get(_source_match_key(source_file))
+        if source is None and analysis.sources:
+            source = analysis.sources[0]
+        if source is None:
+            continue
+        final_edit_data = output.get("final_edit_data") or {}
+        plan = _plan_from_typed_edit_data(target, source, output, final_edit_data)
+        if plan is not None:
+            plans_by_id[target_id] = plan
+
+    ordered_ids = [plan.target_id for plan in analysis.plans]
+    for target in analysis.targets:
+        if target.target_id in plans_by_id and target.target_id not in ordered_ids:
+            ordered_ids.append(target.target_id)
+    plans = [plans_by_id[target_id] for target_id in ordered_ids]
+    return AnalysisResult(
+        plans=plans,
+        preview=build_preview(plans),
+        targets=analysis.targets,
+        sources=analysis.sources,
+        target_count=analysis.target_count,
+        source_count=analysis.source_count,
+        warnings=_analysis_warnings(analysis.targets, analysis.sources, plans),
     )
 
 
@@ -377,6 +419,13 @@ def _plan_from_ai_edit_data(plan: TransformPlan, diagnostic: dict[str, Any]) -> 
     edit_data = diagnostic.get("recommended_edit_data") or {}
     if not isinstance(edit_data, dict):
         return None
+    if edit_data.get("headers") and edit_data.get("rows") and isinstance((edit_data.get("headers") or [None])[0], dict):
+        output = {
+            "confidence": diagnostic.get("confidence", plan.confidence),
+            "extraction_explanation": diagnostic.get("reason", ""),
+            "final_edit_data": edit_data,
+        }
+        return _plan_from_typed_edit_data(plan.target, plan.datasource, output, edit_data, base_plan=plan)
     headers = [str(item).strip() for item in edit_data.get("headers") or []]
     raw_rows = edit_data.get("rows") or []
     rows = [[str(cell).strip() for cell in row] for row in raw_rows if isinstance(row, list) and row]
@@ -469,3 +518,65 @@ def _rows_have_percent(rows: Any) -> bool:
     if not isinstance(rows, list):
         return False
     return any("%" in str(cell) for row in rows if isinstance(row, list) for cell in row)
+
+
+def _plan_from_typed_edit_data(
+    target: PptTarget,
+    source: ParsedXlsxTable,
+    output: dict[str, Any],
+    edit_data: dict[str, Any],
+    base_plan: TransformPlan | None = None,
+) -> TransformPlan | None:
+    normalized = normalize_typed_edit_data(edit_data)
+    headers = normalized.get("headers") or []
+    rows = normalized.get("rows") or []
+    if not rows:
+        return None
+    header_labels = [str(cell.get("value") or "") for cell in headers]
+    value_cols = max((len(row) - 1 for row in rows), default=0)
+    output_orientation = str(output.get("edit_orientation") or "")
+    orientation_ppt = (
+        output_orientation
+        if output_orientation in {"series_rows_categories_columns", "categories_rows_series_columns", "table_cells"}
+        else target.expected_orientation or (base_plan.orientation_ppt if base_plan else "categories_rows_series_columns")
+    )
+
+    if target.object_type == "chart" and orientation_ppt == "series_rows_categories_columns":
+        categories = _axis_headers(header_labels, value_cols, target.expected_categories)
+        series = [str(row[0].get("value") or "") for row in rows]
+        values = [[_typed_number(cell) for cell in row[1:]] for row in rows]
+    elif target.object_type == "chart":
+        series = _axis_headers(header_labels, value_cols, target.expected_series)
+        categories = [str(row[0].get("value") or "") for row in rows]
+        values = [[_typed_number(cell) for cell in row[1:]] for row in rows]
+    else:
+        categories = header_labels
+        series = [str(row[0].get("value") or f"Linha {index + 1}") for index, row in enumerate(rows)]
+        values = [[str(cell.get("value") or "") for cell in row] for row in rows]
+        orientation_ppt = "table_cells"
+
+    confidence = float(output.get("confidence") or (base_plan.confidence if base_plan else 0.8))
+    explanation = str(output.get("extraction_explanation") or "Matriz tipada montada pela IA.")
+    return TransformPlan(
+        target=target,
+        datasource=source,
+        action="ai_typed_matrix",
+        orientation_xlsx=source.orientation,
+        orientation_ppt=orientation_ppt,
+        categories=categories,
+        series=series,
+        values=values,
+        confidence=confidence,
+        reason=explanation,
+        preserve_percentage_decimal=base_plan.preserve_percentage_decimal if base_plan else False,
+        number_format=str(output.get("visual_number_format") or (base_plan.number_format if base_plan else "")),
+        typed_edit_data=normalized,
+        warnings=[],
+    )
+
+
+def _typed_number(cell: dict[str, Any]) -> Any:
+    value = numeric_value(cell)
+    if value is None:
+        return str(cell.get("value") or "")
+    return float(value)

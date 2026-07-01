@@ -7,7 +7,9 @@ import os
 import re
 import unittest
 import xml.etree.ElementTree as ET
+from unittest.mock import patch
 
+import openpyxl
 from fastapi.testclient import TestClient
 
 from ppt_automator import analyze_update_package, generate_updated_pptx
@@ -23,25 +25,6 @@ MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 NS = {"s": SHEET_NS}
 
 
-def excel_com_available() -> bool:
-    try:
-        import pythoncom
-        import win32com.client
-
-        pythoncom.CoInitialize()
-        excel = win32com.client.DispatchEx("Excel.Application")
-        excel.DisplayAlerts = False
-        excel.Quit()
-        pythoncom.CoUninitialize()
-        return True
-    except Exception:
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
-        return False
-
-
 @unittest.skipUnless(PPT.exists() and DATASOURCES.exists(), "Arquivos Andre de regressao nao encontrados.")
 class AndreWebFlowTests(unittest.TestCase):
     def test_andre_package_analyzes_without_none_comparison_error(self) -> None:
@@ -49,16 +32,12 @@ class AndreWebFlowTests(unittest.TestCase):
         self.assertGreaterEqual(len(targets), 12)
         self.assertEqual(len(sources), 12)
         self.assertEqual(len(plans), 12)
-        if not excel_com_available():
-            self.skipTest("Excel COM indisponivel neste ambiente.")
         output = generate_updated_pptx(PPT, plans)
         self.assertGreater(len(output), 1_000_000)
 
     def test_generated_chart_workbook_keeps_edit_data_package_valid(self) -> None:
-        if not excel_com_available():
-            self.skipTest("Excel COM indisponivel neste ambiente.")
         _targets, _sources, plans = analyze_update_package(PPT, DATASOURCES)
-        plan = next(item for item in plans if item.target_id == "7792738590")
+        plan = next(item for item in plans if item.target.shape_name == "7792738590")
         output = generate_updated_pptx(PPT, plans)
         with ZipFile(BytesIO(output)) as pptx:
             workbook_bytes = pptx.read(plan.target.workbook_embedded)
@@ -67,9 +46,13 @@ class AndreWebFlowTests(unittest.TestCase):
             sheet_xml = workbook.read("xl/worksheets/sheet1.xml")
             table_xml = workbook.read("xl/tables/table1.xml")
 
+        workbook = openpyxl.load_workbook(BytesIO(workbook_bytes), data_only=True)
+        worksheet = workbook.worksheets[0]
+        self.assertEqual(worksheet["A1"].value, " ")
+        workbook.close()
+
         sheet = ET.fromstring(sheet_xml)
         self.assertEqual(sheet.find("./s:dimension", NS).attrib["ref"], "A1:D6")
-        self.assertEqual(sheet.find("./s:sheetData/s:row/s:c/s:is/s:t", NS).text, " ")
         self.assertNoBrokenIgnorablePrefixes(sheet_xml)
 
         table = ET.fromstring(table_xml)
@@ -100,45 +83,49 @@ class AndreWebFlowTests(unittest.TestCase):
                 MAPPING.read_bytes(),
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-        response = client.post(
-            "/preview",
-            data={
-                "project_ref": "",
-                "squad": "squad1",
-                "project_name": "Andre regressao",
-                "confirm_large_deck": "1",
-            },
-            files=files,
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("7792738590", response.text)
-        self.assertIn("Sem datasource automático", response.text)
-        match = re.search(r"/jobs/([a-f0-9]+)/download", response.text)
-        self.assertIsNotNone(match)
-        job_id = match.group(1)
+        with patch.dict(os.environ, {"AUTO_PPT_AUTO_SLIDE_AI": "0"}), patch("web.main.ai_configured", return_value=False):
+            response = client.post(
+                "/preview",
+                data={
+                    "project_ref": "",
+                    "squad": "squad1",
+                    "project_name": "Andre regressao",
+                    "confirm_large_deck": "1",
+                },
+                files=files,
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("Sem datasource automático", response.text)
+            match = re.search(r"/jobs/([a-f0-9]+)/download", response.text)
+            self.assertIsNotNone(match)
+            job_id = match.group(1)
+            slide_three = client.get(f"/jobs/{job_id}/preview?slide=3")
+            self.assertEqual(slide_three.status_code, 200)
+            self.assertIn("7792738590", slide_three.text)
 
-        with ZipFile(DATASOURCES) as zf:
-            manual_data = zf.read("datasources/7792738590.xlsx")
-        override = client.post(
-            f"/jobs/{job_id}/targets/6889461846/override",
-            files={
-                "datasource": (
-                    "7792738590.xlsx",
-                    manual_data,
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            with ZipFile(DATASOURCES) as zf:
+                manual_source = next(
+                    name
+                    for name in zf.namelist()
+                    if name.endswith("7792738590.xlsx") or name.endswith("tab7590_slide3.xlsx")
                 )
-            },
-        )
-        self.assertEqual(override.status_code, 200)
-        self.assertIn("Correção manual", override.text)
+                manual_data = zf.read(manual_source)
+            override = client.post(
+                f"/jobs/{job_id}/targets/6889461846/override",
+                files={
+                    "datasource": (
+                        "7792738590.xlsx",
+                        manual_data,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
+            )
+            self.assertEqual(override.status_code, 200)
+            self.assertIn("Correção manual", override.text)
 
-        download = client.get(f"/jobs/{job_id}/download")
-        if excel_com_available():
+            download = client.get(f"/jobs/{job_id}/download")
             self.assertEqual(download.status_code, 200)
             self.assertGreater(len(download.content), 1_000_000)
-        else:
-            self.assertEqual(download.status_code, 500)
-            self.assertIn("Excel", download.text)
 
     def assertNoBrokenIgnorablePrefixes(self, xml_bytes: bytes) -> None:
         prefix_names = {item[0] for _event, item in ET.iterparse(BytesIO(xml_bytes), events=("start-ns",))}

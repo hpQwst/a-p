@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Any
 import xml.etree.ElementTree as ET
 
@@ -68,7 +69,17 @@ def _set_cell_text(cell: ET.Element, text: str) -> None:
         paragraph = ET.SubElement(tx_body, f"{{{DML_NS}}}p")
     run = paragraph.find("./a:r", NS)
     if run is None:
-        run = ET.SubElement(paragraph, f"{{{DML_NS}}}r")
+        if text == "":
+            return
+        run = ET.Element(f"{{{DML_NS}}}r")
+        end_para = paragraph.find("./a:endParaRPr", NS)
+        if end_para is not None:
+            run_pr = copy.deepcopy(end_para)
+            run_pr.tag = f"{{{DML_NS}}}rPr"
+            run.append(run_pr)
+            paragraph.insert(list(paragraph).index(end_para), run)
+        else:
+            paragraph.append(run)
     text_node = run.find("./a:t", NS)
     if text_node is None:
         text_node = ET.SubElement(run, f"{{{DML_NS}}}t")

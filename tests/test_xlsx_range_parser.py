@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from io import BytesIO
 import unittest
 
@@ -37,6 +38,21 @@ class XlsxRangeParserTests(unittest.TestCase):
         self.assertEqual(parsed.categories, ["Jan/26", "Fev/26"])
         self.assertEqual(parsed.series, ["Total"])
         self.assertEqual(parsed.values, [[10, 20]])
+
+    def test_excel_date_period_labels_keep_month_year_text(self) -> None:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Dados"
+        ws.append(["Serie", datetime(2026, 11, 25), "Dez/25", datetime(2026, 1, 26)])
+        ws.append(["NPS", 1, 2, 3])
+
+        data = BytesIO()
+        wb.save(data)
+        wb.close()
+
+        parsed = parse_xlsx_table(data.getvalue(), file_name="periods.xlsx")
+
+        self.assertEqual(parsed.categories, ["Nov/25", "Dez/25", "Jan/26"])
 
 
 if __name__ == "__main__":

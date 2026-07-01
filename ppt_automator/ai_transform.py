@@ -35,7 +35,8 @@ def suggest_transform_diagnostics(
         ),
         "plans": [_plan_payload(plan) for plan in plans],
         "rules": [
-            "O contrato do PPT vem do workbook embutido do grafico/tabela e deve ser preservado.",
+            "O contrato do PPT vem do workbook embutido do grafico/tabela e deve preservar orientacao e dimensoes.",
+            "Quando houver match entre rotulos do PPT e do XLSX, a tabela corrigida deve usar o texto do XLSX, nao o label resumido/antigo do PPT.",
             "Confira linhas e colunas do PPT contra linhas e colunas detectadas no XLSX.",
             "Confirme se e preciso alinhar ou transpor.",
             "Nao invente valores. A tabela corrigida deve usar apenas valores presentes no datasource XLSX ou na matriz proposta quando ela estiver correta.",

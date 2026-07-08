@@ -290,9 +290,9 @@
     "semantic_hash": ""
   },
   "web/static/app.js": {
-    "mtime": 1783452787.864836,
-    "ast_hash": "6cf2b2e649b01f9da8b071b18603cf7d",
-    "semantic_hash": "6cf2b2e649b01f9da8b071b18603cf7d"
+    "mtime": 1783545869.0325432,
+    "ast_hash": "c795380298422cb5c8ea5b43e4c60d09",
+    "semantic_hash": ""
   },
   "worker/__init__.py": {
     "mtime": 1782325557.2163274,
@@ -310,18 +310,18 @@
     "semantic_hash": ""
   },
   "web/templates/error.html": {
-    "mtime": 1782327578.0600135,
-    "ast_hash": "17ea8c408ab2a0069b8e0852c361c3c9",
+    "mtime": 1783545835.0077994,
+    "ast_hash": "1ab04d5e496d77732d2da8728e809e51",
     "semantic_hash": ""
   },
   "web/templates/index.html": {
-    "mtime": 1782962056.0974665,
-    "ast_hash": "de3384ea878b3639e08c9bf420842b45",
+    "mtime": 1783545747.3270578,
+    "ast_hash": "91214509b649a66eb7f36ad4273a9e0e",
     "semantic_hash": ""
   },
   "web/templates/preview.html": {
-    "mtime": 1783528447.2580335,
-    "ast_hash": "d7172cdb66c32d00a9200ef3aca7930b",
+    "mtime": 1783545826.3180954,
+    "ast_hash": "e85ea921cf9aeb62b2744791005c9159",
     "semantic_hash": ""
   },
   "ppt_automator/learned_mapping.py": {
@@ -342,6 +342,11 @@
   "tests/test_transpose_alignment.py": {
     "mtime": 1783544339.9731314,
     "ast_hash": "9d8c45edb10660a2d22ecd7c5daae1fa",
+    "semantic_hash": ""
+  },
+  ".claude/launch.json": {
+    "mtime": 1783545875.486473,
+    "ast_hash": "c86932adf17ac10545f865c57361a383",
     "semantic_hash": ""
   }
 }

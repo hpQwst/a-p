@@ -65,6 +65,7 @@ class PptTarget:
     width_in: float
     height_in: float
     nearby_text: str = ""
+    title: str = ""
     slide_text: str = ""
     chart_xml: str = ""
     workbook_embedded: str = ""
@@ -129,6 +130,7 @@ def discover_ppt_targets(
                 shape_id = _text(cnv.attrib.get("id"))
                 left, top, width, height = _graphic_frame_dimensions(frame)
                 nearby_text = _nearby_text(left, top, width, height, text_boxes)
+                title = _nearest_title(left, top, width, height, text_boxes)
                 chart_el = frame.find(".//c:chart", NS)
                 table_el = frame.find(".//a:tbl", NS)
                 if chart_el is not None:
@@ -147,6 +149,7 @@ def discover_ppt_targets(
                         nearby_text,
                         slide_text,
                         chart_el,
+                        title,
                     )
                     if target:
                         targets.append(target)
@@ -164,6 +167,7 @@ def discover_ppt_targets(
                             width_in=width,
                             height_in=height,
                             nearby_text=nearby_text,
+                            title=title,
                             slide_text=slide_text,
                             table_cells=_table_cells(table_el),
                         )
@@ -219,6 +223,7 @@ def _chart_target(
     nearby_text: str,
     slide_text: str,
     chart_el: ET.Element,
+    title: str = "",
 ) -> PptTarget | None:
     rel_id = chart_el.attrib.get(f"{{{R_NS}}}id")
     if not rel_id or rel_id not in slide_rels:
@@ -258,6 +263,7 @@ def _chart_target(
         width_in=width,
         height_in=height,
         nearby_text=nearby_text,
+        title=title,
         slide_text=slide_text,
         chart_xml=chart_path,
         workbook_embedded=workbook_path,
@@ -532,6 +538,33 @@ def _nearby_text(left: float, top: float, width: float, height: float, boxes: li
         ranked.append((distance, box.text))
     ranked.sort(key=lambda item: item[0])
     return _join_unique([text for _distance, text in ranked[:8]])
+
+
+def _nearest_title(left: float, top: float, width: float, height: float, boxes: list[_SlideTextBox]) -> str:
+    """Titulo do objeto: a caixa de texto imediatamente ACIMA (ou colada ao topo)
+    do shape e com boa sobreposicao horizontal - ex.: 'Status de Inatividade (%)'.
+    Serve para dar contexto estruturado e curto por target ao inves do dump do
+    slide inteiro sem ordem."""
+    best_text = ""
+    best_gap = None
+    for box in boxes:
+        text = _text(box.text)
+        if not text:
+            continue
+        if _overlap_ratio(left, width, box.left_in, box.width_in) < 0.3:
+            continue
+        box_bottom = box.top_in + box.height_in
+        gap = top - box_bottom  # >0 acima do objeto; ~0 colado ao topo
+        # aceita titulos acima do topo ou dentro da faixa superior do objeto
+        if gap < -0.15 or gap > 2.5:
+            continue
+        score = abs(gap)
+        if best_gap is None or score < best_gap:
+            best_gap = score
+            best_text = text
+    # titulos sao curtos: corta na primeira quebra logica e limita tamanho
+    first = best_text.split(" | ")[0].strip()
+    return first[:160]
 
 
 def _overlap_ratio(left_a: float, width_a: float, left_b: float, width_b: float) -> float:

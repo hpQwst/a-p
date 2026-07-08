@@ -333,9 +333,12 @@ def _slide_source_payload(source: ParsedXlsxTable) -> dict[str, Any]:
 
 
 def _target_titles(target: PptTarget) -> dict[str, Any]:
+    # 'title' e o titulo estruturado do proprio objeto (caixa imediatamente acima),
+    # o sinal mais forte de contexto. nearby_text/slide_text ficam como apoio.
     return {
-        "nearby_text": _short(target.nearby_text, 350),
-        "slide_text": _short(target.slide_text, 500),
+        "title": _short(getattr(target, "title", "") or "", 160),
+        "nearby_text": _short(target.nearby_text, 300),
+        "slide_text": _short(target.slide_text, 400),
     }
 
 

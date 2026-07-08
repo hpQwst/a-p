@@ -93,11 +93,11 @@ A IA recebe, por target:
 - um manifesto semantico compacto do XLSX, incluindo titulo da tabela, filtro/label lateral, categorias, series e preview;
 - um dump textual compacto das celulas uteis do XLSX, com coordenadas e valores raw;
 - a matriz final proposta pelo normalizador;
-- o contexto textual do slide, o nome do shape e, na revisao visual por slide, uma imagem otimizada do slide com IDs.
+- o contexto textual estruturado do slide, o nome do shape e, quando habilitado, uma imagem otimizada do slide com IDs.
 
 Com isso ela diagnostica se a acao correta e alinhar, transpor ou pedir revisao. A matriz tecnica continua sendo exibida para o usuario antes do download, e a pessoa pode substituir o XLSX de um target diretamente no card do preview.
 
-Por padrao, o app evita mandar dumps verbosos para reduzir custo e latencia sem perder rastreabilidade. Para investigacao pesada, use `AUTO_PPT_AI_XLSX_DUMP_MODE=verbose`. A imagem vai na primeira chamada visual por slide; a segunda chamada de montagem de matriz nao reenvia imagem por padrao. Para habilitar, use `AUTO_PPT_AI_IMAGE_IN_MATRIX=1`. O limite padrao da imagem e `AUTO_PPT_AI_IMAGE_MAX_SIDE=1400`.
+Por padrao, o app evita mandar dumps verbosos e imagens para reduzir custo e latencia sem perder rastreabilidade. Para investigacao pesada, use `AUTO_PPT_AI_XLSX_DUMP_MODE=verbose`. Para enviar imagem na chamada de entendimento por slide, use `AUTO_PPT_AI_SLIDE_IMAGE=1`; a chamada de montagem de matriz tambem nao reenvia imagem por padrao. Para habilitar imagem tambem nessa segunda chamada, use `AUTO_PPT_AI_IMAGE_IN_MATRIX=1`. O limite padrao da imagem e `AUTO_PPT_AI_IMAGE_MAX_SIDE=1400`.
 
 A IA por slide nao roda automaticamente no preview inicial. Isso mantem a tela rapida e evita que uma resposta da IA reestruture graficos que o normalizador deterministico ja mapeou bem. Para investigar um deck dificil, habilite explicitamente `AUTO_PPT_AUTO_SLIDE_AI=1`; para aplicar matrizes geradas por IA no PPT final, habilite tambem `AUTO_PPT_APPLY_SLIDE_AI_OUTPUTS=1`.
 
@@ -105,7 +105,7 @@ No caminho recomendado, a IA de mapeamento recebe registros JSONL por slide: obj
 
 Essa revisao enxuta de datasource roda automaticamente para targets sem match e para matches deterministicos abaixo de `AUTO_PPT_AI_REVIEW_CONFIDENCE_FLOOR` (padrao `0.80`), quando `OPENAI_API_KEY` estiver configurada. Para desligar essa revisao automatica e manter apenas o fluxo deterministico/manual, use `AUTO_PPT_AI_AUTO_SOURCE_REVIEW=0`. Esse mecanismo nao habilita a IA por slide nem a gravacao de matrizes finais por IA.
 
-Em decks grandes, a revisao enxuta cobre todos os targets pendentes numa unica passada de preview, em lotes de `AUTO_PPT_AI_SOURCE_MATCH_BATCH_TARGETS` (padrao 10) ate o teto de `AUTO_PPT_AI_MATCH_MAX_CALLS` chamadas (padrao 12, ou seja, ate 120 targets por passada). O cache e salvo apos cada lote. A revisao pesada por slide (imagem + matriz) e limitada a `AUTO_PPT_SLIDE_AI_MAX_SLIDES_PER_RUN` slides por execucao (padrao 12), priorizando os slides com targets sem match ou de baixa confianca.
+Em decks grandes, a revisao enxuta cobre todos os targets pendentes numa unica passada de preview, em lotes de `AUTO_PPT_AI_SOURCE_MATCH_BATCH_TARGETS` (padrao 10) ate o teto de `AUTO_PPT_AI_MATCH_MAX_CALLS` chamadas (padrao 12, ou seja, ate 120 targets por passada). O cache e salvo apos cada lote. A revisao por slide (texto estruturado + matriz, com imagem opcional) e limitada a `AUTO_PPT_SLIDE_AI_MAX_SLIDES_PER_RUN` slides por execucao (padrao 12), priorizando os slides com targets sem match ou de baixa confianca.
 
 Cada operacao de IA pode usar um modelo proprio via `OPENAI_MODEL_SOURCE_MATCH`, `OPENAI_MODEL_SLIDE_UNDERSTANDING`, `OPENAI_MODEL_SLIDE_MATRIX_BUILDER` e `OPENAI_MODEL_TRANSFORM_DIAGNOSTICS`, todos com fallback para `OPENAI_MODEL`. O match enxuto escolhe entre candidatos ja pontuados localmente e funciona bem em modelos mais baratos.
 

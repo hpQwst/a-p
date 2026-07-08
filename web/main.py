@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict, OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -41,7 +42,7 @@ from ppt_automator.learned_mapping import (
     mapping_entry_learning_fields,
     resolve_learned_matches,
 )
-from ppt_automator.xlsx_plaintext_dump import dump_xlsx_zip_entries
+from ppt_automator.xlsx_plaintext_dump import dump_xlsx_workbook, dump_xlsx_zip_entries
 from ppt_automator.project_store import (
     SQUADS,
     create_project,
@@ -1364,11 +1365,15 @@ def _run_target_ai_review(job_dir: Path, target_id: str, manual_context: str = "
     target = targets_by_id.get(target_id)
     if target is None or target.object_type not in {"chart", "table"}:
         raise ValueError("Target nao encontrado no escopo atual.")
+    # Revisao de UM target (upload manual ou botao "Revisar este target"): leve e
+    # sem imagem. O cliente ja escolheu o XLSX; aqui a IA so precisa do Editar dados
+    # do target + a estrutura do XLSX + o titulo para decidir orientacao/colunas.
     return _run_slide_ai_review(
         job_dir,
         target.slide_number,
         target_ids={target_id},
         manual_context=manual_context,
+        use_image=False,
     )
 
 
@@ -1624,7 +1629,9 @@ def _slide_ai_signature(
     slide_number: int,
     target_ids: set[str] | None = None,
     manual_context: str = "",
+    use_image: bool | None = None,
 ) -> str:
+    use_image = _slide_ai_image_enabled() if use_image is None else use_image
     selected_target_ids = set(target_ids or [])
     targets = [
         target
@@ -1633,13 +1640,14 @@ def _slide_ai_signature(
         and target.object_type in {"chart", "table"}
         and (not selected_target_ids or target.target_id in selected_target_ids)
     ]
-    selected_entries, _warnings = _datasource_entries_for_slide(job_dir, slide_number)
+    selected_entries, _warnings = _datasource_entries_for_ai_review(job_dir, slide_number, targets, analysis.sources)
     manifests = _source_manifests_for_entries(analysis.sources, selected_entries)
     datasource_hashes = _datasource_entry_hashes(job_dir / "datasources.zip", selected_entries)
     payload = {
-        "version": "slide-ai-v3",
+        "version": "slide-ai-v4",
         "slide": slide_number,
         "manual_context": manual_context.strip(),
+        "use_image": use_image,
         "payload_profile": _ai_payload_profile(),
         "targets": [_target_ai_payload(target) for target in targets],
         "xlsx_manifests": manifests,
@@ -1651,12 +1659,18 @@ def _slide_ai_signature(
 
 def _datasource_entry_hashes(datasources_zip: Path, entries: list) -> dict[str, str]:
     output: dict[str, str] = {}
-    with ZipFile(datasources_zip) as zf:
-        for entry in entries:
-            try:
-                output[entry.zip_path] = hashlib.sha256(zf.read(entry.zip_path)).hexdigest()
-            except KeyError:
-                output[entry.zip_path] = "missing"
+    zip_entries = [entry for entry in entries if getattr(entry, "manual_data", None) is None]
+    for entry in entries:
+        manual_data = getattr(entry, "manual_data", None)
+        if manual_data is not None:
+            output[entry.zip_path] = hashlib.sha256(manual_data).hexdigest()
+    if zip_entries:
+        with ZipFile(datasources_zip) as zf:
+            for entry in zip_entries:
+                try:
+                    output[entry.zip_path] = hashlib.sha256(zf.read(entry.zip_path)).hexdigest()
+                except KeyError:
+                    output[entry.zip_path] = "missing"
     return output
 
 
@@ -1677,6 +1691,7 @@ def _ai_payload_profile() -> dict:
     return {
         "xlsx_dump_mode": _xlsx_dump_mode(),
         "xlsx_max_cells_per_sheet": max(_env_int("AUTO_PPT_AI_XLSX_MAX_CELLS_PER_SHEET", 800), 1),
+        "slide_image_enabled": _slide_ai_image_enabled(),
         "image_max_side": max(_env_int("AUTO_PPT_AI_IMAGE_MAX_SIDE", 1400), 0),
         "image_in_matrix": _env_bool("AUTO_PPT_AI_IMAGE_IN_MATRIX", False),
     }
@@ -1713,12 +1728,34 @@ def _format_bytes(value) -> str:
     return f"{size:.1f} {units[unit_index]}"
 
 
+class _NoRender:
+    """Render vazio para revisoes leves (sem imagem): pula a renderizacao cara do
+    slide e faz o entendimento rodar so com texto/XLSX."""
+
+    image_path = None
+    warning = ""
+    visual_map = {}
+
+
+@dataclass(frozen=True)
+class _ManualDatasourceEntry:
+    zip_path: str
+    file_name: str
+    slide_number: int | None
+    is_general: bool
+    target_id: str
+    manual_data: bytes
+    cell_range: str = ""
+
+
 def _run_slide_ai_review(
     job_dir: Path,
     slide_number: int,
     target_ids: set[str] | None = None,
     manual_context: str = "",
+    use_image: bool | None = None,
 ) -> str:
+    use_image = _slide_ai_image_enabled() if use_image is None else use_image
     analysis, _mapping_status, _mapping_candidates, _pause_for_mapping = _analysis_for_job(
         job_dir,
         apply_cached_source_matches=True,
@@ -1738,26 +1775,25 @@ def _run_slide_ai_review(
     state = _load_slide_ai_state(job_dir)
     slide_key = str(slide_number)
     slide_state = state.setdefault("slides", {}).setdefault(slide_key, {})
-    if manual_context.strip():
-        slide_state["manual_context"] = manual_context.strip()
-    combined_context = "\n".join(
-        item
-        for item in [
-            str(slide_state.get("manual_context") or ""),
-            manual_context.strip(),
-        ]
-        if item
-    )
-    render = _render_slide_for_job(job_dir, analysis.targets, slide_number)
+    previous_context = str(slide_state.get("manual_context") or "").strip()
+    incoming_context = manual_context.strip()
+    if incoming_context:
+        slide_state["manual_context"] = incoming_context
+    combined_context = incoming_context or previous_context
+    render = _render_slide_for_job(job_dir, analysis.targets, slide_number) if use_image else _NoRender()
     if render.warning:
         slide_state["render_warning"] = render.warning
-    selected_entries, warnings = _datasource_entries_for_slide(job_dir, slide_number)
-    selected_entries = _relevant_datasource_entries_for_targets(slide_targets, selected_entries, analysis.sources)
-    xlsx_dumps = dump_xlsx_zip_entries(job_dir / "datasources.zip", selected_entries)
+    selected_entries, warnings = _datasource_entries_for_ai_review(
+        job_dir,
+        slide_number,
+        slide_targets,
+        analysis.sources,
+    )
+    xlsx_dumps = _dump_datasource_entries_for_ai_review(job_dir, selected_entries)
     xlsx_prompt_texts = _xlsx_prompt_texts(xlsx_dumps)
     xlsx_manifests = _source_manifests_for_entries(analysis.sources, selected_entries)
     target_payloads = [_target_ai_payload(target) for target in slide_targets]
-    signature = _slide_ai_signature(job_dir, analysis, slide_number, target_ids, combined_context)
+    signature = _slide_ai_signature(job_dir, analysis, slide_number, target_ids, combined_context, use_image=use_image)
     slide_state["ai_input_stats"] = _ai_input_stats(xlsx_prompt_texts, xlsx_manifests, target_payloads)
 
     understanding = slide_state.get("understanding") if slide_state.get("understanding_signature") == signature else None
@@ -1769,7 +1805,11 @@ def _run_slide_ai_review(
                 slide_number=slide_number,
                 slide_image_path=render.image_path,
                 visual_map=render.visual_map,
-                slide_text=_slide_text_for_targets(analysis.targets, slide_number),
+                slide_text=(
+                    _structured_titles(slide_targets)
+                    if not use_image
+                    else _slide_text_for_targets(analysis.targets, slide_number)
+                ),
                 targets=target_payloads,
                 xlsx_manifests=xlsx_manifests,
                 xlsx_dumps=xlsx_prompt_texts,
@@ -1875,6 +1915,61 @@ def _datasource_entries_for_slide(job_dir: Path, slide_number: int):
     return entries_for_slide(entries, slide_number)
 
 
+def _datasource_entries_for_ai_review(job_dir: Path, slide_number: int, targets: list, sources: list) -> tuple[list, list[str]]:
+    selected_entries, warnings = _datasource_entries_for_slide(job_dir, slide_number)
+    manual_entries = _manual_datasource_entries_for_targets(job_dir, targets)
+    if manual_entries and len(manual_entries) == len(targets):
+        return manual_entries, []
+    if manual_entries:
+        selected_by_path = {entry.zip_path: entry for entry in selected_entries}
+        for entry in manual_entries:
+            selected_by_path[entry.zip_path] = entry
+        selected_entries = list(selected_by_path.values())
+    return _relevant_datasource_entries_for_targets(targets, selected_entries, sources), warnings
+
+
+def _manual_datasource_entries_for_targets(job_dir: Path, targets: list) -> list[_ManualDatasourceEntry]:
+    manual_sources = _manual_sources_for_job(job_dir)
+    entries: list[_ManualDatasourceEntry] = []
+    for target in targets:
+        payload = manual_sources.get(target.target_id)
+        if not payload:
+            continue
+        filename, data, cell_range = payload
+        zip_path = f"upload_manual/{target.target_id}_{filename}"
+        entries.append(
+            _ManualDatasourceEntry(
+                zip_path=zip_path,
+                file_name=zip_path,
+                slide_number=target.slide_number,
+                is_general=False,
+                target_id=target.target_id,
+                manual_data=data,
+                cell_range=cell_range,
+            )
+        )
+    return entries
+
+
+def _dump_datasource_entries_for_ai_review(job_dir: Path, entries: list) -> list:
+    output = []
+    zip_entries = [entry for entry in entries if getattr(entry, "manual_data", None) is None]
+    zip_dumps_by_path = {}
+    if zip_entries:
+        zip_dumps_by_path = {
+            dump.file_name: dump for dump in dump_xlsx_zip_entries(job_dir / "datasources.zip", zip_entries)
+        }
+    for entry in entries:
+        manual_data = getattr(entry, "manual_data", None)
+        if manual_data is not None:
+            output.append(dump_xlsx_workbook(manual_data, file_name=entry.zip_path))
+            continue
+        dump = zip_dumps_by_path.get(entry.zip_path)
+        if dump is not None:
+            output.append(dump)
+    return output
+
+
 def _builder_payload_from_understanding(
     understanding: dict,
     manifests: list[dict],
@@ -1967,6 +2062,7 @@ def _target_ai_payload(target) -> dict:
         "shape_id": target.shape_id,
         "object_type": target.object_type,
         "slide_number": target.slide_number,
+        "title": getattr(target, "title", "") or "",
         "position": {
             "left_in": target.left_in,
             "top_in": target.top_in,
@@ -1983,6 +2079,17 @@ def _slide_text_for_targets(targets: list, slide_number: int) -> str:
         if target.slide_number == slide_number and target.slide_text:
             return target.slide_text
     return ""
+
+
+def _structured_titles(targets: list) -> str:
+    """Contexto compacto e ORDENADO por objeto (titulo -> id), em vez do dump do
+    slide inteiro sem ordem. Ex.: 'Status de Inatividade (%) [S003_T003_CHART]'."""
+    parts = []
+    for target in targets:
+        title = (getattr(target, "title", "") or "").strip() or (target.nearby_text or "").split(" | ")[0].strip()
+        if title:
+            parts.append(f"{title} [{target.target_id}]")
+    return " ; ".join(parts)
 
 
 def _canonical_target_id(targets: list, target_id_or_alias: str) -> str:
@@ -2526,6 +2633,18 @@ def _ai_source_matches_for_job(
         reviewable_targets = [target for target in reviewable_targets if target.target_id in target_ids]
 
     unmatched = [target for target in reviewable_targets if target.target_id not in planned_targets]
+    # Fix A: so vale a pena perguntar a IA sobre um target pendente se existe pelo
+    # menos um datasource minimamente compativel no ZIP. Sem candidato plausivel, o
+    # problema e falta de XLSX - deixamos pendente para upload manual, sem gastar IA.
+    plausibility_floor = _ai_source_match_plausibility_floor()
+
+    def _best_candidate_score(target) -> float:
+        candidates = source_match_candidates(target, analysis.sources, limit=1)
+        return candidates[0].score if candidates else 0.0
+
+    best_candidate_scores = {target.target_id: _best_candidate_score(target) for target in unmatched}
+    no_source_targets = [t for t in unmatched if best_candidate_scores.get(t.target_id, 0.0) < plausibility_floor]
+    unmatched = [t for t in unmatched if best_candidate_scores.get(t.target_id, 0.0) >= plausibility_floor]
     confidence_floor = _ai_review_confidence_floor()
     selected_mapping_template = bool(_selected_mapping_template(metadata))
     low_confidence = []
@@ -2538,6 +2657,14 @@ def _ai_source_matches_for_job(
         ]
     review_targets = _unique_targets([*unmatched, *low_confidence])
     if not review_targets:
+        if no_source_targets:
+            return {}, {
+                "state": "warn",
+                "message": (
+                    f"{len(no_source_targets)} target(s) sem datasource compativel no ZIP "
+                    "(envie o XLSX manualmente); IA nao foi acionada."
+                ),
+            }
         return {}, {
             "state": "ok",
             "message": f"IA nao precisou revisar matches de datasource abaixo de {confidence_floor:.0%}.",
@@ -2572,6 +2699,8 @@ def _ai_source_matches_for_job(
                 for target in low_confidence
             ],
             "missing_target_count": len(missing_targets),
+            "no_source_targets": [target.target_id for target in no_source_targets],
+            "plausibility_floor": plausibility_floor,
             "batch_limit": batch_limit,
             "max_calls": max_calls,
             "selected_mapping_template": selected_mapping_template,
@@ -3340,6 +3469,20 @@ def _ai_review_confidence_floor() -> float:
 
 def _auto_slide_ai_confidence_floor() -> float:
     return min(max(_env_float("AUTO_PPT_AUTO_SLIDE_AI_CONFIDENCE_FLOOR", 0.82), 0.0), 1.0)
+
+
+def _ai_source_match_plausibility_floor() -> float:
+    # Abaixo deste score bruto do melhor candidato, entende-se que NAO existe um
+    # datasource compativel no ZIP para o target (o problema e falta de XLSX, nao
+    # de match). Nesses casos nao gastamos uma chamada de IA - o alvo fica pendente
+    # para upload manual. Evita, por exemplo, mandar tabelas "Base:" sem fonte.
+    return min(max(_env_float("AUTO_PPT_AI_MATCH_PLAUSIBILITY_FLOOR", 0.30), 0.0), 1.0)
+
+
+def _slide_ai_image_enabled() -> bool:
+    # Por padrao, a IA recebe somente estrutura extraida por codigo (Editar dados,
+    # titulos e dumps XLSX). Ative so quando um caso precisar de contexto visual.
+    return _env_bool("AUTO_PPT_AI_SLIDE_IMAGE", False)
 
 
 def _auto_source_match_review_enabled() -> bool:

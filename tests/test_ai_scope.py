@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import json
@@ -162,6 +163,34 @@ class AiScopeTests(unittest.TestCase):
             self.assertEqual(payload["444"]["datasource"], "444.xlsx")
             self.assertEqual(payload["444"]["status"], "matched")
 
+    def test_source_match_skips_unmatched_without_plausible_datasource(self) -> None:
+        target = _target("base-table")
+        source = _source("irrelevant.xlsx")
+        analysis = AnalysisResult(
+            plans=[],
+            preview=[],
+            targets=[target],
+            sources=[source],
+            target_count=1,
+            source_count=1,
+            warnings=[],
+        )
+
+        with TemporaryDirectory() as tmp:
+            with patch.object(web_main, "ai_configured", return_value=True):
+                with patch.object(
+                    web_main,
+                    "source_match_candidates",
+                    return_value=[SimpleNamespace(score=0.16)],
+                ):
+                    with patch.object(web_main, "suggest_source_matches_with_ai") as fake_matches:
+                        payload, status = web_main._ai_source_matches_for_job(Path(tmp), analysis, allow_ai=True)
+
+        fake_matches.assert_not_called()
+        self.assertEqual(payload, {})
+        self.assertEqual(status["state"], "warn")
+        self.assertIn("sem datasource compativel", status["message"])
+
     def test_low_confidence_plan_is_sent_to_ai_and_can_be_replaced(self) -> None:
         target = _target("555")
         weak_source = _source("weak.xlsx")
@@ -241,6 +270,36 @@ class AiScopeTests(unittest.TestCase):
 
             with patch.dict("os.environ", {"AUTO_PPT_APPLY_SLIDE_AI_OUTPUTS": "1"}):
                 self.assertEqual(set(web_main._slide_ai_target_outputs(job_dir)), {"111"})
+
+    def test_target_ai_review_datasources_prefer_manual_override_only(self) -> None:
+        target = _target("222")
+        original_entry = SimpleNamespace(
+            zip_path="slide1/original.xlsx",
+            file_name="slide1/original.xlsx",
+            slide_number=1,
+            is_general=False,
+        )
+        manual_source = _source("upload_manual/222_manual.xlsx")
+        original_source = _source("slide1/original.xlsx")
+
+        with TemporaryDirectory() as tmp:
+            job_dir = Path(tmp)
+            override_dir = job_dir / "overrides" / "222"
+            override_dir.mkdir(parents=True)
+            (override_dir / "manual.xlsx").write_bytes(b"fake-xlsx")
+            (override_dir / "range.txt").write_text("A1:B2", encoding="utf-8")
+            with patch.object(web_main, "_datasource_entries_for_slide", return_value=([original_entry], [])):
+                entries, warnings = web_main._datasource_entries_for_ai_review(
+                    job_dir,
+                    1,
+                    [target],
+                    [original_source, manual_source],
+                )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual([entry.zip_path for entry in entries], ["upload_manual/222_manual.xlsx"])
+        self.assertEqual(getattr(entries[0], "manual_data"), b"fake-xlsx")
+        self.assertEqual(getattr(entries[0], "cell_range"), "A1:B2")
 
 
 if __name__ == "__main__":

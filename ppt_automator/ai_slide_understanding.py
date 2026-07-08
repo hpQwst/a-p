@@ -24,7 +24,7 @@ class SlideUnderstandingInput:
 
 
 def suggest_slide_understanding(payload: SlideUnderstandingInput, root: Path | str | None = None) -> dict[str, Any]:
-    client, model = build_openai_client(root)
+    client, model = build_openai_client(root, operation="slide_understanding")
     user_payload = {
         "slide_number": payload.slide_number,
         "visual_target_map": payload.visual_map,

@@ -105,6 +105,10 @@ No caminho recomendado, a IA de mapeamento recebe registros JSONL por slide: obj
 
 Essa revisao enxuta de datasource roda automaticamente para targets sem match e para matches deterministicos abaixo de `AUTO_PPT_AI_REVIEW_CONFIDENCE_FLOOR` (padrao `0.80`), quando `OPENAI_API_KEY` estiver configurada. Para desligar essa revisao automatica e manter apenas o fluxo deterministico/manual, use `AUTO_PPT_AI_AUTO_SOURCE_REVIEW=0`. Esse mecanismo nao habilita a IA por slide nem a gravacao de matrizes finais por IA.
 
+Em decks grandes, a revisao enxuta cobre todos os targets pendentes numa unica passada de preview, em lotes de `AUTO_PPT_AI_SOURCE_MATCH_BATCH_TARGETS` (padrao 10) ate o teto de `AUTO_PPT_AI_MATCH_MAX_CALLS` chamadas (padrao 12, ou seja, ate 120 targets por passada). O cache e salvo apos cada lote. A revisao pesada por slide (imagem + matriz) e limitada a `AUTO_PPT_SLIDE_AI_MAX_SLIDES_PER_RUN` slides por execucao (padrao 12), priorizando os slides com targets sem match ou de baixa confianca.
+
+Cada operacao de IA pode usar um modelo proprio via `OPENAI_MODEL_SOURCE_MATCH`, `OPENAI_MODEL_SLIDE_UNDERSTANDING`, `OPENAI_MODEL_SLIDE_MATRIX_BUILDER` e `OPENAI_MODEL_TRANSFORM_DIAGNOSTICS`, todos com fallback para `OPENAI_MODEL`. O match enxuto escolhe entre candidatos ja pontuados localmente e funciona bem em modelos mais baratos.
+
 Antes de subir o servidor, valide a conexao com a OpenAI pelo PowerShell:
 
 ```powershell

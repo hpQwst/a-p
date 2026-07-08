@@ -10,6 +10,16 @@ from .ppt_discovery import PptTarget
 from .xlsx_parser import ParsedXlsxTable
 
 
+# Nivel 1 da politica de confianca do sistema: decide se existe ALGUM plano
+# automatico para o target (abaixo disso o target fica "sem match" e so pode
+# ser resolvido por IA ou override manual). Os outros 2 niveis (se um plano ja
+# aceito ainda recebe segunda opiniao de IA, e se a revisao pesada por slide
+# roda automaticamente) ficam documentados junto a _ai_review_confidence_floor()
+# e _auto_slide_ai_confidence_floor() em web/main.py.
+LOCAL_MATCH_THRESHOLD_STRONG_ID = 0.35
+LOCAL_MATCH_THRESHOLD_DEFAULT = 0.45
+
+
 @dataclass(frozen=True)
 class TransformPlan:
     target: PptTarget
@@ -211,12 +221,28 @@ def _best_source_for_target(
         return None, 0.0, ""
     best = candidates[0]
     reason = best.reason
+    if not _source_has_readable_data(best.source):
+        # Um XLSX cujo parser nao extraiu nenhuma matriz (orientation unknown,
+        # values vazios) nao pode preencher nada - mesmo com o nome do arquivo
+        # batendo com o target. Sem este guard, o strong_id_match (+0.72) criava
+        # um plano "confiante" com todas as celulas None, gravando um grafico
+        # vazio silenciosamente. Pendencia clara e melhor que dado errado.
+        return None, best.score, (
+            f"{reason}; o conteudo de {best.source.file_name} nao pode ser interpretado "
+            "(sem cabecalho/matriz legivel), entao nenhum match automatico foi aplicado"
+        ).strip("; ")
     if len(candidates) > 1 and best.score - candidates[1].score <= 0.08 and candidates[1].score >= 0.45:
         reason += f"; atenção: datasource parecido também encontrado ({candidates[1].source.file_name}, score {candidates[1].score:.0%})"
-    threshold = 0.35 if best.strong_id_match or target.object_type == "table" else 0.45
+    threshold = LOCAL_MATCH_THRESHOLD_STRONG_ID if best.strong_id_match or target.object_type == "table" else LOCAL_MATCH_THRESHOLD_DEFAULT
     if best.score < threshold:
         return None, best.score, reason
     return best.source, best.score, reason
+
+
+def _source_has_readable_data(source: ParsedXlsxTable) -> bool:
+    return bool(source.values) and any(
+        cell is not None and str(cell).strip() != "" for row in source.values for cell in row
+    )
 
 
 def source_match_candidates(

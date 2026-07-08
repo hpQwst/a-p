@@ -314,9 +314,14 @@
                           {% endif %}
                           <small>{{ item.action }}</small>
                         </div>
-                        {% if item.confidence %}
-                          <span class="score-pill">{{ item.confidence }}%</span>
-                        {% endif %}
+                        <div class="target-score-group">
+                          {% if item.confidence %}
+                            <span class="score-pill {{ 'confidence-high' if item.confidence >= 80 else ('confidence-medium' if item.confidence >= 55 else 'confidence-low') }}">{{ item.confidence }}%</span>
+                          {% endif %}
+                          {% if item.origin_label %}
+                            <span class="mini-pill origin-badge origin-{{ item.status }}">{{ item.origin_label }}</span>
+                          {% endif %}
+                        </div>
                       </summary>
 
                       <div class="target-detail">

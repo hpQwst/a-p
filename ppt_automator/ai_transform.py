@@ -28,7 +28,7 @@ def suggest_transform_diagnostics(
     plans: list[TransformPlan],
     root: Path | str | None = None,
 ) -> list[AiTransformDiagnostic]:
-    client, model = build_openai_client(root)
+    client, model = build_openai_client(root, operation="transform_diagnostics")
 
     payload = {
         "task": (

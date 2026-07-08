@@ -17,6 +17,10 @@ from .table_normalizer import TransformPlan
 PERCENT_FORMAT = "0.0%"
 
 
+class ChartSheetUnresolvedError(RuntimeError):
+    pass
+
+
 def chart_replacements(zf: ZipFile, target: PptTarget, plan: TransformPlan) -> dict[str, bytes]:
     if not target.chart_xml:
         return {}
@@ -31,7 +35,14 @@ def _updated_chart_xml_bytes(zf: ZipFile, target: PptTarget, plan: TransformPlan
     root = ET.fromstring(zf.read(target.chart_xml))
     _disable_chart_auto_update(root)
     series_elements = root.findall(".//c:ser", NS)
-    sheet = _sheet_ref(target.sheet_name or "Sheet1")
+    if not target.sheet_name:
+        raise ChartSheetUnresolvedError(
+            f"Nao foi possivel identificar a aba do workbook embutido do grafico "
+            f"'{target.shape_name}' (slide {target.slide_number}). Para nao gravar uma "
+            f"referencia de aba incorreta no 'Editar dados', a geracao foi interrompida "
+            f"para este alvo; revise o template ou aplique um XLSX manualmente."
+        )
+    sheet = _sheet_ref(target.sheet_name)
     number_format = _plan_number_format(plan)
 
     if plan.orientation_ppt == "series_rows_categories_columns":

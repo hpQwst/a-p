@@ -23,7 +23,7 @@ class AiUnavailableError(RuntimeError):
     pass
 
 
-def build_openai_client(root: Path | str | None = None) -> tuple[Any, str]:
+def build_openai_client(root: Path | str | None = None, operation: str = "") -> tuple[Any, str]:
     load_local_env(root)
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -34,7 +34,7 @@ def build_openai_client(root: Path | str | None = None) -> tuple[Any, str]:
     except Exception as exc:
         raise AiUnavailableError("Pacote openai nao instalado. Rode pip install -r requirements.txt.") from exc
 
-    model = os.getenv("OPENAI_MODEL", "gpt-5.5")
+    model = _model_for_operation(operation)
     base_url = os.getenv("OPENAI_BASE_URL")
     timeout = _env_float("OPENAI_TIMEOUT_SECONDS", 120.0)
     max_retries = _env_int("OPENAI_MAX_RETRIES", 1)
@@ -46,6 +46,17 @@ def build_openai_client(root: Path | str | None = None) -> tuple[Any, str]:
     if base_url:
         client_kwargs["base_url"] = base_url
     return OpenAI(**client_kwargs), model
+
+
+def _model_for_operation(operation: str) -> str:
+    """Permite modelo mais barato por operacao (ex.: OPENAI_MODEL_SOURCE_MATCH para o
+    match enxuto, que so escolhe entre candidatos ja pontuados localmente) sem tocar
+    no modelo principal usado para montar matrizes. Sempre cai em OPENAI_MODEL."""
+    default_model = os.getenv("OPENAI_MODEL", "gpt-5.5")
+    if not operation:
+        return default_model
+    override = os.getenv(f"OPENAI_MODEL_{operation.strip().upper()}", "").strip()
+    return override or default_model
 
 
 def format_ai_error(exc: Exception) -> str:

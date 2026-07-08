@@ -56,7 +56,7 @@ def suggest_source_matches_with_ai(
     valid_targets = {target.target_id for target in request_targets}
     valid_sources = {source.file_name for source in sources}
 
-    client, model = build_openai_client(root)
+    client, model = build_openai_client(root, operation="source_match")
     slide_records = _slide_match_records(request_targets, sources, candidates_per_target)
     payload = {
         "task": (

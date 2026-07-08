@@ -1,0 +1,11 @@
+*.md
+docs/
+*.txt
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.docx
+*.xlsx
+*.pptx

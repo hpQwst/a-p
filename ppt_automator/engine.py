@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from io import BytesIO
 import os
 from pathlib import Path
 from typing import Any, BinaryIO
 from zipfile import ZipFile
 
-from .embedded_workbook_writer import update_embedded_workbook
+from .embedded_workbook_writer import resolve_default_sheet_name, update_embedded_workbook
 from .openxml_zip import replace_zip_parts_preserving_structure
 from .ppt_chart_writer import chart_replacements
 from .ppt_discovery import PptTarget, discover_ppt_targets, read_bytes
@@ -68,12 +69,22 @@ def generate_updated_pptx(
     with ZipFile(BytesIO(ppt_bytes)) as zf:
         for plan in plans:
             if plan.object_type == "chart":
-                updates = chart_replacements(zf, plan.target, plan)
+                chart_target = plan.target
+                if not chart_target.sheet_name and chart_target.workbook_embedded and chart_target.workbook_embedded in zf.namelist():
+                    # A descoberta nao extraiu a aba a partir das formulas do chart.xml
+                    # (ex.: chart sem cache preenchido). Em vez de deixar o writer gravar
+                    # uma aba adivinhada no cache do grafico, resolvemos aqui a aba real
+                    # do workbook embutido que sera de fato escrita logo abaixo.
+                    resolved_sheet_name = resolve_default_sheet_name(zf.read(chart_target.workbook_embedded))
+                    if resolved_sheet_name:
+                        chart_target = replace(chart_target, sheet_name=resolved_sheet_name)
 
-                if plan.target.workbook_embedded:
-                    updates[plan.target.workbook_embedded] = update_embedded_workbook(
-                        zf.read(plan.target.workbook_embedded),
-                        plan.target.sheet_name,
+                updates = chart_replacements(zf, chart_target, plan)
+
+                if chart_target.workbook_embedded:
+                    updates[chart_target.workbook_embedded] = update_embedded_workbook(
+                        zf.read(chart_target.workbook_embedded),
+                        chart_target.sheet_name,
                         _workbook_matrix(plan),
                     )
 

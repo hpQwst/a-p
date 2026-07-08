@@ -25,7 +25,7 @@ class SlideMatrixBuildInput:
 
 
 def build_slide_matrices_with_ai(payload: SlideMatrixBuildInput, root: Path | str | None = None) -> dict[str, Any]:
-    client, model = build_openai_client(root)
+    client, model = build_openai_client(root, operation="slide_matrix_builder")
     user_payload = {
         "slide_number": payload.slide_number,
         "visual_target_map": payload.visual_map,

@@ -117,15 +117,18 @@ def apply_typed_outputs_to_analysis(
     sources_by_name = _sources_by_match_name(analysis.sources)
     plans_by_id = {plan.target_id: plan for plan in analysis.plans}
 
+    unresolved_source_target_ids: list[str] = []
     for target_id, output in target_outputs.items():
         target = targets_by_id.get(target_id)
         if target is None:
             continue
         source_file = str(output.get("source_file") or "")
-        source = sources_by_name.get(_source_match_key(source_file))
-        if source is None and analysis.sources:
-            source = analysis.sources[0]
+        source = sources_by_name.get(_source_match_key(source_file)) if source_file else None
         if source is None:
+            # Nao adivinha um datasource (ex.: o primeiro da lista) quando a IA nao
+            # aponta a fonte com clareza: mantem o plano anterior deste target intocado
+            # e sinaliza a pendencia, em vez de aplicar uma matriz com fonte errada.
+            unresolved_source_target_ids.append(target_id)
             continue
         final_edit_data = output.get("final_edit_data") or {}
         plan = _plan_from_typed_edit_data(target, source, output, final_edit_data)
@@ -137,6 +140,13 @@ def apply_typed_outputs_to_analysis(
         if target.target_id in plans_by_id and target.target_id not in ordered_ids:
             ordered_ids.append(target.target_id)
     plans = [plans_by_id[target_id] for target_id in ordered_ids]
+    warnings = _analysis_warnings(analysis.targets, analysis.sources, plans)
+    if unresolved_source_target_ids:
+        warnings.append(
+            "A IA nao identificou o XLSX de origem para "
+            f"{len(unresolved_source_target_ids)} target(s) ({', '.join(sorted(unresolved_source_target_ids)[:12])}); "
+            "a saida foi ignorada e o plano anterior (se houver) foi mantido."
+        )
     return AnalysisResult(
         plans=plans,
         preview=build_preview(plans),
@@ -144,7 +154,7 @@ def apply_typed_outputs_to_analysis(
         sources=analysis.sources,
         target_count=analysis.target_count,
         source_count=analysis.source_count,
-        warnings=_analysis_warnings(analysis.targets, analysis.sources, plans),
+        warnings=warnings,
     )
 
 

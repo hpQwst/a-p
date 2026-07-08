@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 import uuid
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -25,6 +26,7 @@ from ppt_automator import generate_updated_pptx
 from ppt_automator.ai import ai_configured, format_ai_error
 from ppt_automator.ai_debug import log_debug_event, reset_ai_debug_log_path, set_ai_debug_log_path
 from ppt_automator.embedded_workbook_writer import EmbeddedWorkbookWriterUnavailable
+from ppt_automator.ppt_chart_writer import ChartSheetUnresolvedError
 from ppt_automator.ai_mapper import suggest_source_matches_with_ai
 from ppt_automator.ai_slide_matrix_builder import SlideMatrixBuildInput, build_slide_matrices_with_ai
 from ppt_automator.ai_slide_understanding import SlideUnderstandingInput, suggest_slide_understanding
@@ -70,6 +72,16 @@ RENDER_CACHE_VERSION = 7
 PREVIEW_EXECUTOR = ThreadPoolExecutor(max_workers=max(int(os.getenv("AUTO_PPT_PREVIEW_WORKERS", "2") or "2"), 1))
 PREVIEW_RUNNING: set[str] = set()
 PREVIEW_RUNNING_LOCK = threading.Lock()
+
+# Cache em processo do resultado caro de analyze_files() (discovery do PPT + parse/
+# recalculo de formula dos XLSX + matching deterministico). input.pptx/datasources.zip
+# nunca sao reescritos depois da criacao do job, entao a unica coisa que pode invalidar
+# esse resultado e mudanca de escopo de slides ou de overrides manuais por target -
+# ambos cobertos pela assinatura em _analyze_files_signature. Limitado a poucos jobs
+# simultaneos em memoria (nao precisa sobreviver a reinicio do processo).
+ANALYZE_FILES_CACHE: "OrderedDict[str, tuple[tuple, AnalysisResult]]" = OrderedDict()
+ANALYZE_FILES_CACHE_LOCK = threading.Lock()
+ANALYZE_FILES_CACHE_MAX_JOBS = 8
 PPT_XML_NS = {
     "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
@@ -313,7 +325,9 @@ async def update_job_slides(
         _save_job_metadata(job_dir, metadata)
         _clear_render_cache(job_dir)
         _save_project_checkpoint(job_dir, status="in_progress")
-        auto_notice = _run_automatic_slide_ai_review(job_dir, slide_numbers=added_slides, force=True)
+        auto_notice = await run_in_threadpool(
+            _run_automatic_slide_ai_review, job_dir, slide_numbers=added_slides, force=True
+        )
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc))
     notice = f"Slides adicionados ao escopo: {', '.join(str(slide) for slide in added_slides)}."
@@ -366,7 +380,7 @@ async def review_job_with_ai(request: Request, job_id: str) -> HTMLResponse:
         metadata["use_ai"] = False
         _save_job_metadata(job_dir, metadata)
         _clear_render_cache(job_dir)
-        notice = _run_automatic_slide_ai_review(job_dir, force=True)
+        notice = await run_in_threadpool(_run_automatic_slide_ai_review, job_dir, force=True)
         _save_project_checkpoint(job_dir, status="in_progress")
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc))
@@ -389,7 +403,9 @@ async def review_target_with_ai(
         job_dir = _job_dir(job_id)
         if not ai_configured(PROJECT_ROOT):
             raise ValueError("IA indisponivel: configure OPENAI_API_KEY no .env.")
-        analysis, _mapping_status, _mapping_candidates, _pause = _analysis_for_job(job_dir, apply_slide_outputs=False)
+        analysis, _mapping_status, _mapping_candidates, _pause = await run_in_threadpool(
+            _analysis_for_job, job_dir, apply_slide_outputs=False
+        )
         canonical_target_id = _canonical_target_id(analysis.targets, target_id)
         _validate_target_id(canonical_target_id)
         metadata = _load_job_metadata(job_dir)
@@ -397,7 +413,9 @@ async def review_target_with_ai(
         metadata["ignore_mapping_candidates"] = True
         _save_job_metadata(job_dir, metadata)
         _clear_render_cache(job_dir)
-        notice = _run_target_ai_review(job_dir, canonical_target_id, manual_context=manual_context)
+        notice = await run_in_threadpool(
+            _run_target_ai_review, job_dir, canonical_target_id, manual_context=manual_context
+        )
         _save_project_checkpoint(job_dir, status="in_progress")
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc), allow_ai=False)
@@ -415,7 +433,9 @@ async def review_slide_with_ai(
         job_dir = _job_dir(job_id)
         if not ai_configured(PROJECT_ROOT):
             raise ValueError("IA indisponivel: configure OPENAI_API_KEY no .env.")
-        notice = _run_slide_ai_review(job_dir, slide_number, manual_context=manual_context)
+        notice = await run_in_threadpool(
+            _run_slide_ai_review, job_dir, slide_number, manual_context=manual_context
+        )
         _save_project_checkpoint(job_dir, status="in_progress")
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc), allow_ai=False)
@@ -452,7 +472,9 @@ async def override_target_datasource(
 ) -> HTMLResponse:
     try:
         job_dir = _job_dir(job_id)
-        analysis, _mapping_status, _mapping_candidates, _pause = _analysis_for_job(job_dir, apply_slide_outputs=False)
+        analysis, _mapping_status, _mapping_candidates, _pause = await run_in_threadpool(
+            _analysis_for_job, job_dir, apply_slide_outputs=False
+        )
         target_id = _canonical_target_id(analysis.targets, target_id)
         _validate_target_id(target_id)
         _validate_cell_range(cell_range)
@@ -478,7 +500,7 @@ async def override_target_datasource(
         ai_notice = ""
         if ai_configured(PROJECT_ROOT):
             try:
-                ai_notice = " " + _run_target_ai_review(job_dir, target_id)
+                ai_notice = " " + await run_in_threadpool(_run_target_ai_review, job_dir, target_id)
             except Exception as ai_exc:
                 ai_notice = f" IA nao conseguiu revisar este target agora: {ai_exc}"
         _save_project_checkpoint(job_dir, status="in_progress")
@@ -504,13 +526,7 @@ async def download(job_id: str) -> Response:
     manual_sources = _manual_sources_for_job(job_dir)
     selected_slides = _selected_slides_for_job(job_dir)
     pptx_bytes = pptx_path.read_bytes()
-    datasource_bytes = datasource_path.read_bytes()
-    analysis = analyze_files(
-        pptx_bytes,
-        datasource_bytes,
-        manual_sources=manual_sources,
-        slide_numbers=selected_slides,
-    )
+    analysis = await run_in_threadpool(_cached_analyze_files, job_dir, manual_sources, selected_slides)
     analysis, _mapping_status = _apply_mapping_template_to_analysis(
         job_dir,
         analysis,
@@ -522,11 +538,11 @@ async def download(job_id: str) -> Response:
     analysis = apply_ai_recommendations_to_analysis(analysis, ai_diagnostics)
     analysis = apply_typed_outputs_to_analysis(analysis, _slide_ai_target_outputs(job_dir))
     try:
-        output = generate_updated_pptx(pptx_bytes, analysis.plans, targets=analysis.targets)
-    except EmbeddedWorkbookWriterUnavailable as exc:
+        output = await run_in_threadpool(generate_updated_pptx, pptx_bytes, analysis.plans, targets=analysis.targets)
+    except (EmbeddedWorkbookWriterUnavailable, ChartSheetUnresolvedError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     file_name = f"ppt_automatizado_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
-    _save_project_run(job_dir, output, analysis, file_name)
+    await run_in_threadpool(_save_project_run, job_dir, output, analysis, file_name)
     _save_project_checkpoint(job_dir, status="completed")
     return Response(
         output,
@@ -545,8 +561,9 @@ async def slide_image(job_id: str, slide_number: int) -> FileResponse:
     job_dir = _job_dir(job_id)
     image_path = job_dir / "rendered" / f"slide_{slide_number:03d}.png"
     if not image_path.exists():
-        analysis, _mapping_status, _mapping_candidates, _pause = _analysis_for_job(job_dir)
-        render_slide_with_target_labels(
+        analysis, _mapping_status, _mapping_candidates, _pause = await run_in_threadpool(_analysis_for_job, job_dir)
+        await run_in_threadpool(
+            render_slide_with_target_labels,
             job_dir / "input.pptx",
             analysis.targets,
             slide_number,
@@ -1249,6 +1266,57 @@ def _render_preview(
     return templates.TemplateResponse(request, "preview.html", context)
 
 
+def _analyze_files_signature(job_dir: Path, selected_slides: list[int]) -> tuple:
+    pptx_stat = (job_dir / "input.pptx").stat()
+    zip_stat = (job_dir / "datasources.zip").stat()
+    overrides_signature: list[tuple] = []
+    overrides_root = job_dir / "overrides"
+    if overrides_root.exists():
+        for target_dir in sorted(overrides_root.iterdir(), key=lambda path: path.name):
+            if not target_dir.is_dir():
+                continue
+            files = sorted(target_dir.glob("*.xlsx"), key=lambda path: path.stat().st_mtime, reverse=True)
+            if not files:
+                continue
+            chosen_stat = files[0].stat()
+            range_path = target_dir / "range.txt"
+            cell_range = range_path.read_text(encoding="utf-8").strip() if range_path.exists() else ""
+            overrides_signature.append(
+                (target_dir.name, files[0].name, chosen_stat.st_mtime_ns, chosen_stat.st_size, cell_range)
+            )
+    return (
+        pptx_stat.st_mtime_ns,
+        pptx_stat.st_size,
+        zip_stat.st_mtime_ns,
+        zip_stat.st_size,
+        tuple(sorted(selected_slides)),
+        tuple(overrides_signature),
+    )
+
+
+def _cached_analyze_files(job_dir: Path, manual_sources: dict, selected_slides: list[int]) -> AnalysisResult:
+    signature = _analyze_files_signature(job_dir, selected_slides)
+    job_key = job_dir.name
+    with ANALYZE_FILES_CACHE_LOCK:
+        cached = ANALYZE_FILES_CACHE.get(job_key)
+        if cached is not None and cached[0] == signature:
+            ANALYZE_FILES_CACHE.move_to_end(job_key)
+            log_debug_event("analyze_files_cache_hit", {"job_id": job_key})
+            return cached[1]
+    analysis = analyze_files(
+        (job_dir / "input.pptx").read_bytes(),
+        (job_dir / "datasources.zip").read_bytes(),
+        manual_sources=manual_sources,
+        slide_numbers=selected_slides,
+    )
+    with ANALYZE_FILES_CACHE_LOCK:
+        ANALYZE_FILES_CACHE[job_key] = (signature, analysis)
+        ANALYZE_FILES_CACHE.move_to_end(job_key)
+        while len(ANALYZE_FILES_CACHE) > ANALYZE_FILES_CACHE_MAX_JOBS:
+            ANALYZE_FILES_CACHE.popitem(last=False)
+    return analysis
+
+
 def _analysis_for_job(
     job_dir: Path,
     apply_cached_source_matches: bool = True,
@@ -1257,12 +1325,7 @@ def _analysis_for_job(
 ) -> tuple[AnalysisResult, dict, list[dict], bool]:
     metadata = _load_job_metadata(job_dir)
     selected_slides = _selected_slides_for_job(job_dir)
-    analysis = analyze_files(
-        (job_dir / "input.pptx").read_bytes(),
-        (job_dir / "datasources.zip").read_bytes(),
-        manual_sources=_manual_sources_for_job(job_dir),
-        slide_numbers=selected_slides,
-    )
+    analysis = _cached_analyze_files(job_dir, _manual_sources_for_job(job_dir), selected_slides)
     mapping_candidates = []
     selected_mapping_template = _selected_mapping_template(metadata)
     if selected_mapping_template:
@@ -1345,13 +1408,28 @@ def _run_automatic_slide_ai_review(
     ran = 0
     skipped = 0
     deterministic_skipped = 0
+    deferred = 0
     errors: list[str] = []
-    for slide in slides:
-        slide_target_ids = {
+    max_slides = _slide_ai_max_slides_per_run()
+    target_ids_by_slide = {
+        slide: {
             target.target_id
             for target in analysis.targets
             if target.slide_number == slide and target.object_type in {"chart", "table"}
         }
+        for slide in slides
+    }
+    review_flags = {
+        slide: _slide_needs_ai_review(analysis, slide, target_ids_by_slide[slide]) for slide in slides
+    }
+    # Em decks grandes, gasta o orcamento de chamadas primeiro nos slides que
+    # realmente precisam (target sem plano, confianca baixa, aviso), deixando os
+    # demais para uma proxima rodada em vez de varrer 100+ slides em sequencia.
+    ordered_slides = [slide for slide in slides if review_flags[slide][0]] + [
+        slide for slide in slides if not review_flags[slide][0]
+    ]
+    for slide in ordered_slides:
+        slide_target_ids = target_ids_by_slide[slide]
         existing_slide_state = ((state.get("slides") or {}).get(str(slide)) or {})
         signature = _slide_ai_signature(
             job_dir,
@@ -1363,7 +1441,7 @@ def _run_automatic_slide_ai_review(
         if _slide_ai_outputs_complete(state, slide, slide_target_ids, signature):
             skipped += 1
             continue
-        should_review, review_reason = _slide_needs_ai_review(analysis, slide, slide_target_ids)
+        should_review, review_reason = review_flags[slide]
         if not force and not should_review:
             _mark_slide_ai_skipped(state, slide, signature, review_reason)
             _save_slide_ai_state(job_dir, state)
@@ -1381,6 +1459,9 @@ def _run_automatic_slide_ai_review(
                     "reason": review_reason,
                 },
             )
+            continue
+        if ran >= max_slides:
+            deferred += 1
             continue
         try:
             sent_at = _now_iso()
@@ -1430,6 +1511,11 @@ def _run_automatic_slide_ai_review(
         notice += f" {skipped} slide(s) ja tinham matriz IA valida."
     if deterministic_skipped:
         notice += f" {deterministic_skipped} slide(s) ficaram no fluxo deterministico por alta confianca."
+    if deferred:
+        notice += (
+            f" {deferred} slide(s) ficaram para a proxima rodada (limite de {max_slides} slides com IA por execucao);"
+            " rode Revisar com IA novamente para continuar."
+        )
     if errors:
         notice += f" {len(errors)} slide(s) falharam: {'; '.join(errors[:3])}."
     _save_project_checkpoint(job_dir, status="in_progress")
@@ -1439,6 +1525,15 @@ def _run_automatic_slide_ai_review(
 def _auto_slide_ai_enabled() -> bool:
     value = os.getenv("AUTO_PPT_AUTO_SLIDE_AI", "0").strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def _slide_ai_max_slides_per_run() -> int:
+    # A revisao por slide dispara as 2 chamadas mais pesadas do sistema
+    # (understanding com imagem + matrix builder). Este teto impede que um clique
+    # em Revisar com IA num deck de 100+ slides gere centenas de chamadas numa
+    # unica execucao; os slides prioritarios rodam primeiro e o restante fica
+    # para a proxima rodada.
+    return max(_env_int("AUTO_PPT_SLIDE_AI_MAX_SLIDES_PER_RUN", 12), 1)
 
 
 def _slide_ai_outputs_complete(state: dict, slide_number: int, target_ids: set[str], signature: str = "") -> bool:
@@ -1468,7 +1563,7 @@ def _slide_needs_ai_review(analysis: AnalysisResult, slide_number: int, target_i
     if missing:
         return True, f"{len(missing)} target(s) sem datasource automatico"
 
-    confidence_floor = _env_float("AUTO_PPT_AUTO_SLIDE_AI_CONFIDENCE_FLOOR", 0.82)
+    confidence_floor = _auto_slide_ai_confidence_floor()
     low_confidence = [
         plan.target_id
         for plan in analysis.plans
@@ -1652,6 +1747,7 @@ def _run_slide_ai_review(
     if render.warning:
         slide_state["render_warning"] = render.warning
     selected_entries, warnings = _datasource_entries_for_slide(job_dir, slide_number)
+    selected_entries = _relevant_datasource_entries_for_targets(slide_targets, selected_entries, analysis.sources)
     xlsx_dumps = dump_xlsx_zip_entries(job_dir / "datasources.zip", selected_entries)
     xlsx_prompt_texts = _xlsx_prompt_texts(xlsx_dumps)
     xlsx_manifests = _source_manifests_for_entries(analysis.sources, selected_entries)
@@ -1681,6 +1777,9 @@ def _run_slide_ai_review(
     slide_state["warnings"] = warnings
     slide_state["input_signature"] = signature
 
+    builder_manifests, builder_prompt_texts = _builder_payload_from_understanding(
+        understanding, xlsx_manifests, xlsx_dumps, xlsx_prompt_texts
+    )
     matrix_result = _call_with_job_debug(
         job_dir,
         build_slide_matrices_with_ai,
@@ -1690,8 +1789,8 @@ def _run_slide_ai_review(
             visual_map=render.visual_map,
             slide_understanding=understanding,
             targets=target_payloads,
-            xlsx_manifests=xlsx_manifests,
-            xlsx_dumps=xlsx_prompt_texts,
+            xlsx_manifests=builder_manifests,
+            xlsx_dumps=builder_prompt_texts,
             target_ids=[target.target_id for target in slide_targets],
             manual_context=combined_context,
         ),
@@ -1709,9 +1808,11 @@ def _run_slide_ai_review(
             continue
         target = targets_by_id.get(target_id)
         object_type = target.object_type if target is not None else str(output.get("object_type") or "chart")
-        errors = validate_typed_edit_data(output.get("final_edit_data") or {}, object_type=object_type)
+        errors = validate_typed_edit_data(output.get("final_edit_data") or {}, object_type=object_type, target=target)
         source_file = str(output.get("source_file") or "")
-        if source_file and source_file not in valid_sources and Path(source_file).name not in valid_source_basenames:
+        if not source_file:
+            errors.append("A IA nao informou o XLSX de origem (source_file) para este target.")
+        elif source_file not in valid_sources and Path(source_file).name not in valid_source_basenames:
             errors.append(f"source_file '{source_file}' nao esta entre os XLSX do slide.")
         output["validation_errors"] = errors
         if errors:
@@ -1767,6 +1868,73 @@ def _render_slide_for_job(job_dir: Path, targets: list, slide_number: int):
 def _datasource_entries_for_slide(job_dir: Path, slide_number: int):
     entries = collect_datasource_entries(job_dir / "datasources.zip")
     return entries_for_slide(entries, slide_number)
+
+
+def _builder_payload_from_understanding(
+    understanding: dict,
+    manifests: list[dict],
+    dumps: list,
+    prompt_texts: list[str],
+) -> tuple[list[dict], list[str]]:
+    """O understanding acabou de classificar quais XLSX do slide tem partes uteis
+    (usable_parts). O dump textual e o item mais pesado do payload, e reenvia-lo
+    integralmente ao matrix builder duplicava o custo das duas chamadas. Aqui so
+    reenviamos os dumps dos arquivos que o proprio understanding julgou uteis; se
+    ele nao apontou nenhum (ou apontou todos), mantemos o conjunto completo."""
+    useful: set[str] = set()
+    for item in understanding.get("xlsx_understanding") or []:
+        if item.get("usable_parts"):
+            file_name = str(item.get("file_name") or "")
+            if file_name:
+                useful.add(file_name)
+                useful.add(Path(file_name).name)
+    if not useful:
+        return manifests, prompt_texts
+    keep_indexes = [
+        index
+        for index, dump in enumerate(dumps)
+        if dump.file_name in useful or Path(dump.file_name).name in useful
+    ]
+    if not keep_indexes or len(keep_indexes) == len(dumps):
+        return manifests, prompt_texts
+    kept_files = {dumps[index].file_name for index in keep_indexes}
+    filtered_manifests = [manifest for manifest in manifests if manifest.get("file_name") in kept_files]
+    filtered_texts = [prompt_texts[index] for index in keep_indexes if index < len(prompt_texts)]
+    if not filtered_texts:
+        return manifests, prompt_texts
+    log_debug_event(
+        "slide_matrix_dump_filter",
+        {
+            "dumps_before": len(dumps),
+            "dumps_after": len(filtered_texts),
+            "kept_files": sorted(kept_files),
+        },
+    )
+    return (filtered_manifests or manifests), filtered_texts
+
+
+def _relevant_datasource_entries_for_targets(
+    targets: list,
+    entries: list,
+    sources: list,
+    limit_per_target: int = 4,
+) -> list:
+    """Restringe os XLSX enviados para IA de nivel de slide aos candidatos com sinal
+    local para os targets revisados, em vez de mandar todos os XLSX do slide. Reduz o
+    payload (dump + manifesto) sem perder cobertura: se a pontuacao local nao encontrar
+    nenhum candidato (score 0 para todos), mantem o conjunto original do slide."""
+    entries_by_path = {entry.zip_path: entry for entry in entries}
+    sources_in_scope = [source for source in sources if source.file_name in entries_by_path]
+    if not sources_in_scope:
+        return entries
+    relevant_paths: set[str] = set()
+    for target in targets:
+        candidates = source_match_candidates(target, sources_in_scope, limit=limit_per_target)
+        relevant_paths.update(candidate.source.file_name for candidate in candidates if candidate.score > 0)
+    if not relevant_paths:
+        return entries
+    restricted = [entries_by_path[path] for path in relevant_paths if path in entries_by_path]
+    return restricted or entries
 
 
 def _source_manifests_for_entries(sources: list, entries: list) -> list[dict]:
@@ -2196,8 +2364,13 @@ def _cards_by_slide(
         status = "mapped" if item else "unmapped"
         if manual_names.get(target.target_id):
             status = "manual"
+        elif target_output:
+            status = "ai"
         elif ai_diagnostics.get(target.target_id):
             status = "ai"
+        elif item and item.reason.startswith("IA sugeriu"):
+            status = "ai"
+        origin_label = {"mapped": "Determinístico", "ai": "IA", "manual": "Manual"}.get(status, "")
         cards[target.slide_number].append(
             {
                 "slide": target.slide_number,
@@ -2222,6 +2395,7 @@ def _cards_by_slide(
                 "slide_ai": target_output,
                 "approval": target_approval,
                 "status": status,
+                "origin_label": origin_label,
                 "search_text": " ".join(
                     [
                         str(target.slide_number),
@@ -2397,11 +2571,8 @@ def _ai_source_matches_for_job(
             "message": f"Download usou cache de IA; {len(missing_targets)} target(s) sem match cached nao foram enviados para IA.",
         }
     batch_limit = _ai_source_match_batch_limit()
-    targets_to_send = missing_targets[:batch_limit]
-    remaining_count = max(len(missing_targets) - len(targets_to_send), 0)
+    max_calls = _ai_source_match_max_calls()
     low_confidence_ids = {target.target_id for target in low_confidence}
-    review_target_ids = {target.target_id for target in targets_to_send}
-    existing_plan_ids = planned_targets - review_target_ids
     log_debug_event(
         "source_match_review_targets",
         {
@@ -2415,24 +2586,62 @@ def _ai_source_matches_for_job(
                 }
                 for target in low_confidence
             ],
-            "targets_to_send": [target.target_id for target in targets_to_send],
-            "remaining_count": remaining_count,
+            "missing_target_count": len(missing_targets),
+            "batch_limit": batch_limit,
+            "max_calls": max_calls,
             "selected_mapping_template": selected_mapping_template,
         },
     )
-    try:
+
+    # Cada chamada leva um lote pequeno (payload enxuto por slide), mas o loop cobre
+    # TODOS os targets pendentes do deck numa unica passada de preview - em vez de
+    # parar no primeiro lote e exigir que o usuario clique varias vezes em decks de
+    # 100+ slides. O cache e salvo apos cada lote, entao uma falha no meio preserva
+    # tudo que ja foi revisado. max_calls limita o custo no pior caso.
+    pending = list(missing_targets)
+    sent_count = 0
+    suggestion_count = 0
+    calls_made = 0
+    error_message = ""
+    while pending and calls_made < max_calls:
+        targets_to_send = pending[:batch_limit]
+        pending = pending[batch_limit:]
+        calls_made += 1
+        review_target_ids = {target.target_id for target in targets_to_send}
+        existing_plan_ids = planned_targets - review_target_ids
         sent_at = _now_iso()
         started = time.perf_counter()
         payload_summary = _match_payload_summary(targets_to_send, analysis.sources)
-        suggestions = _call_with_job_debug(
-            job_dir,
-            suggest_source_matches_with_ai,
-            targets_to_send,
-            analysis.sources,
-            existing_plan_ids=existing_plan_ids,
-            root=PROJECT_ROOT,
-        )
+        try:
+            suggestions = _call_with_job_debug(
+                job_dir,
+                suggest_source_matches_with_ai,
+                targets_to_send,
+                analysis.sources,
+                existing_plan_ids=existing_plan_ids,
+                root=PROJECT_ROOT,
+            )
+        except Exception as exc:
+            _append_ai_log(
+                job_dir,
+                {
+                    "operation": "source_match",
+                    "status": "error",
+                    "sent_at": sent_at,
+                    "returned_at": _now_iso(),
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                    "target_count": len(targets_to_send),
+                    "error": format_ai_error(exc),
+                    "batch_index": calls_made,
+                    "remaining_count": len(pending),
+                    "payload_summary": payload_summary,
+                },
+            )
+            error_message = format_ai_error(exc)
+            break
         duration_ms = round((time.perf_counter() - started) * 1000)
+        sent_count += len(targets_to_send)
+        suggestion_count += len(suggestions)
         for target in targets_to_send:
             previous_plan = plans_by_target.get(target.target_id)
             payload.setdefault(
@@ -2479,38 +2688,36 @@ def _ai_source_matches_for_job(
                 "duration_ms": duration_ms,
                 "target_count": len(targets_to_send),
                 "returned_count": len(suggestions),
-                "remaining_count": remaining_count,
+                "batch_index": calls_made,
+                "remaining_count": len(pending),
                 "payload_summary": payload_summary,
             },
         )
-        suffix = ""
-        if remaining_count:
-            suffix = f" Restam {remaining_count} target(s); clique em Revisar com IA para continuar."
-        if suggestions:
-            return payload, {
-                "state": "ok",
-                "message": f"IA revisou {len(targets_to_send)} match(es) de datasource e retornou {len(suggestions)} sugestao/oes confiaveis.{suffix}",
-            }
+
+    remaining_count = len(pending)
+    suffix = ""
+    if remaining_count:
+        suffix = f" Restam {remaining_count} target(s) alem do limite de {max_calls} chamada(s); clique em Revisar com IA para continuar."
+    if error_message:
+        state = "warn"
+        message = f"IA indisponivel para match de datasource: {error_message}"
+        if sent_count:
+            message = (
+                f"IA revisou {sent_count} target(s) em {calls_made - 1} chamada(s) antes de falhar: {error_message}"
+            )
+        return payload, {"state": state, "message": message}
+    if suggestion_count:
         return payload, {
-            "state": "warn",
-            "message": f"IA revisou {len(targets_to_send)} target(s), mas nao encontrou novos matches confiaveis de datasource.{suffix}",
+            "state": "ok",
+            "message": (
+                f"IA revisou {sent_count} match(es) de datasource em {calls_made} chamada(s) "
+                f"e retornou {suggestion_count} sugestao/oes confiaveis.{suffix}"
+            ),
         }
-    except Exception as exc:
-        _append_ai_log(
-            job_dir,
-            {
-                "operation": "source_match",
-                "status": "error",
-                "sent_at": sent_at if "sent_at" in locals() else _now_iso(),
-                "returned_at": _now_iso(),
-                "duration_ms": round((time.perf_counter() - started) * 1000) if "started" in locals() else 0,
-                "target_count": len(targets_to_send),
-                "error": format_ai_error(exc),
-                "remaining_count": remaining_count,
-                "payload_summary": _match_payload_summary(targets_to_send, analysis.sources),
-            },
-        )
-        return payload, {"state": "warn", "message": f"IA indisponivel para match de datasource: {format_ai_error(exc)}"}
+    return payload, {
+        "state": "warn",
+        "message": f"IA revisou {sent_count} target(s), mas nao encontrou novos matches confiaveis de datasource.{suffix}",
+    }
 
 
 def _combine_ai_status(*statuses: dict[str, str]) -> dict[str, str]:
@@ -3121,8 +3328,32 @@ def _ai_source_match_batch_limit() -> int:
     return max(_env_int("AUTO_PPT_AI_SOURCE_MATCH_BATCH_TARGETS", default_limit), 1)
 
 
+def _ai_source_match_max_calls() -> int:
+    # Teto de chamadas de IA por passada de revisao de matches. Com o batch default
+    # de 10 targets, o default de 12 cobre ate 120 targets pendentes de uma vez -
+    # suficiente para decks de 100+ slides sem deixar o custo do pior caso aberto.
+    return max(_env_int("AUTO_PPT_AI_MATCH_MAX_CALLS", 12), 1)
+
+
+# Politica de confianca do sistema, em 3 niveis independentes (valores default
+# inalterados nesta consolidacao; isto so agrupa e documenta o que ja existia
+# espalhado pelo arquivo, para ficar claro onde ajustar cada um):
+#
+# 1. table_normalizer.LOCAL_MATCH_THRESHOLD_STRONG_ID / _DEFAULT: decide se existe
+#    ALGUM plano automatico para o target. Abaixo disso o target fica "sem match"
+#    e so pode ser resolvido por IA ou override manual.
+# 2. _ai_review_confidence_floor() (este arquivo): decide se um plano ja aceito
+#    pelo matching local ainda assim recebe uma segunda opiniao enxuta de IA
+#    (troca de datasource + receita estrutural) antes do preview ficar pronto.
+# 3. _auto_slide_ai_confidence_floor() (este arquivo): decide se a revisao mais
+#    pesada por slide (imagem + matriz tipada) roda automaticamente quando
+#    AUTO_PPT_AUTO_SLIDE_AI esta ligado.
 def _ai_review_confidence_floor() -> float:
     return min(max(_env_float("AUTO_PPT_AI_REVIEW_CONFIDENCE_FLOOR", 0.80), 0.0), 1.0)
+
+
+def _auto_slide_ai_confidence_floor() -> float:
+    return min(max(_env_float("AUTO_PPT_AUTO_SLIDE_AI_CONFIDENCE_FLOOR", 0.82), 0.0), 1.0)
 
 
 def _auto_source_match_review_enabled() -> bool:

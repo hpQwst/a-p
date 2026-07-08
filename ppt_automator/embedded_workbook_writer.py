@@ -73,6 +73,24 @@ def update_embedded_workbook(workbook_bytes: bytes, sheet_name: str, matrix: lis
     return replace_zip_parts_preserving_structure(workbook_bytes, replacements)
 
 
+def resolve_default_sheet_name(workbook_bytes: bytes) -> str:
+    """Nome real da primeira aba do workbook embutido, para resolver target.sheet_name
+    quando a heuristica de discovery nao conseguiu extrair a aba a partir das formulas
+    do chart.xml. Nunca adivinha um nome fixo (ex.: "Sheet1"); le a lista real de abas."""
+    try:
+        with ZipFile(BytesIO(workbook_bytes)) as workbook_zip:
+            workbook_root = ET.fromstring(workbook_zip.read("xl/workbook.xml"))
+    except Exception:
+        return ""
+    sheets = workbook_root.find(f"{{{SHEET_NS}}}sheets")
+    if sheets is None:
+        return ""
+    first_sheet = sheets.find(f"{{{SHEET_NS}}}sheet")
+    if first_sheet is None:
+        return ""
+    return str(first_sheet.attrib.get("name") or "")
+
+
 def _worksheet_path_for_sheet(workbook_zip: ZipFile, sheet_name: str) -> str:
     workbook_root = ET.fromstring(workbook_zip.read("xl/workbook.xml"))
     rels_root = ET.fromstring(workbook_zip.read("xl/_rels/workbook.xml.rels"))

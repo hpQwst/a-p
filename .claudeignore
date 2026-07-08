@@ -1,0 +1,11 @@
+graphify-out/
+graph.json
+*.pptx
+*.xlsx
+*.xlsm
+*.csv
+*.zip
+*.log
+.venv/
+venv/
+node_modules/

@@ -143,6 +143,43 @@ h3 {
   color: var(--blue);
 }
 
+.target-score-group {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.score-pill.confidence-high {
+  background: #eaf5ef;
+  color: var(--accent);
+}
+
+.score-pill.confidence-medium {
+  background: #fbf3e2;
+  color: var(--amber);
+}
+
+.score-pill.confidence-low {
+  background: #fbecec;
+  color: var(--red);
+}
+
+.origin-badge {
+  white-space: nowrap;
+}
+
+.origin-badge.origin-manual {
+  background: #eaf1f8;
+  color: var(--blue);
+}
+
+.origin-badge.origin-ai {
+  background: #eaf5ef;
+  color: var(--accent-strong);
+}
+
 .home-layout {
   display: grid;
   grid-template-columns: minmax(620px, 1fr) minmax(320px, 420px);

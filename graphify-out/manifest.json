@@ -40,9 +40,9 @@
     "semantic_hash": "51cb82340781404a0174affd63bb7acf"
   },
   "ppt_automator/ai_mapper.py": {
-    "mtime": 1783531333.2732067,
-    "ast_hash": "5ae083e515ca0705f4a32ef0378c7461",
-    "semantic_hash": "5ae083e515ca0705f4a32ef0378c7461"
+    "mtime": 1783548718.9986057,
+    "ast_hash": "3b31a0fcf0538603ebc5aea8629b4055",
+    "semantic_hash": ""
   },
   "ppt_automator/ai_payload.py": {
     "mtime": 1782964328.7635214,
@@ -95,8 +95,8 @@
     "semantic_hash": ""
   },
   "ppt_automator/ppt_discovery.py": {
-    "mtime": 1783541591.674748,
-    "ast_hash": "eb36878b4679d727c8b65d27293a8dd5",
+    "mtime": 1783548677.5825636,
+    "ast_hash": "58bbb7e57646829c7d7a8a928df32030",
     "semantic_hash": ""
   },
   "ppt_automator/ppt_table_writer.py": {
@@ -185,9 +185,9 @@
     "semantic_hash": "a1cb7a37848526473800fc3a634e8f99"
   },
   "tests/test_ai_scope.py": {
-    "mtime": 1783521888.9622738,
-    "ast_hash": "f5df26aa16cea9de5abcc0b5f3bd72ec",
-    "semantic_hash": "f5df26aa16cea9de5abcc0b5f3bd72ec"
+    "mtime": 1783549468.2585397,
+    "ast_hash": "9b555b3b5dd39ccf55b2f47bc3e06c17",
+    "semantic_hash": ""
   },
   "tests/test_ai_transform.py": {
     "mtime": 1782426585.6810167,
@@ -285,8 +285,8 @@
     "semantic_hash": "4269297491dc0ef8f5f756ca37244198"
   },
   "web/main.py": {
-    "mtime": 1783546591.4537778,
-    "ast_hash": "4d22f53112fcaf328f57f70fb525e405",
+    "mtime": 1783549840.829178,
+    "ast_hash": "788b3321154dc9378e88b778562731eb",
     "semantic_hash": ""
   },
   "web/static/app.js": {

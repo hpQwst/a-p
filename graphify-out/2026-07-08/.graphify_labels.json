@@ -20,13 +20,21 @@
   "18": "render_slide_with_target_labels",
   "19": "Job Analysis Caching",
   "20": "Preview Context & Flags",
+  "21": "PptTarget",
+  "22": "ai.py",
+  "23": "_run_automatic_slide_ai_review",
   "24": "typed_matrix.py",
+  "25": "slide_renderer.py",
   "26": "Fargate Deploy Script",
   "27": "CodeBuild Docker Image",
   "28": "Web App Package Init",
   "29": "Worker Package Boundary",
   "30": "Fargate Stop Script",
+  "31": "ai_transform.py",
+  "32": "xlsx_source_manifest",
   "33": "RuntimeError",
   "34": "InputFile",
-  "35": "Path"
+  "35": "Path",
+  "36": "_error_response",
+  "37": "test_ai_scope.py"
 }

@@ -20,15 +20,10 @@
   "18": "render_slide_with_target_labels",
   "19": "Job Analysis Caching",
   "20": "Preview Context & Flags",
-  "21": "Table Writer & Tests",
   "22": "AI Call Batching Limits",
-  "23": "AI Scope Tests",
-  "24": "Preview Model Building",
-  "25": "Source Manifest & Plans",
   "26": "Fargate Deploy Script",
   "27": "CodeBuild Docker Image",
   "28": "Web App Package Init",
   "29": "Worker Package Boundary",
-  "30": "Fargate Stop Script",
-  "31": "Decimal"
+  "30": "Fargate Stop Script"
 }

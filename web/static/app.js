@@ -1,6 +1,75 @@
 (function () {
   var deckSummary = null;
 
+  /* ---------- tema claro/escuro ---------- */
+
+  function toggleTheme() {
+    var root = document.documentElement;
+    var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try {
+      localStorage.setItem("qwst-theme", next);
+    } catch (err) {
+      /* armazenamento indisponivel: tema vale so para esta pagina */
+    }
+  }
+
+  /* ---------- dropzones de arquivo ---------- */
+
+  function updateFileCard(input) {
+    var card = input.closest("[data-dropzone]");
+    if (!card) {
+      return;
+    }
+    var label = card.querySelector("[data-file-name]");
+    var file = input.files && input.files[0];
+    card.classList.toggle("has-file", !!file);
+    if (label) {
+      label.textContent = file ? file.name + " (" + formatBytes(file.size) + ")" : "";
+    }
+  }
+
+  function formatBytes(size) {
+    if (!size && size !== 0) {
+      return "";
+    }
+    var units = ["B", "KB", "MB", "GB"];
+    var value = size;
+    var unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value = value / 1024;
+      unit += 1;
+    }
+    return (unit === 0 ? value : value.toFixed(1)) + " " + units[unit];
+  }
+
+  function bindDropzones() {
+    document.querySelectorAll("[data-dropzone]").forEach(function (card) {
+      var input = card.querySelector("input[type='file']");
+      if (!input) {
+        return;
+      }
+      ["dragenter", "dragover"].forEach(function (name) {
+        card.addEventListener(name, function (event) {
+          event.preventDefault();
+          card.classList.add("dragover");
+        });
+      });
+      ["dragleave", "drop"].forEach(function (name) {
+        card.addEventListener(name, function (event) {
+          event.preventDefault();
+          card.classList.remove("dragover");
+        });
+      });
+      card.addEventListener("drop", function (event) {
+        if (event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files.length) {
+          input.files = event.dataTransfer.files;
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      });
+    });
+  }
+
   function showProgress(message) {
     var overlay = document.getElementById("progress-overlay");
     var label = document.getElementById("progress-message");
@@ -334,6 +403,9 @@
     if (target.matches("[data-pptx-input]")) {
       inspectPpt(target.files && target.files[0]);
     }
+    if (target.matches("[data-dropzone] input[type='file']")) {
+      updateFileCard(target);
+    }
   });
 
   document.addEventListener("input", function (event) {
@@ -381,6 +453,10 @@
   });
 
   document.addEventListener("click", function (event) {
+    if (event.target && event.target.closest && event.target.closest("[data-theme-toggle]")) {
+      toggleTheme();
+      return;
+    }
     var chip = event.target && event.target.closest ? event.target.closest("[data-status-filter]") : null;
     if (chip) {
       document.querySelectorAll("[data-status-filter]").forEach(function (item) {
@@ -401,4 +477,5 @@
   syncMappingTemplateOptions();
   applyPreviewFilters();
   startPreviewPolling();
+  bindDropzones();
 })();

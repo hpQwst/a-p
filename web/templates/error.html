@@ -4,6 +4,15 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Erro - QWST Auto PPT</title>
+    <script>
+      (function () {
+        var theme = localStorage.getItem("qwst-theme");
+        if (!theme) {
+          theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
   </head>
   <body>
@@ -13,10 +22,12 @@
           <p class="eyebrow">QWST Auto PPT</p>
           <h1>Não consegui concluir a análise</h1>
         </div>
-        <a class="button secondary" href="/">Voltar</a>
       </header>
-      <section class="panel">
+      <section class="error-panel">
+        <span class="error-icon">!</span>
         <div class="notice warn">{{ message }}</div>
+        <p class="muted">Verifique se o PPT é um .pptx válido e se o ZIP contém apenas arquivos .xlsx. Se o problema persistir, consulte o log de debug do job.</p>
+        <a class="button" href="/">Voltar para a central</a>
       </section>
     </main>
   </body>

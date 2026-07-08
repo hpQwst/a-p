@@ -4,6 +4,15 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>QWST Auto PPT</title>
+    <script>
+      (function () {
+        var theme = localStorage.getItem("qwst-theme");
+        if (!theme) {
+          theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
   </head>
   <body>
@@ -13,9 +22,12 @@
           <p class="eyebrow">QWST Auto PPT</p>
           <h1>Central de atualização</h1>
         </div>
-        <div class="header-status">
-          <span class="status-dot"></span>
-          <span>{% if ai_available %}IA ativa{% else %}IA indisponível{% endif %}</span>
+        <div class="header-actions">
+          <span class="header-status {% if not ai_available %}off{% endif %}">
+            <span class="status-dot"></span>
+            <span>{% if ai_available %}IA ativa{% else %}IA indisponível{% endif %}</span>
+          </span>
+          <button type="button" class="theme-toggle" data-theme-toggle title="Alternar tema claro/escuro" aria-label="Alternar tema">◐</button>
         </div>
       </header>
 
@@ -70,6 +82,7 @@
               <span>2</span>
               <strong>Modelo de mapeamento</strong>
             </div>
+            <p class="section-hint">Opcional — se o squad já tem um mapeamento salvo para este deck, ele é aplicado antes de qualquer IA.</p>
             <label>
               <span>Mapeamento salvo</span>
               <select name="mapping_template_ref" data-mapping-template-select>
@@ -94,13 +107,18 @@
               <span>3</span>
               <strong>Arquivos</strong>
             </div>
+            <p class="section-hint">Arraste os arquivos ou clique para selecionar. Os XLSX podem ter qualquer nome — o ideal é conter <code>slideN</code>.</p>
             <div class="file-grid">
-              <label class="file-card">
+              <label class="file-card" data-dropzone>
                 <span>PowerPoint modelo</span>
+                <span class="file-hint">.pptx · arraste aqui</span>
+                <span class="file-selected" data-file-name></span>
                 <input name="pptx" type="file" accept=".pptx" required data-pptx-input>
               </label>
-              <label class="file-card">
+              <label class="file-card" data-dropzone>
                 <span>ZIP com datasources XLSX</span>
+                <span class="file-hint">.zip · arraste aqui</span>
+                <span class="file-selected" data-file-name></span>
                 <input name="datasources" type="file" accept=".zip" required>
               </label>
             </div>
@@ -113,7 +131,7 @@
             </div>
             <label>
               <span>Slides para atualizar</span>
-              <input name="slides_to_update" placeholder="Ex.: 3, 5, 8-10" data-slide-scope-input>
+              <input name="slides_to_update" placeholder="Ex.: 3, 5, 8-10 (vazio = todos)" data-slide-scope-input>
             </label>
             <div class="deck-inspector" data-deck-inspector hidden>
               <div>
@@ -154,7 +172,7 @@
                         </div>
                         {% if card.has_checkpoint %}
                           <p>Status: {{ card.checkpoint_status or "em andamento" }} · Slides: {{ card.selected_slides }}</p>
-                          <a class="button compact" href="{{ card.preview_url }}" data-progress-message="Carregando checkpoint do projeto...">Abrir preview</a>
+                          <a class="button compact secondary" href="{{ card.preview_url }}" data-progress-message="Carregando checkpoint do projeto...">Abrir preview</a>
                         {% else %}
                           <p>Sem preview salvo.</p>
                         {% endif %}

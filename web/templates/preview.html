@@ -4,6 +4,15 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Preview - QWST Auto PPT</title>
+    <script>
+      (function () {
+        var theme = localStorage.getItem("qwst-theme");
+        if (!theme) {
+          theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
   </head>
   <body>
@@ -19,6 +28,8 @@
           <h1>Preview das atualizações</h1>
         </div>
         <div class="header-actions">
+          <button type="button" class="theme-toggle" data-theme-toggle title="Alternar tema claro/escuro" aria-label="Alternar tema">◐</button>
+          <a class="ghost-button" href="/" title="Voltar para a central">Início</a>
           <a class="ghost-button" href="/jobs/{{ job_id }}/debug-log" target="_blank" rel="noreferrer">Log debug</a>
           {% if preview_processing.active %}
             <button class="button" type="button" disabled>Preparando preview</button>
@@ -55,19 +66,8 @@
               <div><strong>{{ review_summary.slides }}</strong><span>slides</span></div>
               <div><strong>{{ review_summary.targets }}</strong><span>targets</span></div>
               <div><strong>{{ review_summary.mapped }}</strong><span>mapeados</span></div>
-              <div><strong>{{ review_summary.unmapped }}</strong><span>pendentes</span></div>
+              <div class="{% if review_summary.unmapped %}metric-warn{% endif %}"><strong>{{ review_summary.unmapped }}</strong><span>pendentes</span></div>
             </div>
-          </section>
-
-          <section class="sidebar-card">
-            <p class="eyebrow">Ações</p>
-            <form class="compact-form" action="/jobs/{{ job_id }}/slides" method="post" data-progress-message="Atualizando escopo de slides...">
-              <label>
-                <span>Adicionar slides</span>
-                <input name="slides_to_add" placeholder="Ex.: 2, 7-9">
-              </label>
-              <button type="submit">Adicionar</button>
-            </form>
           </section>
 
           <section class="sidebar-card">
@@ -86,6 +86,17 @@
               <button type="button" class="ghost-button" data-open-all>Expandir</button>
               <button type="button" class="ghost-button" data-close-all>Recolher</button>
             </div>
+          </section>
+
+          <section class="sidebar-card">
+            <p class="eyebrow">Escopo</p>
+            <form class="compact-form" action="/jobs/{{ job_id }}/slides" method="post" data-progress-message="Atualizando escopo de slides...">
+              <label>
+                <span>Adicionar slides</span>
+                <input name="slides_to_add" placeholder="Ex.: 2, 7-9">
+              </label>
+              <button type="submit" class="secondary">Adicionar</button>
+            </form>
           </section>
 
           <nav class="slide-nav" aria-label="Slides">

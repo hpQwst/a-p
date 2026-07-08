@@ -154,63 +154,83 @@
           <section class="workspace-card library-card">
             <div class="workspace-head">
               <div>
-                <p class="eyebrow">Histórico</p>
-                <h2>Projetos</h2>
+                <p class="eyebrow">Retomar</p>
+                <h2>Continue de onde parou</h2>
               </div>
-              <span class="mini-pill">Checkpoint</span>
+              {% if resume_cards %}<span class="mini-pill">{{ resume_cards|length }}</span>{% endif %}
             </div>
-            {% for squad, cards in project_cards_by_squad.items() %}
-              <details class="project-group" {% if cards %}open{% endif %}>
-                <summary>{{ squad.title() }} <span>{{ cards|length }}</span></summary>
-                {% if cards %}
-                  <div class="project-card-list">
-                    {% for card in cards %}
-                      <article class="project-card">
-                        <div>
-                          <strong>{{ card.project.name }}</strong>
-                          <span>{{ card.project.slug }}</span>
-                        </div>
-                        {% if card.has_checkpoint %}
-                          <p>Status: {{ card.checkpoint_status or "em andamento" }} · Slides: {{ card.selected_slides }}</p>
-                          <a class="button compact secondary" href="{{ card.preview_url }}" data-progress-message="Carregando checkpoint do projeto...">Abrir preview</a>
-                        {% else %}
-                          <p>Sem preview salvo.</p>
-                        {% endif %}
-                      </article>
-                    {% endfor %}
-                  </div>
-                {% else %}
-                  <p class="muted">Nenhum projeto ainda.</p>
-                {% endif %}
-              </details>
-            {% endfor %}
+
+            {% if resume_cards %}
+              <div class="resume-list">
+                {% for card in resume_cards %}
+                  <a class="resume-card" href="{{ card.preview_url }}" data-progress-message="Carregando checkpoint do projeto...">
+                    <span class="resume-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                        <path d="M7 8h7M7 12h10M7 16h5"></path>
+                      </svg>
+                    </span>
+                    <span class="resume-body">
+                      <span class="resume-head">
+                        <strong>{{ card.name }}</strong>
+                        <span class="resume-squad">{{ card.squad.title() }}</span>
+                      </span>
+                      <span class="resume-meta">
+                        <span class="status-tag {{ card.status_kind }}">{{ card.status_label }}</span>
+                        <span>Slides: {{ card.slides }}</span>
+                        {% if card.updated_label %}<span class="resume-time">{{ card.updated_label }}</span>{% endif %}
+                      </span>
+                    </span>
+                    <span class="resume-cta" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M5 12h14M13 6l6 6-6 6"></path>
+                      </svg>
+                    </span>
+                  </a>
+                {% endfor %}
+              </div>
+            {% else %}
+              <div class="empty-state">
+                <span class="empty-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 7l8-4 8 4v10l-8 4-8-4V7z"></path>
+                    <path d="M4 7l8 4 8-4M12 11v10"></path>
+                  </svg>
+                </span>
+                <strong>Nenhum projeto em andamento</strong>
+                <p>Gere um preview ao lado e ele aparece aqui para você retomar quando quiser.</p>
+              </div>
+            {% endif %}
           </section>
 
           <section class="workspace-card library-card">
             <div class="workspace-head">
               <div>
-                <p class="eyebrow">Memoria</p>
-                <h2>Mapeamentos</h2>
+                <p class="eyebrow">Memória</p>
+                <h2>Mapeamentos salvos</h2>
               </div>
-              <span class="mini-pill">Por squad</span>
             </div>
-            {% for squad, templates in mapping_templates_by_squad.items() %}
-              <details class="project-group" {% if templates %}open{% endif %}>
-                <summary>{{ squad.title() }} <span>{{ templates|length }}</span></summary>
-                {% if templates %}
-                  <div class="mapping-list">
-                    {% for template in templates %}
-                      <article class="mapping-card">
+            {% set has_templates = mapping_templates_by_squad.values()|map('length')|sum %}
+            {% if has_templates %}
+              <div class="mapping-list">
+                {% for squad, templates in mapping_templates_by_squad.items() %}
+                  {% for template in templates %}
+                    <article class="mapping-card">
+                      <div class="mapping-card-head">
                         <strong>{{ template.name }}</strong>
-                        <span>{{ template.entry_count }} targets · {{ template.updated_at }}</span>
-                      </article>
-                    {% endfor %}
-                  </div>
-                {% else %}
-                  <p class="muted">Nenhum mapeamento salvo.</p>
-                {% endif %}
-              </details>
-            {% endfor %}
+                        <span class="resume-squad">{{ squad.title() }}</span>
+                      </div>
+                      <span>{{ template.entry_count }} targets · atualizado {{ template.updated_at }}</span>
+                    </article>
+                  {% endfor %}
+                {% endfor %}
+              </div>
+            {% else %}
+              <div class="empty-state compact">
+                <strong>Nenhum mapeamento salvo</strong>
+                <p>Ao baixar um PPT, o mapeamento do squad é aprendido e reaproveitado na próxima vez.</p>
+              </div>
+            {% endif %}
           </section>
         </aside>
       </section>

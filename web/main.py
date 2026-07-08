@@ -108,6 +108,7 @@ async def index(request: Request) -> HTMLResponse:
             "squads": _squad_labels(),
             "projects_by_squad": _projects_by_squad(),
             "project_cards_by_squad": _project_cards_by_squad(),
+            "resume_cards": _resume_cards(),
             "mapping_templates_by_squad": _mapping_templates_by_squad(),
             "ai_available": ai_configured(PROJECT_ROOT),
             "large_deck_slide_threshold": _large_deck_slide_threshold(),
@@ -3425,6 +3426,56 @@ def _project_cards_by_squad() -> dict[str, list[dict]]:
             )
         output[squad] = cards
     return output
+
+
+def _resume_cards() -> list[dict]:
+    """Lista plana de projetos com progresso salvo ('continue de onde parou'),
+    do mais recente para o mais antigo - independente de squad."""
+    cards: list[dict] = []
+    for squad in SQUADS:
+        for project in list_projects(squad):
+            checkpoint = _checkpoint_summary(project)
+            if not checkpoint:
+                continue
+            status = str(checkpoint.get("status") or "")
+            cards.append(
+                {
+                    "squad": project.squad,
+                    "name": project.name,
+                    "slug": project.slug,
+                    "status": status,
+                    "status_label": _checkpoint_status_label(status),
+                    "status_kind": "done" if status.lower() in {"complete", "concluido", "concluído", "done"} else "progress",
+                    "slides": _checkpoint_slide_label(checkpoint),
+                    "updated_at": str(checkpoint.get("updated_at") or ""),
+                    "updated_label": _pretty_datetime(checkpoint.get("updated_at")),
+                    "preview_url": f"/projects/{project.squad}/{project.slug}/preview",
+                }
+            )
+    cards.sort(key=lambda card: card["updated_at"], reverse=True)
+    return cards
+
+
+def _checkpoint_status_label(status: str) -> str:
+    mapping = {
+        "complete": "Concluído",
+        "done": "Concluído",
+        "in_progress": "Em andamento",
+        "processing": "Processando",
+        "error": "Com erro",
+    }
+    return mapping.get(status.lower(), status.replace("_", " ").title() if status else "Em andamento")
+
+
+def _pretty_datetime(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "").split(".")[0])
+    except ValueError:
+        return text
+    return parsed.strftime("%d/%m/%Y %H:%M")
 
 
 def _checkpoint_summary(project) -> dict:

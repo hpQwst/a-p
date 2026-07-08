@@ -41,51 +41,38 @@ def build_preview(plans: list[TransformPlan]) -> list[PreviewTarget]:
 
 
 def _matrix_for_preview(plan: TransformPlan) -> tuple[list[str], list[list[Any]]]:
-    percentage = _plan_is_percentage(plan)
+    fmt = _display_format(plan)
     if plan.object_type == "chart" and plan.orientation_ppt == "categories_rows_series_columns":
-        return ["", *plan.series], [[plan.categories[i], *[_display_value(value, percentage) for value in row]] for i, row in enumerate(plan.values)]
+        return ["", *plan.series], [[plan.categories[i], *[_display_value(value, fmt) for value in row]] for i, row in enumerate(plan.values)]
     if plan.object_type == "chart":
-        return ["", *plan.categories], [[plan.series[i], *[_display_value(value, percentage) for value in row]] for i, row in enumerate(plan.values)]
+        return ["", *plan.categories], [[plan.series[i], *[_display_value(value, fmt) for value in row]] for i, row in enumerate(plan.values)]
     if plan.values:
-        return plan.categories, [[_display_value(value, percentage) for value in row] for row in plan.values]
+        return plan.categories, [[_display_value(value, fmt) for value in row] for row in plan.values]
     return [], []
 
 
-def _plan_is_percentage(plan: TransformPlan) -> bool:
-    if plan.preserve_percentage_decimal:
-        return True
-    values = [value for row in plan.values for value in row]
-    if any(isinstance(value, str) and "%" in value for value in values):
-        return True
-    numeric = [_to_number(value) for value in values]
-    numeric = [value for value in numeric if value is not None]
-    if not numeric:
-        return False
-    decimal_like = sum(1 for value in numeric if 0 <= abs(value) <= 1 and value not in {0, 1})
-    return decimal_like >= max(2, len(numeric) * 0.5)
+def _display_format(plan: TransformPlan) -> str:
+    """Espelha como o PowerPoint vai exibir os valores gravados (verbatim):
+    1 casa decimal, com '%' apenas se o template do grafico ja usar percentual."""
+    template = plan.target.value_format if plan.object_type == "chart" else plan.number_format
+    return "percent" if "%" in (template or "") else "decimal"
 
 
-def _display_value(value: Any, percentage: bool) -> Any:
-    if value is None:
+def _display_value(value: Any, fmt: str) -> Any:
+    if value is None or value == "":
         return ""
-    if not percentage:
-        return value
     parsed = _to_number(value)
     if parsed is None:
+        # Texto (rotulos de tabela, etc.) permanece verbatim.
         return value
-    if isinstance(value, str) and "%" in value:
-        parsed = parsed / 100 if abs(parsed) > 1 else parsed
-    return _format_pt_percent(parsed)
+    if fmt == "percent":
+        # Formato percentual do template: o PPT multiplica por 100 na exibicao.
+        return _format_pt_number(parsed * 100) + "%"
+    return _format_pt_number(parsed)
 
 
-def _format_pt_percent(value: float) -> str:
-    percent = value * 100
-    text = f"{percent:.1f}%".replace(".", ",")
-    if text.startswith("0,"):
-        return text[1:]
-    if text.startswith("-0,"):
-        return "-" + text[2:]
-    return text
+def _format_pt_number(value: float) -> str:
+    return f"{value:.1f}".replace(".", ",")
 
 
 def _to_number(value: Any) -> float | None:

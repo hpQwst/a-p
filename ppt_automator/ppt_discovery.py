@@ -73,6 +73,7 @@ class PptTarget:
     expected_categories: list[str] = field(default_factory=list)
     expected_series: list[str] = field(default_factory=list)
     expected_values: list[list[Any]] = field(default_factory=list)
+    value_format: str = ""
     table_cells: list[list[str]] = field(default_factory=list)
     text: str = ""
     target_key: str = ""
@@ -235,6 +236,7 @@ def _chart_target(
     expected_series: list[str] = []
     expected_values: list[list[Any]] = []
     orientation = ""
+    value_format = ""
     if chart_path in zf.namelist():
         structure = _read_chart_structure(zf, chart_path, workbook_path)
         sheet_name = structure["sheet_name"]
@@ -242,6 +244,7 @@ def _chart_target(
         expected_series = structure["series"]
         expected_values = structure["values"]
         orientation = structure["orientation"]
+        value_format = structure["value_format"]
 
     return PptTarget(
         slide_index=slide_index,
@@ -263,6 +266,7 @@ def _chart_target(
         expected_categories=expected_categories,
         expected_series=expected_series,
         expected_values=expected_values,
+        value_format=value_format,
     )
 
 
@@ -321,7 +325,25 @@ def _read_chart_structure(zf: ZipFile, chart_path: str, workbook_path: str) -> d
         "series": series_labels,
         "values": values,
         "orientation": orientation,
+        "value_format": _chart_value_format(chart_root, series_elements),
     }
+
+
+def _chart_value_format(chart_root: ET.Element, series_elements: list[ET.Element]) -> str:
+    """Formato numerico que o template ja define para os valores (o 'contrato').
+
+    Preferimos o formatCode do numCache da primeira serie; se ausente, o numFmt
+    dos rotulos de dados. Serve para preservar o carater do formato (ex.: se o
+    template genuinamente usa '%') sem inventar percentuais que nao existem.
+    """
+    for ser in series_elements:
+        fmt = _node_text(ser.find("./c:val//c:numCache/c:formatCode", NS))
+        if fmt:
+            return fmt
+    num_fmt = chart_root.find(".//c:dLbls/c:numFmt", NS)
+    if num_fmt is not None and num_fmt.attrib.get("formatCode"):
+        return num_fmt.attrib["formatCode"]
+    return ""
 
 
 def _load_chart_workbook(zf: ZipFile, workbook_path: str):

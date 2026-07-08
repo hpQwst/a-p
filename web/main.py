@@ -37,6 +37,10 @@ from ppt_automator.slide_renderer import render_slide_with_target_labels
 from ppt_automator.source_manifest import xlsx_source_manifest
 from ppt_automator.table_normalizer import source_match_candidates
 from ppt_automator.target_labeler import target_aliases, visual_label
+from ppt_automator.learned_mapping import (
+    mapping_entry_learning_fields,
+    resolve_learned_matches,
+)
 from ppt_automator.xlsx_plaintext_dump import dump_xlsx_zip_entries
 from ppt_automator.project_store import (
     SQUADS,
@@ -2214,27 +2218,24 @@ def _apply_mapping_template_to_analysis(
         for target in updatable_targets
         for alias in target_aliases(target)
     }
-    present_entries = {}
-    for raw_target_id, entry in entries.items():
-        canonical_id = alias_to_target.get(str(raw_target_id), str(raw_target_id))
-        if canonical_id in target_ids and canonical_id not in skip_targets:
-            present_entries[canonical_id] = entry
-    saved_matches = {}
-    missing_sources = []
-    for target_id, entry in present_entries.items():
-        datasource = str((entry or {}).get("datasource") or (entry or {}).get("datasource_basename") or "")
-        source = _find_source_for_saved_datasource(analysis.sources, datasource)
-        if source is None:
-            missing_sources.append(datasource or target_id)
-            continue
-        saved_matches[target_id] = {
-            "datasource": source.file_name,
-            "confidence": 1.0,
-            "reason": f"Mapeamento salvo '{template.get('name')}' aplicou {source.file_name}.",
-        }
+
+    # Camada 4: resolve por CONTEUDO (fingerprint do target + assinatura do
+    # datasource), resistente a renome dos XLSX e a recriacao do deck. Cai para o
+    # match por nome/alias automaticamente dentro do resolvedor.
+    resolved = resolve_learned_matches(entries, updatable_targets, analysis.sources)
+    saved_matches = {
+        target_id: match
+        for target_id, match in resolved.items()
+        if target_id not in skip_targets
+    }
+    resolved_targets = set(saved_matches)
+    matched_entry_ids = {
+        alias_to_target.get(str(raw_id), str(raw_id)) for raw_id in entries
+    } & target_ids
+    missing_sources = sorted(matched_entry_ids - resolved_targets)
 
     mapped_analysis = apply_saved_source_matches_to_analysis(analysis, saved_matches)
-    new_targets = sorted(target_ids - set(entries))
+    new_targets = sorted(target_ids - matched_entry_ids - resolved_targets)
     message = (
         f"Mapeamento '{template.get('name')}' aplicado: {len(saved_matches)} target(s) reconhecido(s)."
     )
@@ -2296,23 +2297,6 @@ def _mapping_status_without_selection(candidates: list[dict]) -> dict:
             f"({best['matched_count']} target(s), {best['score']}%)."
         ),
     }
-
-
-def _find_source_for_saved_datasource(sources: list, datasource: str):
-    key = _source_file_key(datasource)
-    if not key:
-        return None
-    for source in sources:
-        if _source_file_key(source.file_name) == key:
-            return source
-    return None
-
-
-def _source_file_key(value: str) -> str:
-    text = str(value or "").strip().replace("\\", "/")
-    if not text:
-        return ""
-    return Path(text).name.lower()
 
 
 def _load_ai_diagnostics(job_dir: Path) -> dict:
@@ -3158,6 +3142,7 @@ def _save_or_update_mapping_template(job_dir: Path, project, analysis: AnalysisR
             "confidence": round(plan.confidence, 4),
             "reason": plan.reason,
             "updated_at": now,
+            **mapping_entry_learning_fields(plan.target, plan.datasource),
         }
     if not existing_entries:
         return

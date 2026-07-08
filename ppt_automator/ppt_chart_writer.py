@@ -15,6 +15,21 @@ from .table_normalizer import TransformPlan
 
 
 PERCENT_FORMAT = "0.0%"
+DECIMAL_FORMAT = "0.0"
+
+
+def effective_value_format(template_format: str) -> str:
+    """Formato de EXIBICAO do grafico: sempre 1 casa decimal.
+
+    O valor gravado no cache/workbook e sempre verbatim (precisao total, para o
+    'Editar dados'); o formatCode so controla a exibicao. Preservamos o carater
+    de percentual apenas quando o proprio template ja usa '%' - nunca inventamos
+    um '%' que nao existe no contrato do PPT nem no XLSX.
+    """
+    fmt = (template_format or "").strip()
+    if "%" in fmt:
+        return PERCENT_FORMAT
+    return DECIMAL_FORMAT
 
 
 class ChartSheetUnresolvedError(RuntimeError):
@@ -43,7 +58,8 @@ def _updated_chart_xml_bytes(zf: ZipFile, target: PptTarget, plan: TransformPlan
             f"para este alvo; revise o template ou aplique um XLSX manualmente."
         )
     sheet = _sheet_ref(target.sheet_name)
-    number_format = _plan_number_format(plan)
+    explicit = plan.number_format if plan.number_format and plan.number_format != "thousands_pt_br" else ""
+    number_format = explicit or effective_value_format(target.value_format)
 
     if plan.orientation_ppt == "series_rows_categories_columns":
         end_col = _excel_col(len(plan.categories) + 1)
@@ -170,42 +186,24 @@ def _chart_value_text(value: Any, numeric: bool, number_format: str = "") -> str
     if value is None:
         return "0" if numeric else ""
     if numeric:
-        parsed = _numeric_value(value, percentage="%" in number_format)
+        parsed = _to_float(value)
         if parsed is not None:
+            # Verbatim: gravamos exatamente o numero do XLSX, com precisao total.
+            # O formatCode cuida da exibicao (1 casa); "Editar dados" mantem tudo.
             return f"{parsed:.12g}"
     if isinstance(value, float):
         return f"{value:.12g}"
     return str(value)
 
 
-
-
-def _plan_number_format(plan: TransformPlan) -> str:
-    if plan.number_format:
-        return plan.number_format
-    if plan.preserve_percentage_decimal:
-        return PERCENT_FORMAT
-    values = [value for row in plan.values for value in row]
-    if any(_is_percent_text(value) for value in values):
-        return PERCENT_FORMAT
-    numeric = [_numeric_value(value, percentage=False) for value in values]
-    numeric = [value for value in numeric if value is not None]
-    if not numeric:
-        return ""
-    decimal_like = sum(1 for value in numeric if 0 <= abs(value) <= 1 and value not in {0, 1})
-    return PERCENT_FORMAT if decimal_like >= max(2, len(numeric) * 0.5) else ""
-
-
-def _numeric_value(value: Any, percentage: bool = False) -> float | None:
+def _to_float(value: Any) -> float | None:
+    """Converte para numero SEM aplicar qualquer escala (nunca divide/multiplica
+    por 100). Um '%' textual e apenas removido; o valor numerico e preservado."""
     if isinstance(value, (int, float)):
-        number = float(value)
-        if percentage and abs(number) > 1:
-            return number / 100
-        return number
+        return float(value)
     text = str(value).strip()
     if not text:
         return None
-    is_percent = "%" in text
     text = text.replace("%", "").strip()
     text = re.sub(r"^,", "0,", text)
     text = re.sub(r"^-,", "-0,", text)
@@ -215,17 +213,9 @@ def _numeric_value(value: Any, percentage: bool = False) -> float | None:
     else:
         text = text.replace(",", ".")
     try:
-        number = float(text)
+        return float(text)
     except ValueError:
         return None
-    if percentage or is_percent:
-        if is_percent or abs(number) > 1:
-            return number / 100
-    return number
-
-
-def _is_percent_text(value: Any) -> bool:
-    return isinstance(value, str) and "%" in value
 
 
 def _sheet_ref(sheet_name: str) -> str:

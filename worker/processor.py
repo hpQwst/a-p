@@ -533,10 +533,8 @@ def _parse_recommended_value(value: Any, percentage_hint: bool = False) -> Any:
         number = float(normalized)
     except ValueError:
         return value
-    if is_percent:
-        return number / 100
-    if percentage_hint and abs(number) > 1:
-        return number / 100
+    # Verbatim: um '%' textual e apenas removido, nunca convertemos a escala do
+    # numero (ver regra de formatacao em ppt_chart_writer.effective_value_format).
     return number
 
 

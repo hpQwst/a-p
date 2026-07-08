@@ -58,16 +58,171 @@ def build_transform_plans(
     targets: Iterable[PptTarget],
     sources: Iterable[ParsedXlsxTable],
 ) -> list[TransformPlan]:
+    """Match deterministico por SLIDE resolvido como atribuicao global 1:1.
+
+    Em vez de cada target escolher gulosamente o melhor datasource (o que permite
+    dois targets pegarem o mesmo arquivo e produz confianca baixa mesmo quando o
+    vencedor e claro), montamos a matriz alvo x datasource do slide e resolvemos o
+    casamento otimo (Hungarian). A confianca e calibrada pela MARGEM para o 2o
+    melhor candidato: um vencedor folgado vira alta confianca e dispensa a IA.
+    """
     source_list = list(sources)
+    eligible = [target for target in targets if target.object_type in {"chart", "table"}]
     plans: list[TransformPlan] = []
-    for target in targets:
-        if target.object_type not in {"chart", "table"}:
-            continue
-        source, score, reason = _best_source_for_target(target, source_list)
-        if source is None:
-            continue
-        plans.append(normalize_to_target(target, source, confidence=score, match_reason=reason))
+    by_slide: dict[int, list[PptTarget]] = {}
+    for target in eligible:
+        by_slide.setdefault(target.slide_number, []).append(target)
+    for slide_number in sorted(by_slide):
+        plans.extend(_assign_slide_plans(slide_number, by_slide[slide_number], source_list))
     return plans
+
+
+def _assign_slide_plans(
+    slide_number: int,
+    slide_targets: list[PptTarget],
+    all_sources: list[ParsedXlsxTable],
+) -> list[TransformPlan]:
+    candidate_sources = _sources_for_slide(slide_number, all_sources)
+    if not candidate_sources:
+        return []
+
+    # matriz de scores alvo x datasource (0..1) + memoria de forca do id e razao
+    score_matrix: list[list[float]] = []
+    strong_matrix: list[list[bool]] = []
+    reason_matrix: list[list[str]] = []
+    for target in slide_targets:
+        candidates = {c.source.file_name: c for c in source_match_candidates(target, candidate_sources)}
+        row_scores, row_strong, row_reason = [], [], []
+        for source in candidate_sources:
+            cand = candidates.get(source.file_name)
+            row_scores.append(cand.score if cand else 0.0)
+            row_strong.append(bool(cand.strong_id_match) if cand else False)
+            row_reason.append(cand.reason if cand else "")
+        score_matrix.append(row_scores)
+        strong_matrix.append(row_strong)
+        reason_matrix.append(row_reason)
+
+    cost = [[1.0 - score for score in row] for row in score_matrix]
+    assignment = _hungarian(cost)
+
+    plans: list[TransformPlan] = []
+    for row, col in enumerate(assignment):
+        if col < 0:
+            continue
+        target = slide_targets[row]
+        source = candidate_sources[col]
+        score = score_matrix[row][col]
+        strong = strong_matrix[row][col]
+        second_best = max(
+            (score_matrix[row][j] for j in range(len(candidate_sources)) if j != col),
+            default=0.0,
+        )
+        threshold = LOCAL_MATCH_THRESHOLD_STRONG_ID if strong or target.object_type == "table" else LOCAL_MATCH_THRESHOLD_DEFAULT
+        if score < threshold:
+            continue
+        if not _source_has_readable_data(source):
+            continue
+        confidence = _calibrated_confidence(score, second_best, strong)
+        reason = reason_matrix[row][col] or "Datasource escolhido por compatibilidade estrutural."
+        margin = score - second_best
+        if not strong and margin >= _CLEAR_WINNER_MARGIN and score >= _CLEAR_WINNER_MIN_SCORE:
+            reason += f"; vencedor claro no slide (margem {margin:.0%} para o 2o melhor)"
+        plans.append(normalize_to_target(target, source, confidence=confidence, match_reason=reason))
+    return plans
+
+
+def _sources_for_slide(slide_number: int, sources: list[ParsedXlsxTable]) -> list[ParsedXlsxTable]:
+    """Blocking por slide: usa o token 'slideN' do nome do arquivo para restringir
+    candidatos. Datasources sem indicacao de slide continuam elegiveis para todos."""
+    hinted_here = [s for s in sources if _source_slide_hint(s) == slide_number]
+    no_hint = [s for s in sources if _source_slide_hint(s) is None]
+    scoped = hinted_here + no_hint
+    return scoped or list(sources)
+
+
+_SLIDE_HINT_RE = re.compile(r"slide[_\s-]*([0-9]{1,3})", re.IGNORECASE)
+
+
+def _source_slide_hint(source: ParsedXlsxTable) -> int | None:
+    haystack = " ".join([source.file_name, *(str(v) for v in source.metadata.values())])
+    match = _SLIDE_HINT_RE.search(haystack)
+    return int(match.group(1)) if match else None
+
+
+# Calibracao de confianca (Camada 2). Um vencedor "folgado" dentro do slide vira
+# alta confianca mesmo com score bruto moderado - e o que evita mandar para a IA
+# um match determinnistico que ja esta correto (ex.: era 0.54 -> vira ~0.85).
+_CLEAR_WINNER_MARGIN = 0.12
+_CLEAR_WINNER_MIN_SCORE = 0.50
+
+
+def _calibrated_confidence(score: float, second_best: float, strong: bool) -> float:
+    if strong:
+        return min(1.0, max(score, 0.9))
+    margin = score - second_best
+    if score >= _CLEAR_WINNER_MIN_SCORE and margin >= _CLEAR_WINNER_MARGIN:
+        return min(1.0, score + margin + 0.15)
+    return min(1.0, score)
+
+
+def _hungarian(cost: list[list[float]]) -> list[int]:
+    """Atribuicao 1:1 de custo minimo (Kuhn-Munkres, O(n^3)). Retorna, para cada
+    linha, a coluna atribuida (ou -1). Matriz e retangular; padding e neutro-caro."""
+    n = len(cost)
+    if n == 0:
+        return []
+    m = len(cost[0]) if cost[0] else 0
+    if m == 0:
+        return [-1] * n
+    size = max(n, m)
+    pad = 10.0
+    C = [[cost[i][j] if i < n and j < m else pad for j in range(size)] for i in range(size)]
+    INF = float("inf")
+    u = [0.0] * (size + 1)
+    v = [0.0] * (size + 1)
+    p = [0] * (size + 1)
+    way = [0] * (size + 1)
+    for i in range(1, size + 1):
+        p[0] = i
+        j0 = 0
+        minv = [INF] * (size + 1)
+        used = [False] * (size + 1)
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            delta = INF
+            j1 = -1
+            for j in range(1, size + 1):
+                if not used[j]:
+                    cur = C[i0 - 1][j - 1] - u[i0] - v[j]
+                    if cur < minv[j]:
+                        minv[j] = cur
+                        way[j] = j0
+                    if minv[j] < delta:
+                        delta = minv[j]
+                        j1 = j
+            for j in range(size + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while True:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+            if j0 == 0:
+                break
+    ans = [-1] * n
+    for j in range(1, size + 1):
+        row = p[j] - 1
+        col = j - 1
+        if 0 <= row < n and 0 <= col < m:
+            ans[row] = col
+    return ans
 
 
 def normalize_to_target(
@@ -131,7 +286,7 @@ def _normalize_chart(
         values=values,
         confidence=confidence,
         reason=reason.strip(),
-        preserve_percentage_decimal=_has_decimal_percentages(values),
+        preserve_percentage_decimal=False,
         warnings=warnings,
     )
 
@@ -212,33 +367,6 @@ def _normalize_key_value_table(
     )
 
 
-def _best_source_for_target(
-    target: PptTarget,
-    sources: list[ParsedXlsxTable],
-) -> tuple[ParsedXlsxTable | None, float, str]:
-    candidates = source_match_candidates(target, sources)
-    if not candidates:
-        return None, 0.0, ""
-    best = candidates[0]
-    reason = best.reason
-    if not _source_has_readable_data(best.source):
-        # Um XLSX cujo parser nao extraiu nenhuma matriz (orientation unknown,
-        # values vazios) nao pode preencher nada - mesmo com o nome do arquivo
-        # batendo com o target. Sem este guard, o strong_id_match (+0.72) criava
-        # um plano "confiante" com todas as celulas None, gravando um grafico
-        # vazio silenciosamente. Pendencia clara e melhor que dado errado.
-        return None, best.score, (
-            f"{reason}; o conteudo de {best.source.file_name} nao pode ser interpretado "
-            "(sem cabecalho/matriz legivel), entao nenhum match automatico foi aplicado"
-        ).strip("; ")
-    if len(candidates) > 1 and best.score - candidates[1].score <= 0.08 and candidates[1].score >= 0.45:
-        reason += f"; atenção: datasource parecido também encontrado ({candidates[1].source.file_name}, score {candidates[1].score:.0%})"
-    threshold = LOCAL_MATCH_THRESHOLD_STRONG_ID if best.strong_id_match or target.object_type == "table" else LOCAL_MATCH_THRESHOLD_DEFAULT
-    if best.score < threshold:
-        return None, best.score, reason
-    return best.source, best.score, reason
-
-
 def _source_has_readable_data(source: ParsedXlsxTable) -> bool:
     return bool(source.values) and any(
         cell is not None and str(cell).strip() != "" for row in source.values for cell in row
@@ -256,6 +384,13 @@ def source_match_candidates(
         reasons = []
         strong_id_match = False
         target_keys = {target.target_id, target.shape_name}
+        if _source_obj_ids(source) & {str(key) for key in target_keys if key}:
+            # Sinal deterministico mais forte: o XLSX carrega "obj<numero_do_shape>"
+            # (em table_title/context_text), que casa exatamente com o shape do PPT.
+            # Isso resolve o match sem IA para todo datasource devidamente marcado.
+            score += 0.95
+            reasons.append("id do objeto embutido no XLSX (obj<shape>) bate com o target")
+            strong_id_match = True
         if source.source_id and source.source_id in target_keys:
             score += 0.72
             reasons.append("nome do arquivo bate com o target")
@@ -303,6 +438,22 @@ def source_match_candidates(
         )
     scored.sort(key=lambda item: item.score, reverse=True)
     return scored[:limit] if limit else scored
+
+
+_OBJ_ID_RE = re.compile(r"obj[_\s]*([0-9]{4,})", re.IGNORECASE)
+
+
+def _source_obj_ids(source: ParsedXlsxTable) -> set[str]:
+    """IDs de shape embutidos no XLSX no formato 'obj<numero>'.
+
+    Datasources exportados carregam o id do objeto do PPT (ex.: 'obj3958478347')
+    no titulo/contexto da tabela; esse numero e o proprio shape do grafico/tabela,
+    entao serve como chave de match deterministica e barata (dispensa IA)."""
+    ids: set[str] = set()
+    for value in source.metadata.values():
+        for match in _OBJ_ID_RE.findall(str(value)):
+            ids.add(match)
+    return ids
 
 
 def _source_axes(source: ParsedXlsxTable) -> tuple[list[str], list[str]]:
@@ -535,14 +686,6 @@ def _domain_text_score(left_norm: str, right_norm: str) -> float:
         if left_pattern in right_norm and right_pattern in left_norm:
             return 0.96
     return 0.0
-
-
-def _has_decimal_percentages(values: list[list[Any]]) -> bool:
-    numeric = [_to_number(value) for row in values for value in row]
-    numeric = [value for value in numeric if value is not None]
-    if not numeric:
-        return False
-    return sum(1 for value in numeric if -1 <= value <= 1 and value not in {0, 1}) >= 2
 
 
 def _looks_like_thousands(values: list[list[Any]]) -> bool:

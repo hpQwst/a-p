@@ -739,7 +739,14 @@
       "ppt_automator_ai_mapper_target_edit_data_profile",
       "ppt_automator_ai_mapper_target_payload",
       "ppt_automator_ai_mapper_target_payload_compact",
-      "ppt_automator_ai_mapper_target_titles"
+      "ppt_automator_ai_mapper_target_titles",
+      "ppt_automator_ai_mapper_top_local_score",
+      "ppt_automator_ppt_discovery_ppttarget",
+      "ppt_automator_ppt_discovery_ppttarget_target_id",
+      "tests_test_ai_mapper",
+      "tests_test_ai_mapper_aimappertests",
+      "tests_test_ai_mapper_aimappertests_test_ai_matcher_sends_compact_candidates_and_accepts_valid_suggestion",
+      "tests_test_ai_mapper_aimappertests_test_ai_matcher_still_sends_targets_with_low_local_score"
     ],
     "15": [
       "jsonresponse",
@@ -817,30 +824,6 @@
       "web_templates_index",
       "web_templates_preview",
       "web_templates_preview_workflow"
-    ],
-    "18": [
-      "ppt_automator_ai_mapper_top_local_score",
-      "ppt_automator_engine_build_slide_aware_plans",
-      "ppt_automator_ppt_discovery_ppttarget",
-      "ppt_automator_ppt_discovery_ppttarget_target_id",
-      "ppt_automator_table_normalizer_build_transform_plans",
-      "ppt_automator_table_normalizer_normalize_table",
-      "ppt_automator_table_normalizer_normalize_to_target",
-      "ppt_automator_xlsx_parser_parsedxlsxtable",
-      "ppt_automator_xlsx_parser_parsedxlsxtable_graph_id",
-      "tests_test_ai_mapper",
-      "tests_test_ai_mapper_aimappertests",
-      "tests_test_ai_mapper_aimappertests_test_ai_matcher_sends_compact_candidates_and_accepts_valid_suggestion",
-      "tests_test_ai_mapper_aimappertests_test_ai_matcher_still_sends_targets_with_low_local_score",
-      "tests_test_mapping_templates",
-      "tests_test_mapping_templates_mappingtemplatetests",
-      "tests_test_mapping_templates_mappingtemplatetests_test_saved_mapping_overrides_plan_by_datasource_basename",
-      "tests_test_mapping_templates_source",
-      "tests_test_mapping_templates_target",
-      "tests_test_table_normalizer_labels",
-      "tests_test_table_normalizer_labels_tablenormalizerlabeltests",
-      "tests_test_table_normalizer_labels_tablenormalizerlabeltests_test_chart_output_uses_xlsx_labels_instead_of_ppt_labels",
-      "tests_test_table_normalizer_labels_tablenormalizerlabeltests_test_diamante_plus_does_not_match_respondentes"
     ],
     "19": [
       "fileresponse",
@@ -951,9 +934,15 @@
       "ppt_automator_preview_model_to_number",
       "ppt_automator_table_normalizer_transformplan",
       "ppt_automator_table_normalizer_transformplan_object_type",
-      "ppt_automator_table_normalizer_transformplan_target_id"
+      "ppt_automator_table_normalizer_transformplan_target_id",
+      "tests_test_mapping_templates",
+      "tests_test_mapping_templates_mappingtemplatetests",
+      "tests_test_mapping_templates_mappingtemplatetests_test_saved_mapping_overrides_plan_by_datasource_basename",
+      "tests_test_mapping_templates_source",
+      "tests_test_mapping_templates_target"
     ],
     "25": [
+      "ppt_automator_engine_build_slide_aware_plans",
       "ppt_automator_source_manifest",
       "ppt_automator_source_manifest_py_any",
       "ppt_automator_source_manifest_recipe_hint",
@@ -963,9 +952,18 @@
       "ppt_automator_source_manifest_take",
       "ppt_automator_source_manifest_take_rows",
       "ppt_automator_source_manifest_xlsx_source_manifest",
+      "ppt_automator_table_normalizer_build_transform_plans",
+      "ppt_automator_table_normalizer_normalize_table",
+      "ppt_automator_table_normalizer_normalize_to_target",
+      "ppt_automator_xlsx_parser_parsedxlsxtable",
+      "ppt_automator_xlsx_parser_parsedxlsxtable_graph_id",
       "tests_test_source_manifest",
       "tests_test_source_manifest_sourcemanifesttests",
-      "tests_test_source_manifest_sourcemanifesttests_test_manifest_names_structural_profile_and_recipe_hint"
+      "tests_test_source_manifest_sourcemanifesttests_test_manifest_names_structural_profile_and_recipe_hint",
+      "tests_test_table_normalizer_labels",
+      "tests_test_table_normalizer_labels_tablenormalizerlabeltests",
+      "tests_test_table_normalizer_labels_tablenormalizerlabeltests_test_chart_output_uses_xlsx_labels_instead_of_ppt_labels",
+      "tests_test_table_normalizer_labels_tablenormalizerlabeltests_test_diamante_plus_does_not_match_respondentes"
     ],
     "26": [
       "infra_aws_deploy_fargate",
@@ -1008,18 +1006,17 @@
     "11": 0.2619047619047619,
     "12": 0.18233618233618235,
     "13": 0.19076923076923077,
-    "14": 0.23333333333333334,
+    "14": 0.19153225806451613,
     "15": 0.12318840579710146,
     "16": 0.18478260869565216,
     "17": 0.13438735177865613,
-    "18": 0.22510822510822512,
     "19": 0.18128654970760233,
     "20": 0.1503267973856209,
     "21": 0.2426470588235294,
     "22": 0.17647058823529413,
     "23": 0.3,
-    "24": 0.36363636363636365,
-    "25": 0.36363636363636365,
+    "24": 0.2426470588235294,
+    "25": 0.21645021645021645,
     "26": 0.42857142857142855,
     "27": 1.0,
     "28": 1.0,
@@ -1135,8 +1132,41 @@
       "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities"
     }
   ],
-  "tokens": {
-    "input": 35621,
-    "output": 2824
-  }
+  "questions": [
+    {
+      "type": "bridge_node",
+      "question": "Why does `PptTarget` connect `AI Mapping Payloads` to `Legacy Chart Job Core`, `Embedded Workbook Writer`, `Slide Datasources & Rendering`, `PPT Target Discovery`, `PPTX Surgery Test Script`, `Source Matching & Normalization`, `Analysis Worker Orchestration`, `Chart XML Writer`, `Job Analysis Caching`, `Table Writer & Tests`, `AI Scope Tests`, `Preview Model Building`, `Source Manifest & Plans`?",
+      "why": "High betweenness centrality (0.077) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `TransformPlan` connect `Preview Model Building` to `Legacy Chart Job Core`, `Embedded Workbook Writer`, `AI Client & Debug Logging`, `PPTX Surgery Test Script`, `Source Matching & Normalization`, `Analysis Worker Orchestration`, `Chart XML Writer`, `AI Mapping Payloads`, `Table Writer & Tests`, `AI Scope Tests`, `Source Manifest & Plans`?",
+      "why": "High betweenness centrality (0.046) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `generate_updated_pptx()` connect `Embedded Workbook Writer` to `Legacy Chart Job Core`, `Slide Datasources & Rendering`, `PPT Target Discovery`, `Slide AI Review Pipeline`, `Analysis Worker Orchestration`, `Chart XML Writer`, `AI Mapping Payloads`, `Job Analysis Caching`, `Table Writer & Tests`, `Preview Model Building`?",
+      "why": "High betweenness centrality (0.043) - this node is a cross-community bridge."
+    },
+    {
+      "type": "verify_inferred",
+      "question": "Are the 13 inferred relationships involving `PptTarget` (e.g. with `AiSourceMatchSuggestion` and `ChartSheetUnresolvedError`) actually correct?",
+      "why": "`PptTarget` has 13 INFERRED edges - model-reasoned connections that need verification."
+    },
+    {
+      "type": "verify_inferred",
+      "question": "Are the 9 inferred relationships involving `ParsedXlsxTable` (e.g. with `AiSourceMatchSuggestion` and `SourceMatchCandidate`) actually correct?",
+      "why": "`ParsedXlsxTable` has 9 INFERRED edges - model-reasoned connections that need verification."
+    },
+    {
+      "type": "verify_inferred",
+      "question": "Are the 9 inferred relationships involving `TransformPlan` (e.g. with `AiSourceMatchSuggestion` and `AiTransformDiagnostic`) actually correct?",
+      "why": "`TransformPlan` has 9 INFERRED edges - model-reasoned connections that need verification."
+    },
+    {
+      "type": "isolated_nodes",
+      "question": "What connects `Utilities for mapping datasource workbooks into mapped PowerPoint charts.`, `Permite modelo mais barato por operacao (ex.: OPENAI_MODEL_SOURCE_MATCH para o`, `Raised when a workbook contains formulas but no calculator can resolve them.` to the rest of the system?",
+      "why": "16 weakly-connected nodes found - possible documentation gaps or missing edges."
+    }
+  ]
 }

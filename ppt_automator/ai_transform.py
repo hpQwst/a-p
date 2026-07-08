@@ -4,8 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 import json
+import time
 
 from .ai import build_openai_client
+from .ai_debug import log_ai_request, log_ai_response, log_debug_event
+from .source_manifest import xlsx_source_manifest
 from .table_normalizer import TransformPlan
 
 
@@ -120,10 +123,10 @@ def suggest_transform_diagnostics(
         },
         "required": ["diagnostics"],
     }
-    response = client.responses.create(
-        model=model,
-        store=False,
-        input=[
+    request_kwargs = {
+        "model": model,
+        "store": False,
+        "input": [
             {
                 "role": "system",
                 "content": (
@@ -135,7 +138,7 @@ def suggest_transform_diagnostics(
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
-        text={
+        "text": {
             "format": {
                 "type": "json_schema",
                 "name": "ppt_transform_diagnostics",
@@ -143,8 +146,23 @@ def suggest_transform_diagnostics(
                 "strict": True,
             }
         },
-    )
+    }
+    log_ai_request("transform_diagnostics", request_kwargs)
+    started = time.perf_counter()
+    try:
+        response = client.responses.create(**request_kwargs)
+    except Exception as exc:
+        log_debug_event(
+            "ai_error",
+            {
+                "operation": "transform_diagnostics",
+                "elapsed_ms": round((time.perf_counter() - started) * 1000),
+                "error": repr(exc),
+            },
+        )
+        raise
     text = getattr(response, "output_text", "") or _response_text_fallback(response)
+    log_ai_response("transform_diagnostics", text, round((time.perf_counter() - started) * 1000), response)
     data = json.loads(text)
     requested_targets = {plan.target_id for plan in plans}
     diagnostics = []
@@ -184,6 +202,7 @@ def _plan_payload(plan: TransformPlan) -> dict[str, Any]:
             "current_values": plan.target.expected_values[:8],
         },
         "xlsx_detected": {
+            "manifest": xlsx_source_manifest(plan.datasource),
             "orientation": plan.datasource.orientation,
             "categories": plan.datasource.categories,
             "series": plan.datasource.series,

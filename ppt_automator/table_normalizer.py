@@ -242,6 +242,9 @@ def source_match_candidates(
         if filename_score >= 0.55:
             score += 0.18 * filename_score
             reasons.append(f"nome do arquivo/contexto {filename_score:.0%}")
+        semantic_context_score = _semantic_context_score(target, source)
+        if semantic_context_score >= 0.55:
+            reasons.append(f"contexto semantico {semantic_context_score:.0%}")
         if target.object_type == "chart":
             cat_score = max(
                 _coverage_score(target.expected_categories, source.categories),
@@ -308,6 +311,40 @@ def _filename_context_score(target: PptTarget, source: ParsedXlsxTable) -> float
         _soft_text_score(filename, target.nearby_text),
         _soft_text_score(target.nearby_text, source_context),
     )
+
+
+def _semantic_context_score(target: PptTarget, source: ParsedXlsxTable) -> float:
+    metadata = source.metadata or {}
+    source_values = [
+        str(metadata.get(key) or "")
+        for key in ("table_title", "row_group_label", "context_text", "variable", "ppt_tag")
+    ]
+    target_context = " ".join(
+        str(value)
+        for value in [
+            target.nearby_text,
+            target.slide_text,
+            *target.expected_categories,
+            *target.expected_series,
+            *[cell for row in target.table_cells[:4] for cell in row[:8]],
+        ]
+        if _norm(value)
+    )
+    source_variants = _context_variants(source_values)
+    return max((_soft_text_score(target_context, value) for value in source_variants), default=0.0)
+
+
+def _context_variants(values: list[str]) -> list[str]:
+    variants: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        variants.append(text)
+        for separator in (" - ", " | ", ":"):
+            if separator in text:
+                variants.extend(part.strip() for part in text.split(separator) if part.strip())
+    return variants
 
 
 def _requires_comparison_series(labels: list[str]) -> bool:

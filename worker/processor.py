@@ -37,7 +37,7 @@ def analyze_files(
     manual_sources: ManualSourceMap | None = None,
     slide_numbers: list[int] | set[int] | None = None,
 ) -> AnalysisResult:
-    targets, sources, plans = analyze_update_package(pptx_bytes, datasource_zip_bytes)
+    targets, sources, plans = analyze_update_package(pptx_bytes, datasource_zip_bytes, slide_numbers=slide_numbers)
     targets, plans = _select_slides(targets, plans, slide_numbers)
     plans, sources = _apply_manual_sources(targets, sources, plans, manual_sources or {})
     return AnalysisResult(
@@ -57,7 +57,7 @@ def generate_file(
     manual_sources: ManualSourceMap | None = None,
     slide_numbers: list[int] | set[int] | None = None,
 ) -> bytes:
-    targets, sources, plans = analyze_update_package(pptx_bytes, datasource_zip_bytes)
+    targets, sources, plans = analyze_update_package(pptx_bytes, datasource_zip_bytes, slide_numbers=slide_numbers)
     targets, plans = _select_slides(targets, plans, slide_numbers)
     plans, _sources = _apply_manual_sources(targets, sources, plans, manual_sources or {})
     return generate_updated_pptx(pptx_bytes, plans, targets=targets)
@@ -163,7 +163,7 @@ def apply_ai_source_matches_to_analysis(
     plans_by_id = {plan.target_id: plan for plan in analysis.plans}
 
     for target_id, match in normalized_matches.items():
-        if target_id in plans_by_id:
+        if target_id in plans_by_id and not bool(match.get("replace_existing")):
             continue
         target = targets_by_id.get(target_id)
         source = sources_by_file.get(str(match.get("datasource") or ""))
@@ -171,6 +171,9 @@ def apply_ai_source_matches_to_analysis(
             continue
         confidence = float(match.get("confidence") or 0)
         reason = str(match.get("reason") or "IA escolheu este datasource por compatibilidade.")
+        recipe_note = _recipe_note(match.get("recipe_suggestion") or {})
+        if recipe_note:
+            reason = f"{reason} Receita sugerida: {recipe_note}"
         plans_by_id[target_id] = normalize_to_target(
             target,
             source,
@@ -324,9 +327,30 @@ def _normalize_ai_matches(
             "datasource": item.datasource,
             "confidence": item.confidence,
             "reason": item.reason,
+            "recipe_suggestion": item.recipe_suggestion,
         }
         for item in ai_matches
     }
+
+
+def _recipe_note(recipe: dict[str, Any]) -> str:
+    if not isinstance(recipe, dict) or not recipe:
+        return ""
+    operation = str(recipe.get("operation") or "unknown")
+    orientation = str(recipe.get("orientation_after") or "unknown")
+    pieces = [operation]
+    drop_top = int(recipe.get("drop_top_rows") or 0)
+    drop_left = int(recipe.get("drop_left_cols") or 0)
+    if drop_top:
+        pieces.append(f"remover {drop_top} linha(s) do topo")
+    if drop_left:
+        pieces.append(f"remover {drop_left} coluna(s) da esquerda")
+    if orientation and orientation != "unknown":
+        pieces.append(f"orientacao final {orientation}")
+    reason = str(recipe.get("reason") or "").strip()
+    if reason:
+        pieces.append(reason)
+    return "; ".join(pieces)
 
 
 def _normalize_saved_matches(saved_matches: SavedSourceMatchMap) -> dict[str, dict[str, Any]]:

@@ -12,12 +12,13 @@ O deploy atual usa uma arquitetura simples e suficiente para validar o produto:
 - CloudWatch Logs guarda logs do container.
 - Security Group libera a porta `8501` para o CIDR configurado.
 
-Importante: a etapa de geracao final de PPT com graficos editaveis nao deve rodar em Linux/Fargate usando escrita XML manual do workbook embutido. O PowerPoint abre o grafico, mas o comando `Editar dados` pode quebrar o vinculo interno do Excel. Para preservar `Editar dados`, o workbook embutido precisa ser salvo por um motor compativel com Office. Hoje a via validada e Microsoft Excel via COM no Windows.
+Importante: a etapa de geracao final de PPT com graficos editaveis agora roda sem Microsoft Office/COM. O caminho validado edita o pacote Office Open XML de forma cirurgica: atualiza o workbook `.xlsx` embutido, preserva a estrutura ZIP/OPC original e atualiza o cache visual do grafico no `ppt/charts/chartX.xml`. Isso evita o problema do `python-pptx chart.replace_data()` e permite rodar em ECS Fargate Linux.
 
-Portanto, a arquitetura de producao deve separar:
+Portanto, a arquitetura de producao pode manter o fluxo inteiro no container Linux:
 
-- `web/api`: FastAPI em ECS Fargate Linux, barato e sempre disponivel.
-- `generation-worker`: Windows com Microsoft Excel instalado/licenciado, consumindo jobs de uma fila e salvando o PPT final no S3.
+- `web/api`: FastAPI em ECS Fargate Linux para upload, preview, IA, geracao e download.
+- `storage`: S3 para inputs, outputs, checkpoints e mapeamentos.
+- `jobs`: execucao sincrona para arquivos pequenos ou fila SQS/worker Fargate para jobs grandes.
 
 Para producao corporativa, a evolucao natural e:
 
@@ -26,10 +27,10 @@ Para producao corporativa, a evolucao natural e:
 - S3 como storage definitivo de uploads e outputs.
 - DynamoDB para status/metadados de jobs, projetos e execucoes.
 - SQS para fila de analise/geracao.
-- Um worker Windows/Office consumindo a fila. Pode ser EC2 Windows iniciado sob demanda, Auto Scaling Group Windows com desired count 0/1, ou uma alternativa corporativa de RPA/Office. O Fargate Linux atual nao atende a essa etapa.
+- Um worker Fargate Linux separado consumindo a fila, se o volume ou o tempo de IA por slide exigir processamento assincrono.
 - Security Group fechado para rede/VPN corporativa.
 
-AWS Fargate tambem suporta containers Windows em ECS, mas isso nao resolve sozinho a exigencia de Excel COM: o container precisaria ter Office instalado, licenciado e operando de forma estavel. A propria Microsoft alerta que automacao de Office em ambiente server-side/unattended e uma abordagem com riscos operacionais; se for usada, deve ser isolada, monitorada e reiniciavel. Para o nosso volume baixo de uso, o desenho mais controlavel e um worker Windows dedicado e ligado apenas quando houver jobs.
+O container instala LibreOffice para dois usos auxiliares: recalcular datasources com formulas quando necessario e renderizar slides para preview/IA visual. A geracao final do PPT editavel nao depende do LibreOffice salvar o PPTX; ela continua sendo feita pelo writer OpenXML do projeto.
 
 O core ja esta separado em `ppt_automator/`, a UI em `web/` e o ponto de worker em `worker/processor.py`, para permitir essa troca sem reescrever a logica de PowerPoint.
 

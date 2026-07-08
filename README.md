@@ -90,11 +90,20 @@ OPENAI_MODEL=gpt-5.5
 A IA recebe, por target:
 
 - o contrato do PPT extraido do `Editar dados` do grafico ou da tabela PowerPoint;
-- a estrutura detectada do XLSX;
+- um manifesto semantico compacto do XLSX, incluindo titulo da tabela, filtro/label lateral, categorias, series e preview;
+- um dump textual compacto das celulas uteis do XLSX, com coordenadas e valores raw;
 - a matriz final proposta pelo normalizador;
-- o contexto textual do slide e o nome do shape.
+- o contexto textual do slide, o nome do shape e, na revisao visual por slide, uma imagem otimizada do slide com IDs.
 
 Com isso ela diagnostica se a acao correta e alinhar, transpor ou pedir revisao. A matriz tecnica continua sendo exibida para o usuario antes do download, e a pessoa pode substituir o XLSX de um target diretamente no card do preview.
+
+Por padrao, o app evita mandar dumps verbosos para reduzir custo e latencia sem perder rastreabilidade. Para investigacao pesada, use `AUTO_PPT_AI_XLSX_DUMP_MODE=verbose`. A imagem vai na primeira chamada visual por slide; a segunda chamada de montagem de matriz nao reenvia imagem por padrao. Para habilitar, use `AUTO_PPT_AI_IMAGE_IN_MATRIX=1`. O limite padrao da imagem e `AUTO_PPT_AI_IMAGE_MAX_SIDE=1400`.
+
+A IA por slide nao roda automaticamente no preview inicial. Isso mantem a tela rapida e evita que uma resposta da IA reestruture graficos que o normalizador deterministico ja mapeou bem. Para investigar um deck dificil, habilite explicitamente `AUTO_PPT_AUTO_SLIDE_AI=1`; para aplicar matrizes geradas por IA no PPT final, habilite tambem `AUTO_PPT_APPLY_SLIDE_AI_OUTPUTS=1`.
+
+No caminho recomendado, a IA de mapeamento recebe registros JSONL por slide: objetos do PPT com colunas/linhas/titulos do `Editar dados` e datasources do mesmo slide com colunas/linhas/titulos detectados. A resposta deve escolher o datasource de cada objeto e pode sugerir uma `recipe_suggestion` estrutural pequena, por exemplo `keep`, `transpose`, `drop_and_keep` ou `drop_and_transpose`. O sistema aplica e valida a transformacao com codigo deterministico; a IA nao devolve nem grava a matriz final.
+
+Essa revisao enxuta de datasource roda automaticamente para targets sem match e para matches deterministicos abaixo de `AUTO_PPT_AI_REVIEW_CONFIDENCE_FLOOR` (padrao `0.80`), quando `OPENAI_API_KEY` estiver configurada. Para desligar essa revisao automatica e manter apenas o fluxo deterministico/manual, use `AUTO_PPT_AI_AUTO_SOURCE_REVIEW=0`. Esse mecanismo nao habilita a IA por slide nem a gravacao de matrizes finais por IA.
 
 Antes de subir o servidor, valide a conexao com a OpenAI pelo PowerShell:
 
@@ -122,21 +131,25 @@ Se a sugestao estiver errada, o card do target permite enviar um XLSX correto e 
 
 A interface sempre tenta calcular formulas antes de ler as planilhas.
 
-O motor tenta primeiro usar o Excel instalado no Windows via `pywin32`, calculando o workbook em uma copia temporaria e substituindo formulas por valores estaticos antes da leitura. Na AWS/Linux ele tenta LibreOffice headless para recalcular os caches do Excel. Se nenhum dos dois estiver disponivel, ele usa um avaliador interno para formulas comuns, incluindo referencias de celulas/ranges, operacoes aritmeticas, `SUM`/`SOMA`, `AVERAGE`/`MEDIA`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`/`SE`, `SUMIF`/`SOMASE` e `COUNTIF`/`CONT.SE`.
+O motor tenta usar o melhor calculador disponivel no ambiente. Em desenvolvimento Windows, pode usar Excel via `pywin32`. Na AWS/Linux, usa LibreOffice headless para recalcular os caches do Excel. Se nenhum dos dois estiver disponivel, ele usa um avaliador interno para formulas comuns, incluindo referencias de celulas/ranges, operacoes aritmeticas, `SUM`/`SOMA`, `AVERAGE`/`MEDIA`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`/`SE`, `SUMIF`/`SOMASE` e `COUNTIF`/`CONT.SE`.
 
 Os arquivos originais nao sao alterados.
 
 ## Graficos editaveis e Excel embutido
 
-Para preservar o comando `Editar dados` do PowerPoint, o sistema nao usa fallback de escrita XML manual no workbook embutido dos graficos. A via validada e abrir o XLSX embutido original com Microsoft Excel via COM, atualizar a matriz, redimensionar a tabela interna quando existir e salvar pelo proprio Excel.
+Para preservar o comando `Editar dados` do PowerPoint, o sistema nao usa `python-pptx chart.replace_data()` nem salva o workbook embutido inteiro com `openpyxl.save()` no caminho principal. O caminho validado e serverless: abrir o PPTX/XLSX como pacotes Office Open XML, alterar somente as partes necessarias, preservar a estrutura ZIP/OPC original e atualizar tambem o cache visual do grafico.
 
 Isso significa:
 
-- em desenvolvimento Windows, rode pelo PowerShell com Excel instalado;
-- em Linux/Docker/Fargate Linux, a geracao final de PPT com graficos editaveis deve falhar em vez de gerar arquivo quebrado;
-- na AWS, mantenha o FastAPI em Fargate para UI/API, mas envie a geracao final para um worker Windows com Excel/Office instalado e licenciado.
+- em desenvolvimento Windows, o app continua funcionando normalmente;
+- em Linux/Docker/Fargate Linux, a geracao final de PPT com graficos editaveis deve funcionar sem Microsoft Office;
+- o workbook embutido mantem dados completos para `Editar dados`;
+- o `chart.xml` e atualizado para o grafico ja abrir visualmente correto;
+- tabelas PowerPoint/DrawingML sao atualizadas diretamente no XML preservando estilo.
 
 Essa decisao evita entregar PPT aparentemente correto que depois quebra quando o usuario clica em `Editar dados`.
+
+Para preview visual e IA por slide, o sistema tenta renderizar o slide com PowerPoint COM quando estiver em Windows local. Em container Linux, usa LibreOffice headless para converter o PPTX em PDF e PyMuPDF para gerar o PNG do slide com os IDs desenhados.
 
 ## Teste rapido
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import os
 from pathlib import Path
 from typing import Any, BinaryIO
 from zipfile import ZipFile
@@ -26,9 +27,17 @@ def analyze_update_package(
     pptx_file: InputFile,
     datasources_zip: InputFile,
     formula_mode: str = "auto",
+    slide_numbers: list[int] | set[int] | None = None,
 ) -> tuple[list[PptTarget], list[ParsedXlsxTable], list[TransformPlan]]:
     targets = discover_ppt_targets(pptx_file, numeric_only=False, include_text_shapes=False)
-    sources = parse_datasource_zip(datasources_zip, formula_mode=formula_mode)
+    selected_slides = {int(slide) for slide in (slide_numbers or []) if int(slide) > 0}
+    if selected_slides:
+        targets = [target for target in targets if target.slide_number in selected_slides]
+    sources = parse_datasource_zip(
+        datasources_zip,
+        formula_mode=formula_mode,
+        include_names=_datasource_names_for_slides(datasources_zip, selected_slides) if selected_slides else None,
+    )
     plans = _build_slide_aware_plans(targets, sources, datasources_zip)
     return targets, sources, plans
 
@@ -50,10 +59,11 @@ def generate_updated_pptx(
     ppt_bytes = read_bytes(pptx_file)
     replacements: dict[str, bytes] = {}
     table_plans_by_slide: dict[str, list[TransformPlan]] = {}
-    rename_targets = targets or [plan.target for plan in plans]
     rename_targets_by_slide: dict[str, list[PptTarget]] = {}
-    for target in rename_targets:
-        rename_targets_by_slide.setdefault(target.slide_path, []).append(target)
+    if _write_internal_target_ids_enabled():
+        rename_targets = targets or [plan.target for plan in plans]
+        for target in rename_targets:
+            rename_targets_by_slide.setdefault(target.slide_path, []).append(target)
 
     with ZipFile(BytesIO(ppt_bytes)) as zf:
         for plan in plans:
@@ -85,6 +95,26 @@ def generate_updated_pptx(
             replacements[slide_path] = rename_targets_in_slide_xml(slide_xml, slide_targets)
 
     return replace_zip_parts_preserving_structure(ppt_bytes, replacements)
+
+
+def _datasource_names_for_slides(datasources_zip: InputFile, slide_numbers: set[int]) -> set[str] | None:
+    try:
+        entries = collect_datasource_entries(datasources_zip)
+    except Exception:
+        return None
+    if not entries or not any(entry.slide_number for entry in entries):
+        return None
+    selected = {
+        entry.zip_path
+        for entry in entries
+        if entry.is_general or (entry.slide_number is not None and entry.slide_number in slide_numbers)
+    }
+    return selected or None
+
+
+def _write_internal_target_ids_enabled() -> bool:
+    value = os.getenv("AUTO_PPT_WRITE_INTERNAL_TARGET_IDS", "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def _workbook_matrix(plan: TransformPlan) -> list[list[Any]]:

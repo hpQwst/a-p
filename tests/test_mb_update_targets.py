@@ -70,7 +70,11 @@ class MbUpdateTargetTests(unittest.TestCase):
             self.assertAlmostEqual(ws.cell(2, 5).value, 44.67469145207984)
 
             table_plan = self._plan("1424058794")
-            table_values = self._table_values(zf.read("ppt/slides/slide1.xml"), table_plan.target.target_id)
+            self.assertEqual(self._shape_name(zf.read("ppt/slides/slide1.xml"), table_plan.target.shape_id), "1424058794")
+            table_values = self._table_values(
+                zf.read("ppt/slides/slide1.xml"),
+                {table_plan.target.target_id, table_plan.target.shape_name},
+            )
             self.assertEqual(table_values, [["13.126", "12.626", "8.483", "9.401", "11.929"]])
 
             chart_root = ET.fromstring(zf.read("ppt/charts/chart1.xml"))
@@ -86,11 +90,11 @@ class MbUpdateTargetTests(unittest.TestCase):
     def _plan(self, target_id: str):
         return next(plan for plan in self.plans if plan.target.shape_name == target_id)
 
-    def _table_values(self, slide_xml: bytes, shape_name: str) -> list[list[str]]:
+    def _table_values(self, slide_xml: bytes, shape_names: set[str]) -> list[list[str]]:
         root = ET.fromstring(slide_xml)
         for frame in root.findall(".//p:graphicFrame", NS):
             cnv = frame.find("./p:nvGraphicFramePr/p:cNvPr", NS)
-            if cnv is None or cnv.attrib.get("name") != shape_name:
+            if cnv is None or cnv.attrib.get("name") not in shape_names:
                 continue
             table = frame.find(".//a:tbl", NS)
             return [
@@ -98,6 +102,13 @@ class MbUpdateTargetTests(unittest.TestCase):
                 for row in table.findall("./a:tr", NS)
             ]
         return []
+
+    def _shape_name(self, slide_xml: bytes, shape_id: str) -> str:
+        root = ET.fromstring(slide_xml)
+        for cnv in root.findall(".//p:nvGraphicFramePr/p:cNvPr", NS):
+            if cnv.attrib.get("id") == shape_id:
+                return cnv.attrib.get("name", "")
+        return ""
 
 
 if __name__ == "__main__":

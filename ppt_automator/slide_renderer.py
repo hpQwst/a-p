@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import BinaryIO
 from zipfile import ZipFile
 import re
+import shutil
+import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 
@@ -51,9 +53,21 @@ def render_slide_with_target_labels(
             height_px,
         )
         image = Image.open(base_image_path).convert("RGB")
-    except Exception as exc:
-        warning = f"PowerPoint COM indisponivel para renderizar o slide real: {exc}"
-        image = _fallback_slide_canvas(slide_number, width_px, height_px)
+    except Exception as powerpoint_exc:
+        try:
+            base_image_path = _export_slide_with_libreoffice(
+                ppt_bytes,
+                slide_number,
+                output_dir,
+                width_px,
+            )
+            image = Image.open(base_image_path).convert("RGB")
+        except Exception as libreoffice_exc:
+            warning = (
+                "Nao foi possivel renderizar o slide real com PowerPoint COM nem LibreOffice. "
+                f"PowerPoint: {powerpoint_exc}; LibreOffice: {libreoffice_exc}"
+            )
+            image = _fallback_slide_canvas(slide_number, width_px, height_px)
 
     draw = ImageDraw.Draw(image)
     small_font = _font(16)
@@ -137,6 +151,66 @@ def _export_slide_with_powerpoint(
                 temp_input.unlink()
             except OSError:
                 pass
+
+
+def _export_slide_with_libreoffice(
+    ppt_bytes: bytes,
+    slide_number: int,
+    output_dir: Path,
+    width_px: int,
+) -> Path:
+    executable = shutil.which("soffice") or shutil.which("libreoffice")
+    if not executable:
+        raise RuntimeError("LibreOffice/soffice nao encontrado no ambiente.")
+
+    try:
+        import fitz
+    except Exception as exc:  # pragma: no cover - depende do pacote opcional no runtime
+        raise RuntimeError("PyMuPDF nao esta instalado para renderizar PDF gerado pelo LibreOffice.") from exc
+
+    export_path = output_dir / f"_slide_{slide_number:03d}_base_lo.png"
+    with tempfile.TemporaryDirectory(prefix="ppt_automator_lo_", dir=output_dir) as tmp_dir_raw:
+        tmp_dir = Path(tmp_dir_raw)
+        input_path = tmp_dir / "input.pptx"
+        input_path.write_bytes(ppt_bytes)
+        completed = subprocess.run(
+            [
+                executable,
+                "--headless",
+                "--nologo",
+                "--nofirststartwizard",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(tmp_dir),
+                str(input_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        pdf_candidates = sorted(tmp_dir.glob("*.pdf"))
+        if completed.returncode != 0 or not pdf_candidates:
+            stderr = (completed.stderr or completed.stdout or "").strip()
+            raise RuntimeError(f"LibreOffice nao gerou PDF do PPTX. {stderr}".strip())
+
+        pdf_path = pdf_candidates[0]
+        document = fitz.open(pdf_path)
+        try:
+            page_index = slide_number - 1
+            if page_index < 0 or page_index >= document.page_count:
+                raise RuntimeError(f"PDF renderizado tem {document.page_count} pagina(s), sem slide {slide_number}.")
+            page = document.load_page(page_index)
+            zoom = width_px / max(float(page.rect.width), 1.0)
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+            pixmap.save(export_path)
+        finally:
+            document.close()
+
+    if not export_path.exists():
+        raise RuntimeError("LibreOffice/PyMuPDF nao gerou o PNG do slide.")
+    return export_path
 
 
 def _slide_size_inches(ppt_bytes: bytes) -> tuple[float, float]:

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import json
 import os
 import unittest
 
+from ppt_automator.ai_debug import ai_debug_log
 from ppt_automator.ai_mapper import suggest_source_matches_with_ai
 from ppt_automator.ppt_discovery import PptTarget
 from ppt_automator.xlsx_parser import ParsedXlsxTable
@@ -66,6 +69,16 @@ class AiMapperTests(unittest.TestCase):
                                     "datasource": "auto_consumo.xlsx",
                                     "confidence": 0.82,
                                     "reason": "Categorias e series batem com o contrato do grafico.",
+                                    "recipe_suggestion": {
+                                        "operation": "keep",
+                                        "drop_top_rows": 0,
+                                        "drop_left_cols": 0,
+                                        "header_row": 1,
+                                        "label_column": 1,
+                                        "orientation_after": "categories_rows_series_columns",
+                                        "confidence": 0.9,
+                                        "reason": "Estrutura ja esta no formato do Editar dados.",
+                                    },
                                 }
                             ]
                         }
@@ -76,16 +89,30 @@ class AiMapperTests(unittest.TestCase):
             def __init__(self, **_kwargs):
                 self.responses = FakeResponses()
 
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "OPENAI_MODEL": "test-model"}):
-            with patch.dict("sys.modules", {"openai": SimpleNamespace(OpenAI=FakeOpenAI)}):
-                suggestions = suggest_source_matches_with_ai([target], sources, candidates_per_target=1)
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "log.txt"
+            with ai_debug_log(log_path):
+                with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "OPENAI_MODEL": "test-model"}):
+                    with patch.dict("sys.modules", {"openai": SimpleNamespace(OpenAI=FakeOpenAI)}):
+                        suggestions = suggest_source_matches_with_ai([target], sources, candidates_per_target=1)
+            log_text = log_path.read_text(encoding="utf-8")
 
         self.assertEqual(len(suggestions), 1)
         self.assertEqual(suggestions[0].datasource, "auto_consumo.xlsx")
+        self.assertEqual(suggestions[0].recipe_suggestion["operation"], "keep")
+        self.assertIn('"event": "ai_request"', log_text)
+        self.assertIn('"input"', log_text)
+        self.assertIn("slide_records_jsonl", log_text)
+        self.assertIn('"event": "ai_response"', log_text)
+        self.assertIn('"output"', log_text)
         request_payload = json.loads(captured["input"][1]["content"])
-        self.assertEqual(len(request_payload["targets"]), 1)
-        self.assertEqual(len(request_payload["targets"][0]["candidates"]), 1)
+        slide_records = [json.loads(line) for line in request_payload["slide_records_jsonl"].splitlines()]
+        self.assertEqual(len(slide_records), 1)
+        self.assertEqual(len(slide_records[0]["objects"]), 1)
+        self.assertEqual(len(slide_records[0]["objects"][0]["candidate_datasources"]), 1)
+        self.assertIn("detected_data", slide_records[0]["datasources"][0])
         self.assertNotIn("pptx_bytes", request_payload)
+        self.assertNotIn("final_edit_data", request_payload)
 
     def test_ai_matcher_still_sends_targets_with_low_local_score(self) -> None:
         target = PptTarget(
@@ -130,6 +157,16 @@ class AiMapperTests(unittest.TestCase):
                                     "datasource": "dados_estranhos.xlsx",
                                     "confidence": 0.8,
                                     "reason": "Mesmo com score local baixo, e o melhor candidato disponivel.",
+                                    "recipe_suggestion": {
+                                        "operation": "unknown",
+                                        "drop_top_rows": 0,
+                                        "drop_left_cols": 0,
+                                        "header_row": 0,
+                                        "label_column": 0,
+                                        "orientation_after": "unknown",
+                                        "confidence": 0.3,
+                                        "reason": "Estrutura incerta.",
+                                    },
                                 }
                             ]
                         }

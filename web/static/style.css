@@ -88,6 +88,14 @@ h3 {
   backdrop-filter: blur(14px);
 }
 
+.header-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .eyebrow {
   color: var(--muted);
   font-size: 12px;
@@ -525,11 +533,95 @@ button.secondary {
   margin-bottom: 14px;
 }
 
+.process-timeline {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.process-step {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.process-step span {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #eef2f6;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.process-step div {
+  min-width: 0;
+}
+
+.process-step strong,
+.process-step small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-step strong {
+  font-size: 13px;
+}
+
+.process-step small {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.process-step.done {
+  border-color: #b9dccf;
+  background: #eef6f2;
+}
+
+.process-step.done span {
+  background: var(--accent);
+  color: white;
+}
+
+.process-step.active {
+  border-color: #c6d8ea;
+  background: #eef4fb;
+}
+
+.process-step.active span {
+  background: var(--blue);
+  color: white;
+}
+
+.process-step.warn {
+  border-color: #ead29d;
+  background: #fff8e8;
+}
+
+.process-step.warn span {
+  background: var(--amber);
+  color: white;
+}
+
 .mapping-stage,
 .ai-stage,
 .ai-box,
 .notice,
 .warning-list,
+.info-list,
 .audit-log {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -578,6 +670,12 @@ button.secondary {
   color: #704800;
 }
 
+.info-list {
+  background: #eef4fb;
+  border-color: #c6d8ea;
+  color: #173b64;
+}
+
 .mapping-stage.disabled,
 .ai-stage.disabled {
   background: #f2f4f7;
@@ -590,6 +688,11 @@ button.secondary {
 }
 
 .warning-list p {
+  margin-top: 6px;
+  line-height: 1.45;
+}
+
+.info-list p {
   margin-top: 6px;
   line-height: 1.45;
 }
@@ -691,16 +794,61 @@ pre {
 .slide-workspace {
   border-top: 1px solid var(--line-soft);
   display: grid;
-  grid-template-columns: minmax(340px, 1.1fr) minmax(280px, 0.9fr);
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
   gap: 14px;
   padding: 14px;
+  overflow: hidden;
 }
 
 .slide-preview-image {
   width: 100%;
+  max-width: 100%;
+  max-height: 72vh;
+  object-fit: contain;
+  align-self: start;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: white;
+}
+
+.slide-section.processing {
+  border-style: dashed;
+}
+
+.slide-processing-card {
+  align-items: center;
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  gap: 14px;
+  min-height: 128px;
+  padding: 18px;
+}
+
+.slide-processing-card strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.slide-processing-card p {
+  color: var(--muted);
+  margin: 0 0 6px;
+}
+
+.loading-spinner {
+  animation: spin 0.8s linear infinite;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 999px;
+  display: inline-block;
+  flex: 0 0 auto;
+  height: 28px;
+  width: 28px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .slide-tools {
@@ -887,6 +1035,48 @@ pre {
   font-size: 18px;
 }
 
+.progress-steps {
+  display: grid;
+  gap: 7px;
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+}
+
+.progress-steps li {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.progress-steps li::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #c7d0da;
+}
+
+.progress-steps li.active {
+  color: var(--blue);
+  font-weight: 800;
+}
+
+.progress-steps li.active::before {
+  background: var(--blue);
+  box-shadow: 0 0 0 4px rgba(31, 95, 153, 0.12);
+}
+
+.progress-steps li.done {
+  color: var(--accent);
+}
+
+.progress-steps li.done::before {
+  background: var(--accent);
+}
+
 .table-wrap {
   overflow: auto;
   border: 1px solid var(--line);
@@ -940,6 +1130,10 @@ tbody tr:last-child td {
     grid-template-columns: 1fr;
   }
 
+  .process-timeline {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .review-sidebar {
     position: static;
     max-height: none;
@@ -975,7 +1169,8 @@ tbody tr:last-child td {
   .inline-form,
   .slide-workspace,
   .target-ai-form,
-  .target-summary {
+  .target-summary,
+  .process-timeline {
     grid-template-columns: 1fr;
   }
 

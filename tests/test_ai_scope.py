@@ -12,7 +12,7 @@ from ppt_automator.ppt_discovery import PptTarget
 from ppt_automator.table_normalizer import TransformPlan
 from ppt_automator.xlsx_parser import ParsedXlsxTable
 from web import main as web_main
-from worker.processor import AnalysisResult
+from worker.processor import AnalysisResult, apply_ai_source_matches_to_analysis
 
 
 def _target(target_id: str) -> PptTarget:
@@ -47,7 +47,7 @@ def _source(file_name: str) -> ParsedXlsxTable:
     )
 
 
-def _plan(target_id: str) -> TransformPlan:
+def _plan(target_id: str, confidence: float = 1) -> TransformPlan:
     target = _target(target_id)
     source = _source(f"{target_id}.xlsx")
     return TransformPlan(
@@ -59,7 +59,7 @@ def _plan(target_id: str) -> TransformPlan:
         categories=["Total"],
         series=["Serie"],
         values=[[1]],
-        confidence=1,
+        confidence=confidence,
         reason="match",
     )
 
@@ -161,6 +161,86 @@ class AiScopeTests(unittest.TestCase):
             self.assertEqual(status["state"], "ok")
             self.assertEqual(payload["444"]["datasource"], "444.xlsx")
             self.assertEqual(payload["444"]["status"], "matched")
+
+    def test_low_confidence_plan_is_sent_to_ai_and_can_be_replaced(self) -> None:
+        target = _target("555")
+        weak_source = _source("weak.xlsx")
+        better_source = _source("better.xlsx")
+        weak_plan = TransformPlan(
+            target=target,
+            datasource=weak_source,
+            action="align",
+            orientation_xlsx=weak_source.orientation,
+            orientation_ppt=target.expected_orientation,
+            categories=["Total"],
+            series=["Serie"],
+            values=[[1]],
+            confidence=0.72,
+            reason="match fraco",
+        )
+        analysis = AnalysisResult(
+            plans=[weak_plan],
+            preview=[],
+            targets=[target],
+            sources=[weak_source, better_source],
+            target_count=1,
+            source_count=2,
+            warnings=[],
+        )
+        captured: dict[str, object] = {}
+
+        def fake_matches(targets, sources, existing_plan_ids=None, root=None):
+            captured["target_ids"] = [target.target_id for target in targets]
+            captured["existing_plan_ids"] = set(existing_plan_ids or set())
+            return [AiSourceMatchSuggestion("555", "better.xlsx", 0.91, "IA revisou baixa confianca")]
+
+        with TemporaryDirectory() as tmp:
+            job_dir = Path(tmp)
+            (job_dir / "metadata.json").write_text(
+                json.dumps({"project": {"squad": "squad1"}, "auto_source_review": True}),
+                encoding="utf-8",
+            )
+            with patch.object(web_main, "ai_configured", return_value=True):
+                with patch.object(web_main, "suggest_source_matches_with_ai", side_effect=fake_matches):
+                    payload, status = web_main._ai_source_matches_for_job(job_dir, analysis, allow_ai=True)
+
+        self.assertEqual(status["state"], "ok")
+        self.assertEqual(captured["target_ids"], ["555"])
+        self.assertNotIn("555", captured["existing_plan_ids"])
+        self.assertTrue(payload["555"]["replace_existing"])
+        self.assertEqual(payload["555"]["review_reason"], "low_confidence")
+        updated = apply_ai_source_matches_to_analysis(analysis, payload)
+        self.assertEqual(updated.plans[0].datasource.file_name, "better.xlsx")
+        self.assertGreater(updated.plans[0].confidence, weak_plan.confidence)
+
+    def test_slide_ai_outputs_are_not_applied_by_default(self) -> None:
+        with TemporaryDirectory() as tmp:
+            job_dir = Path(tmp)
+            (job_dir / "metadata.json").write_text(json.dumps({"project": {"squad": "squad1"}}), encoding="utf-8")
+            (job_dir / "slide_ai_state.json").write_text(
+                json.dumps(
+                    {
+                        "slides": {
+                            "1": {
+                                "target_outputs": {
+                                    "111": {
+                                        "target_id": "111",
+                                        "validation_errors": [],
+                                        "final_edit_data": {"headers": [], "rows": []},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict("os.environ", {"AUTO_PPT_APPLY_SLIDE_AI_OUTPUTS": "0"}):
+                self.assertEqual(web_main._slide_ai_target_outputs(job_dir), {})
+
+            with patch.dict("os.environ", {"AUTO_PPT_APPLY_SLIDE_AI_OUTPUTS": "1"}):
+                self.assertEqual(set(web_main._slide_ai_target_outputs(job_dir)), {"111"})
 
 
 if __name__ == "__main__":

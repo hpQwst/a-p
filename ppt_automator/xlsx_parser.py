@@ -36,11 +36,15 @@ class ParsedXlsxTable:
         return self.source_id
 
 
-def parse_datasource_zip(datasources_zip: InputFile, formula_mode: str = "auto") -> list[ParsedXlsxTable]:
+def parse_datasource_zip(
+    datasources_zip: InputFile,
+    formula_mode: str = "auto",
+    include_names: set[str] | None = None,
+) -> list[ParsedXlsxTable]:
     output: list[ParsedXlsxTable] = []
     with ZipFile(BytesIO(read_bytes(datasources_zip))) as zf:
         for name in zf.namelist():
-            if name.lower().endswith(".xlsx"):
+            if name.lower().endswith(".xlsx") and (include_names is None or name in include_names):
                 output.append(
                     parse_xlsx_table(
                         zf.read(name),
@@ -387,7 +391,71 @@ def _extract_metadata(rows: list[list[Any]]) -> dict[str, str]:
             key = aliases.get(_norm(key_text))
             if key and value_text:
                 metadata[key] = value_text
+    metadata.update(_extract_context_metadata(rows))
     return metadata
+
+
+def _extract_context_metadata(rows: list[list[Any]]) -> dict[str, str]:
+    header_row_index, header_start_col, _header_end_col = _find_header_row(rows)
+    context: dict[str, str] = {}
+    if header_row_index is None:
+        header_row_index = min(len(rows), 3)
+
+    title = _first_title_before_header(rows, header_row_index)
+    row_group_label = _first_row_group_label(rows, header_row_index, header_start_col)
+    context_text = _join_context([title, row_group_label])
+    if title:
+        context["table_title"] = title
+    if row_group_label:
+        context["row_group_label"] = row_group_label
+    if context_text:
+        context["context_text"] = context_text
+        context["context_tokens"] = " ".join(_norm(context_text).split()[:24])
+    return context
+
+
+def _first_title_before_header(rows: list[list[Any]], header_row_index: int) -> str:
+    for row in rows[: max(header_row_index, 0)]:
+        values = [_text(value) for value in row if _text(value)]
+        if len(values) == 1 and _looks_like_context_label(values[0]):
+            return values[0]
+    return ""
+
+
+def _first_row_group_label(rows: list[list[Any]], header_row_index: int, header_start_col: int) -> str:
+    if header_start_col <= 0:
+        return ""
+    for row in rows[header_row_index + 1 :]:
+        leading_values = [_text(value) for value in row[:header_start_col] if _text(value)]
+        if not leading_values:
+            continue
+        label = max(leading_values, key=len)
+        if _looks_like_context_label(label):
+            return label
+    return ""
+
+
+def _looks_like_context_label(value: Any) -> bool:
+    text = _norm(value)
+    if not text:
+        return False
+    if _to_number(text) is not None:
+        return False
+    if text in {"TOTAL", "SERIE", "SERIES", "CATEGORIA", "CATEGORIAS", "VALOR"}:
+        return False
+    return len(text) >= 4
+
+
+def _join_context(values: list[str]) -> str:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _text(value)
+        key = _norm(text)
+        if text and key not in seen:
+            output.append(text)
+            seen.add(key)
+    return " | ".join(output)
 
 
 def _period_score(values: list[Any]) -> float:

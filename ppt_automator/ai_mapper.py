@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
+import time
 from typing import Any
 
 from .ai import build_openai_client
+from .ai_debug import log_ai_request, log_ai_response, log_debug_event
 from .ppt_discovery import PptTarget
+from .source_manifest import xlsx_source_manifest
 from .table_normalizer import TransformPlan, source_match_candidates
 from .xlsx_parser import ParsedXlsxTable
 
@@ -17,6 +20,7 @@ class AiSourceMatchSuggestion:
     datasource: str
     confidence: float
     reason: str
+    recipe_suggestion: dict[str, Any] = field(default_factory=dict)
 
 
 def suggest_source_matches_with_ai(
@@ -53,14 +57,20 @@ def suggest_source_matches_with_ai(
     valid_sources = {source.file_name for source in sources}
 
     client, model = build_openai_client(root)
+    slide_records = _slide_match_records(request_targets, sources, candidates_per_target)
     payload = {
         "task": (
-            "Escolha o XLSX mais provavel para cada target ainda sem datasource automatico. "
-            "Use o contrato do Editar dados do PowerPoint e a estrutura detectada do XLSX."
+            "Para cada slide, escolha o datasource XLSX mais provavel para cada objeto PPT pendente ou de baixa confianca "
+            "e sugira apenas a receita estrutural necessaria para encaixar o datasource no Editar dados."
+        ),
+        "format": "jsonl_por_slide",
+        "slide_records_jsonl": "\n".join(
+            json.dumps(record, ensure_ascii=False, separators=(",", ":")) for record in slide_records
         ),
         "cost_control": {
             "targets_sent": len(request_targets),
             "total_unmatched_targets": len(eligible_targets),
+            "total_review_targets": len(eligible_targets),
             "candidate_filtered_targets": len(ranked_targets),
             "fallback_targets_sent": sum(1 for target in request_targets if target in fallback_targets),
             "candidates_per_target": candidates_per_target,
@@ -69,24 +79,41 @@ def suggest_source_matches_with_ai(
                 "Quando nenhum target passa no score minimo, ainda enviamos os pendentes para a IA revisar."
             ),
         },
-        "targets": [
-            _ai_match_target_payload(target, sources, candidates_per_target)
-            for target in request_targets
-        ],
         "rules": [
             "Escolha no maximo um datasource por target.",
-            "datasource deve ser exatamente um file_name de candidates.",
-            "Prefira compatibilidade entre categorias/series do Editar dados e do XLSX.",
+            "datasource deve ser exatamente um file_name listado nos datasources do mesmo slide.",
+            "Use colunas, linhas e titulos/contextos do Editar dados e do XLSX.",
             "Use o texto proximo do slide apenas como apoio semantico.",
             "Se nenhum candidato fizer sentido, omita o target da resposta.",
-            "Nao invente valores nem altere dados; esta etapa so escolhe o arquivo.",
+            "Nao invente valores e nao devolva matriz final.",
+            "recipe_suggestion deve ser uma receita estrutural pequena e validavel, nao os dados finais.",
         ],
+        "expected_response": {
+            "matches": [
+                {
+                    "target": "target_id",
+                    "datasource": "datasources/arquivo.xlsx",
+                    "confidence": 0.9,
+                    "reason": "explicacao curta",
+                    "recipe_suggestion": {
+                        "operation": "keep|transpose|drop_and_keep|drop_and_transpose|unknown",
+                        "drop_top_rows": 0,
+                        "drop_left_cols": 0,
+                        "header_row": 1,
+                        "label_column": 1,
+                        "orientation_after": "series_rows_categories_columns|categories_rows_series_columns|single_series_row_categories_columns|key_value_rows|table_cells|unknown",
+                        "confidence": 0.9,
+                        "reason": "por que esta estrutura encaixa no Editar dados",
+                    },
+                }
+            ]
+        },
     }
     schema = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "suggestions": {
+            "matches": {
                 "type": "array",
                 "items": {
                     "type": "object",
@@ -96,28 +123,29 @@ def suggest_source_matches_with_ai(
                         "datasource": {"type": "string"},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                         "reason": {"type": "string"},
+                        "recipe_suggestion": _recipe_schema(),
                     },
-                    "required": ["target", "datasource", "confidence", "reason"],
+                    "required": ["target", "datasource", "confidence", "reason", "recipe_suggestion"],
                 },
             }
         },
-        "required": ["suggestions"],
+        "required": ["matches"],
     }
-    response = client.responses.create(
-        model=model,
-        store=False,
-        input=[
+    request_kwargs = {
+        "model": model,
+        "store": False,
+        "input": [
             {
                 "role": "system",
                 "content": (
                     "Voce e um analista de automacao de PowerPoint. "
-                    "Seu trabalho e mapear targets PPT para arquivos XLSX com cautela. "
-                    "Quando estiver incerto, omita a sugestao."
+                    "Seu trabalho e mapear objetos PPT para arquivos XLSX e sugerir receitas estruturais simples. "
+                    "Voce nunca monta a matriz final e nunca inventa valores."
                 ),
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
-        text={
+        "text": {
             "format": {
                 "type": "json_schema",
                 "name": "ppt_target_datasource_match",
@@ -125,11 +153,27 @@ def suggest_source_matches_with_ai(
                 "strict": True,
             }
         },
-    )
+    }
+    log_ai_request("source_match", request_kwargs)
+    started = time.perf_counter()
+    try:
+        response = client.responses.create(**request_kwargs)
+    except Exception as exc:
+        log_debug_event(
+            "ai_error",
+            {
+                "operation": "source_match",
+                "elapsed_ms": round((time.perf_counter() - started) * 1000),
+                "error": repr(exc),
+            },
+        )
+        raise
     text = getattr(response, "output_text", "") or _response_text_fallback(response)
+    log_ai_response("source_match", text, round((time.perf_counter() - started) * 1000), response)
     data = json.loads(text)
     output: list[AiSourceMatchSuggestion] = []
-    for item in data.get("suggestions", []):
+    returned_items = data.get("matches", data.get("suggestions", []))
+    for item in returned_items:
         target = str(item.get("target") or "")
         datasource = str(item.get("datasource") or "")
         confidence = float(item.get("confidence") or 0)
@@ -141,6 +185,7 @@ def suggest_source_matches_with_ai(
                 datasource=datasource,
                 confidence=confidence,
                 reason=str(item.get("reason") or ""),
+                recipe_suggestion=_sanitize_recipe(item.get("recipe_suggestion") or {}),
             )
         )
     return output
@@ -186,6 +231,185 @@ def plans_to_ai_payload(plans: list[TransformPlan]) -> list[dict[str, Any]]:
     ]
 
 
+def _recipe_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["keep", "transpose", "drop_and_keep", "drop_and_transpose", "unknown"],
+            },
+            "drop_top_rows": {"type": "integer", "minimum": 0},
+            "drop_left_cols": {"type": "integer", "minimum": 0},
+            "header_row": {"type": "integer", "minimum": 0},
+            "label_column": {"type": "integer", "minimum": 0},
+            "orientation_after": {
+                "type": "string",
+                "enum": [
+                    "series_rows_categories_columns",
+                    "categories_rows_series_columns",
+                    "single_series_row_categories_columns",
+                    "key_value_rows",
+                    "table_cells",
+                    "unknown",
+                ],
+            },
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "reason": {"type": "string"},
+        },
+        "required": [
+            "operation",
+            "drop_top_rows",
+            "drop_left_cols",
+            "header_row",
+            "label_column",
+            "orientation_after",
+            "confidence",
+            "reason",
+        ],
+    }
+
+
+def _slide_match_records(
+    targets: list[PptTarget],
+    sources: list[ParsedXlsxTable],
+    candidates_per_target: int,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for slide in sorted({target.slide_number for target in targets}):
+        slide_targets = [target for target in targets if target.slide_number == slide]
+        candidates_by_target = {
+            target.target_id: source_match_candidates(target, sources, limit=max(candidates_per_target, 1))
+            for target in slide_targets
+        }
+        source_names = {
+            candidate.source.file_name
+            for candidates in candidates_by_target.values()
+            for candidate in candidates
+        }
+        record_sources = [source for source in sources if source.file_name in source_names]
+        records.append(
+            {
+                "slide": slide,
+                "objects": [
+                    _slide_object_payload(target, candidates_by_target.get(target.target_id, []))
+                    for target in slide_targets
+                ],
+                "datasources": [_slide_source_payload(source) for source in record_sources],
+            }
+        )
+    return records
+
+
+def _slide_object_payload(target: PptTarget, candidates: list[SourceMatchCandidate]) -> dict[str, Any]:
+    return {
+        "target_id": target.target_id,
+        "shape_name": target.shape_name,
+        "object_type": target.object_type,
+        "titles": _target_titles(target),
+        "edit_data": _target_edit_data_profile(target),
+        "candidate_datasources": [
+            {
+                "file_name": candidate.source.file_name,
+                "local_score": round(candidate.score, 4),
+                "local_reason": candidate.reason,
+            }
+            for candidate in candidates
+        ],
+    }
+
+
+def _slide_source_payload(source: ParsedXlsxTable) -> dict[str, Any]:
+    manifest = xlsx_source_manifest(source)
+    return {
+        "file_name": source.file_name,
+        "sheet_name": source.sheet_name,
+        "titles": manifest.get("semantic_context", {}),
+        "structure": manifest.get("structural_profile", {}),
+        "detected_data": _source_detected_data_profile(source),
+        "preview_rows": _take_rows(source.preview_rows, 8, 10),
+    }
+
+
+def _target_titles(target: PptTarget) -> dict[str, Any]:
+    return {
+        "nearby_text": _short(target.nearby_text, 350),
+        "slide_text": _short(target.slide_text, 500),
+    }
+
+
+def _target_edit_data_profile(target: PptTarget) -> dict[str, Any]:
+    if target.object_type == "table":
+        return {
+            "orientation": "table_cells",
+            "columns": _take(target.table_cells[0] if target.table_cells else [], 18),
+            "rows": _take_rows(target.table_cells[1:] if len(target.table_cells) > 1 else target.table_cells, 12, 12),
+            "shape": [len(target.table_cells), max((len(row) for row in target.table_cells), default=0)],
+        }
+    if target.expected_orientation == "series_rows_categories_columns":
+        columns = target.expected_categories
+        rows = target.expected_series
+    else:
+        columns = target.expected_series
+        rows = target.expected_categories
+    return {
+        "orientation": target.expected_orientation or "unknown",
+        "columns": _take(columns, 18),
+        "rows": _take(rows, 18),
+        "shape": [len(rows), len(columns)],
+    }
+
+
+def _source_detected_data_profile(source: ParsedXlsxTable) -> dict[str, Any]:
+    if source.orientation in {"series_rows_categories_columns", "single_series_row_categories_columns"}:
+        columns = source.categories
+        rows = source.series
+    elif source.orientation == "key_value_rows":
+        columns = source.series or ["Valor"]
+        rows = source.categories
+    else:
+        columns = source.series
+        rows = source.categories
+    return {
+        "orientation": source.orientation or "unknown",
+        "columns": _take(columns, 18),
+        "rows": _take(rows, 18),
+        "shape": [len(rows), len(columns)],
+    }
+
+
+def _sanitize_recipe(value: dict[str, Any]) -> dict[str, Any]:
+    operations = {"keep", "transpose", "drop_and_keep", "drop_and_transpose", "unknown"}
+    orientations = {
+        "series_rows_categories_columns",
+        "categories_rows_series_columns",
+        "single_series_row_categories_columns",
+        "key_value_rows",
+        "table_cells",
+        "unknown",
+    }
+    operation = str(value.get("operation") or "unknown")
+    orientation_after = str(value.get("orientation_after") or "unknown")
+    return {
+        "operation": operation if operation in operations else "unknown",
+        "drop_top_rows": _non_negative_int(value.get("drop_top_rows")),
+        "drop_left_cols": _non_negative_int(value.get("drop_left_cols")),
+        "header_row": _non_negative_int(value.get("header_row")),
+        "label_column": _non_negative_int(value.get("label_column")),
+        "orientation_after": orientation_after if orientation_after in orientations else "unknown",
+        "confidence": max(0.0, min(float(value.get("confidence") or 0), 1.0)),
+        "reason": str(value.get("reason") or ""),
+    }
+
+
+def _non_negative_int(value: Any) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _target_payload(target: PptTarget) -> dict[str, Any]:
     return {
         "slide_index": target.slide_index,
@@ -212,16 +436,7 @@ def _target_payload(target: PptTarget) -> dict[str, Any]:
 
 
 def _source_payload(source: ParsedXlsxTable) -> dict[str, Any]:
-    return {
-        "source_id": source.source_id,
-        "file_name": source.file_name,
-        "sheet_name": source.sheet_name,
-        "orientation": source.orientation,
-        "categories": source.categories,
-        "series": source.series,
-        "preview_rows": source.preview_rows[:8],
-        "metadata": source.metadata,
-    }
+    return xlsx_source_manifest(source)
 
 
 def _ai_match_target_payload(
@@ -266,17 +481,11 @@ def _target_payload_compact(target: PptTarget) -> dict[str, Any]:
 
 
 def _source_payload_compact(source: ParsedXlsxTable) -> dict[str, Any]:
-    return {
-        "source_id": source.source_id,
-        "file_name": source.file_name,
-        "sheet_name": source.sheet_name,
-        "used_range": source.used_range,
-        "orientation": source.orientation,
-        "categories": _take(source.categories, 16),
-        "series": _take(source.series, 16),
-        "preview_rows": _take_rows(source.preview_rows, 10, 12),
-        "metadata": source.metadata,
-    }
+    payload = xlsx_source_manifest(source)
+    payload["categories"] = _take(source.categories, 16)
+    payload["series"] = _take(source.series, 16)
+    payload["preview_rows"] = _take_rows(source.preview_rows, 10, 12)
+    return payload
 
 
 def _take(values: list[Any], limit: int) -> list[Any]:

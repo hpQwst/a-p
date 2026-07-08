@@ -64,7 +64,7 @@ def update_embedded_workbook(workbook_bytes: bytes, sheet_name: str, matrix: lis
             use_shared_strings=use_shared_strings,
         )
         if use_shared_strings:
-            replacements[shared_strings_path] = _shared_strings_xml(_matrix_strings(matrix))
+            replacements[shared_strings_path] = _shared_strings_xml(_matrix_string_values(matrix))
 
         table_path = _first_table_path(workbook_zip, sheet_path)
         if table_path:
@@ -127,7 +127,7 @@ def _updated_sheet_xml(sheet_xml: bytes, matrix: list[list[Any]], *, use_shared_
     for child in list(sheet_data):
         sheet_data.remove(child)
 
-    string_index = {value: index for index, value in enumerate(_matrix_strings(matrix))} if use_shared_strings else {}
+    string_index = {value: index for index, value in enumerate(_unique_strings(_matrix_string_values(matrix)))} if use_shared_strings else {}
     for row_index, row_values in enumerate(matrix, start=1):
         row = ET.Element(
             f"{{{SHEET_NS}}}row",
@@ -192,8 +192,9 @@ def _updated_table_xml(table_xml: bytes, matrix: list[list[Any]]) -> bytes:
 
 
 def _shared_strings_xml(strings: list[str]) -> bytes:
-    root = ET.Element(f"{{{SHEET_NS}}}sst", {"count": str(len(strings)), "uniqueCount": str(len(strings))})
-    for value in strings:
+    unique_strings = _unique_strings(strings)
+    root = ET.Element(f"{{{SHEET_NS}}}sst", {"count": str(len(strings)), "uniqueCount": str(len(unique_strings))})
+    for value in unique_strings:
         si = ET.SubElement(root, f"{{{SHEET_NS}}}si")
         text = ET.SubElement(si, f"{{{SHEET_NS}}}t")
         if value != value.strip() or value == "":
@@ -245,16 +246,26 @@ def _collect_namespace(name: str, namespaces: set[str]) -> None:
 
 
 def _matrix_strings(matrix: list[list[Any]]) -> list[str]:
+    return _unique_strings(_matrix_string_values(matrix))
+
+
+def _matrix_string_values(matrix: list[list[Any]]) -> list[str]:
     output: list[str] = []
-    seen: set[str] = set()
     for row_index, row in enumerate(matrix, start=1):
         for col_index, value in enumerate(row, start=1):
             if not _matrix_cell_is_text(value, row_index=row_index, col_index=col_index):
                 continue
-            text = _matrix_cell_text(value)
-            if text not in seen:
-                seen.add(text)
-                output.append(text)
+            output.append(_matrix_cell_text(value))
+    return output
+
+
+def _unique_strings(strings: list[str]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for text in strings:
+        if text not in seen:
+            seen.add(text)
+            output.append(text)
     return output
 
 

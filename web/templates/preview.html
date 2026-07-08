@@ -7,13 +7,25 @@
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
   </head>
   <body>
-    <main class="app-shell preview-shell">
+    <main
+      class="app-shell preview-shell"
+      data-preview-processing="{% if preview_processing.active %}1{% else %}0{% endif %}"
+      data-preview-status-url="/jobs/{{ job_id }}/processing-status"
+      data-preview-url="/jobs/{{ job_id }}/preview"
+    >
       <header class="product-header preview-header">
         <div>
           <p class="eyebrow">{{ squad }} / {{ project_name }}</p>
           <h1>Preview das atualizações</h1>
         </div>
-        <a class="button" href="/jobs/{{ job_id }}/download" data-progress-message="Gerando PPT atualizado...">Baixar PPT</a>
+        <div class="header-actions">
+          <a class="ghost-button" href="/jobs/{{ job_id }}/debug-log" target="_blank" rel="noreferrer">Log debug</a>
+          {% if preview_processing.active %}
+            <button class="button" type="button" disabled>Preparando preview</button>
+          {% else %}
+            <a class="button" href="/jobs/{{ job_id }}/download" data-progress-message="Gerando PPT atualizado...">Baixar PPT</a>
+          {% endif %}
+        </div>
       </header>
 
       {% if notice %}
@@ -22,6 +34,18 @@
       {% if error %}
         <div class="notice warn">{{ error }}</div>
       {% endif %}
+
+      <section class="process-timeline" aria-label="Andamento do processamento">
+        {% for step in process_steps %}
+          <article class="process-step {{ step.state }}">
+            <span>{{ loop.index }}</span>
+            <div>
+              <strong>{{ step.label }}</strong>
+              <small>{{ step.detail }}</small>
+            </div>
+          </article>
+        {% endfor %}
+      </section>
 
       <section class="preview-workbench">
         <aside class="review-sidebar">
@@ -147,6 +171,44 @@
           {% endif %}
 
           <div class="slides-list" data-preview-list>
+            {% if preview_processing.active %}
+              {% for slide_state in processing_slides %}
+                <details class="slide-section processing" id="slide-{{ slide_state.slide }}" data-slide-section data-processing-slide="{{ slide_state.slide }}" open>
+                  <summary class="slide-summary">
+                    <div>
+                      <span>Slide {{ slide_state.slide }}</span>
+                      <strong data-processing-slide-count>{{ slide_state.target_count or "..." }} target(s)</strong>
+                    </div>
+                    <small data-processing-slide-status>{{ slide_state.status }}</small>
+                  </summary>
+                  <div class="slide-processing-card">
+                    <span class="loading-spinner" aria-hidden="true"></span>
+                    <div>
+                      <strong data-processing-slide-stage>
+                        {% if slide_state.stage == "queued" %}
+                          Na fila
+                        {% elif slide_state.stage == "analysis" %}
+                          Analisando PPT e XLSX
+                        {% elif slide_state.stage == "analysis_done" %}
+                          Mapeamento pronto
+                        {% elif slide_state.stage == "ai_match" %}
+                          IA enxuta
+                        {% else %}
+                          Processando
+                        {% endif %}
+                      </strong>
+                      <p data-processing-slide-message>{{ slide_state.message }}</p>
+                      <small>
+                        <span data-processing-slide-mapped>{{ slide_state.mapped_count }}</span>
+                        mapeados de
+                        <span data-processing-slide-targets>{{ slide_state.target_count }}</span>
+                        target(s)
+                      </small>
+                    </div>
+                  </div>
+                </details>
+              {% endfor %}
+            {% else %}
             {% for slide, items in cards_by_slide.items() %}
               {% set slide_key = slide|string %}
               {% set current_slide_state = (slide_ai_state.slides or {}).get(slide_key, {}) %}
@@ -188,6 +250,23 @@
                       <div class="warning-list compact-warning">
                         <strong>Imagem do slide</strong>
                         <p>{{ current_slide_state.render_warning }}</p>
+                      </div>
+                    {% endif %}
+                    {% if current_slide_state.auto_review_skip_reason %}
+                      <div class="info-list compact-warning">
+                        <strong>IA seletiva</strong>
+                        <p>{{ current_slide_state.auto_review_skip_reason }}</p>
+                      </div>
+                    {% endif %}
+                    {% if current_slide_state.ai_input_stats %}
+                      <div class="info-list compact-warning">
+                        <strong>Entrada IA</strong>
+                        <p>
+                          XLSX {{ current_slide_state.ai_input_stats.xlsx_dump_mode }}
+                          · dumps {{ current_slide_state.ai_input_stats.xlsx_dump_bytes_utf8|format_bytes }}
+                          · manifestos {{ current_slide_state.ai_input_stats.xlsx_manifest_bytes_utf8|format_bytes }}
+                          · targets {{ current_slide_state.ai_input_stats.target_payload_bytes_utf8|format_bytes }}
+                        </p>
                       </div>
                     {% endif %}
                     {% if current_slide_state.questions_for_user %}
@@ -386,6 +465,9 @@
                             <details class="diagnostic">
                               <summary>Estrutura detectada no XLSX</summary>
                               <p class="context">Orientação: {{ item.source_detected.orientation }}</p>
+                              {% if item.source_detected.context and item.source_detected.context.context_text %}
+                                <p class="context">Contexto: {{ item.source_detected.context.context_text }}</p>
+                              {% endif %}
                               <div class="table-wrap small">
                                 <table>
                                   {% if item.source_detected.headers %}
@@ -468,6 +550,7 @@
                 </div>
               </details>
             {% endfor %}
+            {% endif %}
           </div>
         </section>
       </section>
@@ -477,6 +560,7 @@
       <div>
         <strong>Projeto em andamento</strong>
         <p id="progress-message">Processando...</p>
+        <ol id="progress-steps" class="progress-steps"></ol>
       </div>
     </div>
     <script src="{{ url_for('static', path='/app.js') }}"></script>

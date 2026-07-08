@@ -5,6 +5,7 @@ from pathlib import Path
 from zipfile import ZipFile
 import os
 import re
+import time
 import unittest
 import xml.etree.ElementTree as ET
 from unittest.mock import patch
@@ -34,6 +35,14 @@ class AndreWebFlowTests(unittest.TestCase):
         self.assertEqual(len(plans), 12)
         output = generate_updated_pptx(PPT, plans)
         self.assertGreater(len(output), 1_000_000)
+
+    def test_selected_slides_only_parse_their_datasources(self) -> None:
+        targets, sources, plans = analyze_update_package(PPT, DATASOURCES, slide_numbers=[3])
+
+        self.assertEqual({target.slide_number for target in targets}, {3})
+        self.assertEqual(len(sources), 4)
+        self.assertTrue(all("slide3" in source.file_name.lower() for source in sources))
+        self.assertEqual(len(plans), 4)
 
     def test_generated_chart_workbook_keeps_edit_data_package_valid(self) -> None:
         _targets, _sources, plans = analyze_update_package(PPT, DATASOURCES)
@@ -90,17 +99,46 @@ class AndreWebFlowTests(unittest.TestCase):
                     "project_ref": "",
                     "squad": "squad1",
                     "project_name": "Andre regressao",
+                    "slides_to_update": "3,4,5",
                     "confirm_large_deck": "1",
                 },
                 files=files,
             )
             self.assertEqual(response.status_code, 200)
-            self.assertIn("Sem datasource automático", response.text)
-            match = re.search(r"/jobs/([a-f0-9]+)/download", response.text)
+            self.assertIn("Preparando preview", response.text)
+            self.assertIn("Log debug", response.text)
+            self.assertIn('data-preview-url="/jobs/', response.text)
+            self.assertIn("IA indisponivel", response.text)
+            match = re.search(r"/jobs/([a-f0-9]+)/processing-status", response.text)
             self.assertIsNotNone(match)
             job_id = match.group(1)
+            final_status_payload = {}
+            for _attempt in range(80):
+                status = client.get(f"/jobs/{job_id}/processing-status")
+                self.assertEqual(status.status_code, 200)
+                status_payload = status.json()
+                self.assertEqual(status_payload.get("preview_url"), f"/jobs/{job_id}/preview")
+                if status_payload.get("status") == "error":
+                    self.fail(status_payload.get("message") or "Preview assincrono falhou.")
+                if status_payload.get("status") == "complete":
+                    final_status_payload = status_payload
+                    break
+                time.sleep(0.2)
+            else:
+                self.fail("Preview assincrono nao terminou a tempo.")
+            self.assertEqual(
+                {item.get("status") for item in (final_status_payload.get("slides") or {}).values()},
+                {"done"},
+            )
+            debug_log = client.get(f"/jobs/{job_id}/debug-log")
+            self.assertEqual(debug_log.status_code, 200)
+            self.assertIn("preview_request", debug_log.text)
+            self.assertIn("processing_status_response", debug_log.text)
+            self.assertIn("analysis_done", debug_log.text)
+
             slide_three = client.get(f"/jobs/{job_id}/preview?slide=3")
             self.assertEqual(slide_three.status_code, 200)
+            self.assertIn("Sem datasource", slide_three.text)
             self.assertIn("7792738590", slide_three.text)
 
             with ZipFile(DATASOURCES) as zf:
@@ -121,7 +159,7 @@ class AndreWebFlowTests(unittest.TestCase):
                 },
             )
             self.assertEqual(override.status_code, 200)
-            self.assertIn("Correção manual", override.text)
+            self.assertIn("Datasource 7792738590.xlsx aplicado ao target 6889461846.", override.text)
 
             download = client.get(f"/jobs/{job_id}/download")
             self.assertEqual(download.status_code, 200)

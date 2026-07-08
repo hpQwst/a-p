@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+import hashlib
 import json
 import os
 import re
 import shutil
+import threading
 import time
 from zipfile import ZipFile
 import xml.etree.ElementTree as ET
@@ -20,6 +23,7 @@ from fastapi.templating import Jinja2Templates
 
 from ppt_automator import generate_updated_pptx
 from ppt_automator.ai import ai_configured, format_ai_error
+from ppt_automator.ai_debug import log_debug_event, reset_ai_debug_log_path, set_ai_debug_log_path
 from ppt_automator.embedded_workbook_writer import EmbeddedWorkbookWriterUnavailable
 from ppt_automator.ai_mapper import suggest_source_matches_with_ai
 from ppt_automator.ai_slide_matrix_builder import SlideMatrixBuildInput, build_slide_matrices_with_ai
@@ -28,6 +32,7 @@ from ppt_automator.ai_transform import suggest_transform_diagnostics
 from ppt_automator.edit_data_validator import validate_typed_edit_data
 from ppt_automator.slide_datasources import collect_datasource_entries, entries_for_slide
 from ppt_automator.slide_renderer import render_slide_with_target_labels
+from ppt_automator.source_manifest import xlsx_source_manifest
 from ppt_automator.table_normalizer import source_match_candidates
 from ppt_automator.target_labeler import target_aliases, visual_label
 from ppt_automator.xlsx_plaintext_dump import dump_xlsx_zip_entries
@@ -61,7 +66,10 @@ from worker.processor import (
 APP_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_ROOT.parent
 RUNTIME_ROOT = Path(os.getenv("AUTO_PPT_RUNTIME_ROOT", PROJECT_ROOT / "workspace_data" / "web_jobs")).resolve()
-RENDER_CACHE_VERSION = 6
+RENDER_CACHE_VERSION = 7
+PREVIEW_EXECUTOR = ThreadPoolExecutor(max_workers=max(int(os.getenv("AUTO_PPT_PREVIEW_WORKERS", "2") or "2"), 1))
+PREVIEW_RUNNING: set[str] = set()
+PREVIEW_RUNNING_LOCK = threading.Lock()
 PPT_XML_NS = {
     "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
@@ -71,6 +79,7 @@ PPT_XML_NS = {
 app = FastAPI(title="QWST Auto PPT")
 app.mount("/static", StaticFiles(directory=APP_ROOT / "static"), name="static")
 templates = Jinja2Templates(directory=APP_ROOT / "templates")
+templates.env.filters["format_bytes"] = lambda value: _format_bytes(value)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -146,6 +155,30 @@ async def preview(
     (job_dir / "datasources.zip").write_bytes(datasource_bytes)
     if mapping_bytes:
         (job_dir / "mapping.xlsx").write_bytes(mapping_bytes)
+    _reset_debug_log(job_dir)
+    _log_job_debug_event(
+        job_dir,
+        "preview_request",
+        {
+            "job_id": job_id,
+            "project": {"squad": project.squad, "slug": project.slug, "name": project.name},
+            "files": {
+                "pptx": {"name": pptx.filename or "modelo.pptx", "bytes": len(pptx_bytes)},
+                "datasources": {"name": datasources.filename or "datasources.zip", "bytes": len(datasource_bytes)},
+                "mapping": {
+                    "name": mapping.filename if mapping and mapping.filename else "",
+                    "bytes": len(mapping_bytes),
+                },
+            },
+            "slides_to_update": selected_slides,
+            "use_ai_requested": bool(use_ai),
+            "use_ai_effective": bool(use_ai) and not bool(mapping_template),
+            "auto_source_review": _auto_source_match_review_enabled() and not bool(mapping_template),
+            "auto_source_review_confidence_floor": _ai_review_confidence_floor(),
+            "mapping_template": _mapping_template_metadata(mapping_template),
+            "ppt_summary": ppt_summary,
+        },
+    )
 
     _save_job_metadata(
         job_dir,
@@ -171,12 +204,14 @@ async def preview(
             "large_deck_confirmed": bool(confirm_large_deck),
             "mapping_template": _mapping_template_metadata(mapping_template),
             "use_ai": bool(use_ai) and not bool(mapping_template),
+            "auto_source_review": _auto_source_match_review_enabled() and not bool(mapping_template),
             "ignore_mapping_candidates": False,
         },
     )
     _save_project_checkpoint(job_dir, status="in_progress")
-    auto_notice = _run_automatic_slide_ai_review(job_dir)
-    return _render_preview(request, job_id, notice=auto_notice)
+    _init_preview_processing_state(job_dir)
+    _start_preview_processing(job_dir)
+    return _render_preview(request, job_id, notice="Preview iniciado. Os slides serao preenchidos conforme o processamento terminar.")
 
 
 @app.get("/projects/{squad}/{slug}/preview", response_class=HTMLResponse)
@@ -200,6 +235,57 @@ async def resume_project_preview(request: Request, squad: str, slug: str) -> HTM
 @app.get("/jobs/{job_id}/preview", response_class=HTMLResponse)
 async def job_preview(request: Request, job_id: str, slide: int | None = None) -> HTMLResponse:
     return _render_preview(request, job_id, selected_preview_slide=slide, allow_ai=False)
+
+
+@app.get("/jobs/{job_id}/processing-status")
+async def job_processing_status(job_id: str) -> JSONResponse:
+    job_dir = _job_dir(job_id)
+    state = _load_preview_processing_state(job_dir)
+    if not state:
+        payload = {
+            "job_id": job_id,
+            "status": "complete",
+            "active": False,
+            "slides": {},
+            "preview_url": f"/jobs/{job_id}/preview",
+            "debug_log_url": f"/jobs/{job_id}/debug-log",
+        }
+    else:
+        payload = {
+            **state,
+            "job_id": job_id,
+            "active": _preview_processing_is_active(state),
+            "preview_url": f"/jobs/{job_id}/preview",
+            "debug_log_url": f"/jobs/{job_id}/debug-log",
+        }
+    _log_job_debug_event(
+        job_dir,
+        "processing_status_response",
+        {
+            "status": payload.get("status"),
+            "active": payload.get("active"),
+            "current_stage": payload.get("current_stage"),
+            "message": payload.get("message"),
+            "totals": payload.get("totals"),
+            "slides": payload.get("slides"),
+            "preview_url": payload.get("preview_url"),
+        },
+    )
+    return JSONResponse(payload)
+
+
+@app.get("/jobs/{job_id}/debug-log")
+async def job_debug_log(job_id: str) -> FileResponse:
+    job_dir = _job_dir(job_id)
+    path = _debug_log_path(job_dir)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Log de debug ainda nao foi criado.")
+    _log_job_debug_event(
+        job_dir,
+        "debug_log_downloaded",
+        {"current_processing_state": _load_preview_processing_state(job_dir)},
+    )
+    return FileResponse(path, media_type="text/plain; charset=utf-8", filename="log.txt")
 
 
 @app.post("/jobs/{job_id}/slides", response_class=HTMLResponse)
@@ -471,6 +557,574 @@ async def slide_image(job_id: str, slide_number: int) -> FileResponse:
     return FileResponse(image_path, media_type="image/png")
 
 
+def _preview_processing_path(job_dir: Path) -> Path:
+    return job_dir / "preview_processing.json"
+
+
+def _debug_log_path(job_dir: Path) -> Path:
+    return job_dir / "log.txt"
+
+
+def _reset_debug_log(job_dir: Path) -> None:
+    _debug_log_path(job_dir).write_text("", encoding="utf-8")
+
+
+def _log_job_debug_event(job_dir: Path, event: str, payload: dict | None = None) -> None:
+    token = set_ai_debug_log_path(_debug_log_path(job_dir))
+    try:
+        log_debug_event(event, payload or {})
+    finally:
+        reset_ai_debug_log_path(token)
+
+
+def _call_with_job_debug(job_dir: Path, callback, *args, **kwargs):
+    token = set_ai_debug_log_path(_debug_log_path(job_dir))
+    try:
+        return callback(*args, **kwargs)
+    finally:
+        reset_ai_debug_log_path(token)
+
+
+def _init_preview_processing_state(job_dir: Path) -> None:
+    try:
+        metadata = _load_job_metadata(job_dir)
+    except Exception:
+        metadata = {}
+    slides = _preview_scope_slides(metadata)
+    now = _now_iso()
+    state = {
+        "schema_version": 1,
+        "status": "queued",
+        "active": True,
+        "created_at": now,
+        "updated_at": now,
+        "message": "Aguardando processamento do preview.",
+        "current_stage": "queued",
+        "slides": {
+            str(slide): {
+                "slide": slide,
+                "status": "queued",
+                "stage": "queued",
+                "message": "Na fila.",
+                "target_count": 0,
+                "mapped_count": 0,
+                "unmapped_count": 0,
+            }
+            for slide in slides
+        },
+        "totals": {
+            "slides": len(slides),
+            "targets": 0,
+            "mapped": 0,
+            "unmapped": 0,
+        },
+    }
+    _save_preview_processing_state(job_dir, state)
+    _log_job_debug_event(
+        job_dir,
+        "preview_state_initialized",
+        {"slides": slides, "slide_count": len(slides)},
+    )
+
+
+def _start_preview_processing(job_dir: Path) -> None:
+    job_id = job_dir.name
+    with PREVIEW_RUNNING_LOCK:
+        if job_id in PREVIEW_RUNNING:
+            _log_job_debug_event(job_dir, "preview_worker_already_running", {"job_id": job_id})
+            return
+        PREVIEW_RUNNING.add(job_id)
+    _log_job_debug_event(job_dir, "preview_worker_submitted", {"job_id": job_id})
+    PREVIEW_EXECUTOR.submit(_preview_processing_worker, job_dir)
+
+
+def _preview_processing_worker(job_dir: Path) -> None:
+    job_id = job_dir.name
+    debug_token = set_ai_debug_log_path(_debug_log_path(job_dir))
+    worker_started = time.perf_counter()
+    try:
+        log_debug_event("preview_worker_start", {"job_id": job_id})
+        _update_preview_processing_state(
+            job_dir,
+            status="running",
+            current_stage="analysis",
+            message="Lendo PPT, XLSX do escopo e contratos do Editar dados.",
+            slide_status="running",
+            slide_message="Analisando objetos e datasources deste slide.",
+        )
+        analysis_started = time.perf_counter()
+        log_debug_event("analysis_start", {"apply_cached_source_matches": True, "apply_slide_outputs": False})
+        analysis, mapping_status, mapping_candidates, pause_for_mapping = _analysis_for_job(
+            job_dir,
+            apply_cached_source_matches=True,
+            apply_cached_diagnostics=False,
+            apply_slide_outputs=False,
+        )
+        log_debug_event(
+            "analysis_done",
+            {
+                "elapsed_ms": round((time.perf_counter() - analysis_started) * 1000),
+                "target_count": analysis.target_count,
+                "source_count": analysis.source_count,
+                "plan_count": len(analysis.plans),
+                "warning_count": len(analysis.warnings),
+                "warnings": analysis.warnings,
+                "mapping_status": mapping_status,
+                "mapping_candidate_count": len(mapping_candidates),
+                "pause_for_mapping": pause_for_mapping,
+            },
+        )
+        ai_match_status, ai_diagnostic_status = _ai_waiting_status(pause_for_mapping)
+        _mark_processing_analysis_done(job_dir, analysis)
+
+        metadata = _load_job_metadata(job_dir)
+        source_match_ai_enabled = _source_match_ai_enabled(metadata)
+        if source_match_ai_enabled and ai_configured(PROJECT_ROOT):
+            ai_started = time.perf_counter()
+            log_debug_event(
+                "preview_ai_match_start",
+                {
+                    "operation": "source_match",
+                    "use_ai": bool(metadata.get("use_ai")),
+                    "auto_source_review": bool(metadata.get("auto_source_review")),
+                    "confidence_floor": _ai_review_confidence_floor(),
+                },
+            )
+            _update_preview_processing_state(
+                job_dir,
+                status="running",
+                current_stage="ai_match",
+                message="IA enxuta escolhendo datasources pendentes e sugerindo receitas estruturais.",
+                slide_status="running",
+                slide_message="Revisando matches pendentes ou abaixo do corte de confianca com IA.",
+                only_unfinished=False,
+            )
+            ai_matches, ai_match_status = _ai_source_matches_for_job(job_dir, analysis, allow_ai=True)
+            analysis = apply_ai_source_matches_to_analysis(analysis, ai_matches)
+            log_debug_event(
+                "preview_ai_match_done",
+                {
+                    "elapsed_ms": round((time.perf_counter() - ai_started) * 1000),
+                    "status": ai_match_status,
+                    "match_count": len(ai_matches),
+                    "plan_count_after_ai": len(analysis.plans),
+                },
+            )
+            _mark_processing_analysis_done(job_dir, analysis)
+        else:
+            log_debug_event(
+                "preview_ai_match_skipped",
+                {
+                    "use_ai": bool(metadata.get("use_ai")),
+                    "auto_source_review": bool(metadata.get("auto_source_review")),
+                    "ai_configured": ai_configured(PROJECT_ROOT),
+                },
+            )
+
+        _clear_render_cache(job_dir)
+        _update_preview_processing_state(
+            job_dir,
+            status="complete",
+            current_stage="complete",
+            message="Preview pronto.",
+            slide_status="done",
+            slide_message="Cards prontos.",
+            only_unfinished=False,
+        )
+        try:
+            _save_completed_preview_cache(
+                job_dir,
+                analysis,
+                mapping_status,
+                mapping_candidates,
+                _combine_ai_status(ai_match_status, ai_diagnostic_status),
+            )
+        except Exception as cache_exc:
+            # Cache is only a speed-up for the first completed render.
+            log_debug_event("render_cache_error", {"error": repr(cache_exc)})
+            pass
+        _save_project_checkpoint(job_dir, status="in_progress")
+        log_debug_event(
+            "preview_worker_complete",
+            {
+                "elapsed_ms": round((time.perf_counter() - worker_started) * 1000),
+                "target_count": analysis.target_count,
+                "source_count": analysis.source_count,
+                "plan_count": len(analysis.plans),
+            },
+        )
+    except Exception as exc:
+        log_debug_event(
+            "preview_worker_error",
+            {
+                "elapsed_ms": round((time.perf_counter() - worker_started) * 1000),
+                "error": repr(exc),
+            },
+        )
+        _update_preview_processing_state(
+            job_dir,
+            status="error",
+            current_stage="error",
+            message=f"Falha ao preparar preview: {exc}",
+            slide_status="error",
+            slide_message=str(exc),
+            only_unfinished=False,
+        )
+    finally:
+        with PREVIEW_RUNNING_LOCK:
+            PREVIEW_RUNNING.discard(job_id)
+        log_debug_event(
+            "preview_worker_finished",
+            {"elapsed_ms": round((time.perf_counter() - worker_started) * 1000)},
+        )
+        reset_ai_debug_log_path(debug_token)
+
+
+def _load_preview_processing_state(job_dir: Path) -> dict:
+    path = _preview_processing_path(job_dir)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _save_preview_processing_state(job_dir: Path, state: dict) -> None:
+    state["updated_at"] = _now_iso()
+    path = _preview_processing_path(job_dir)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _update_preview_processing_state(
+    job_dir: Path,
+    status: str,
+    current_stage: str,
+    message: str,
+    slide_status: str | None = None,
+    slide_message: str = "",
+    only_unfinished: bool = True,
+) -> None:
+    state = _load_preview_processing_state(job_dir) or {}
+    state["status"] = status
+    state["active"] = status in {"queued", "running"}
+    state["current_stage"] = current_stage
+    state["message"] = message
+    log_debug_event(
+        "processing_state_update",
+        {
+            "status": status,
+            "current_stage": current_stage,
+            "message": message,
+            "slide_status": slide_status,
+            "slide_message": slide_message,
+            "only_unfinished": only_unfinished,
+        },
+    )
+    if slide_status:
+        for slide_state in (state.get("slides") or {}).values():
+            if only_unfinished and slide_state.get("status") == "done":
+                continue
+            slide_state["status"] = slide_status
+            slide_state["stage"] = current_stage
+            slide_state["message"] = slide_message or message
+    _save_preview_processing_state(job_dir, state)
+
+
+def _mark_processing_analysis_done(job_dir: Path, analysis: AnalysisResult) -> None:
+    state = _load_preview_processing_state(job_dir) or {}
+    slides_state = state.setdefault("slides", {})
+    plans_by_slide: dict[int, int] = defaultdict(int)
+    targets_by_slide: dict[int, int] = defaultdict(int)
+    for target in analysis.targets:
+        if target.object_type in {"chart", "table"}:
+            targets_by_slide[target.slide_number] += 1
+    for plan in analysis.plans:
+        plans_by_slide[plan.target.slide_number] += 1
+    for slide, target_count in targets_by_slide.items():
+        mapped_count = plans_by_slide.get(slide, 0)
+        slide_state = slides_state.setdefault(str(slide), {"slide": slide})
+        slide_state.update(
+            {
+                "slide": slide,
+                "status": "running",
+                "stage": "analysis_done",
+                "message": "Mapeamento deterministico pronto; aguardando proxima etapa.",
+                "target_count": target_count,
+                "mapped_count": mapped_count,
+                "unmapped_count": max(target_count - mapped_count, 0),
+            }
+        )
+    state["totals"] = {
+        "slides": len(slides_state),
+        "targets": sum(item.get("target_count", 0) for item in slides_state.values()),
+        "mapped": sum(item.get("mapped_count", 0) for item in slides_state.values()),
+        "unmapped": sum(item.get("unmapped_count", 0) for item in slides_state.values()),
+    }
+    state["status"] = "running"
+    state["active"] = True
+    state["current_stage"] = "analysis"
+    state["message"] = "Analise deterministica concluida."
+    _save_preview_processing_state(job_dir, state)
+
+
+def _preview_processing_is_active(state: dict) -> bool:
+    return bool(state) and str(state.get("status") or "") in {"queued", "running"}
+
+
+def _preview_scope_slides(metadata: dict) -> list[int]:
+    selected = ((metadata.get("slides") or {}).get("numbers") or []) if isinstance(metadata.get("slides"), dict) else []
+    if selected:
+        return sorted({int(slide) for slide in selected if int(slide) > 0})
+    slide_count = int(((metadata.get("ppt_summary") or {}).get("slide_count") or 0))
+    return list(range(1, slide_count + 1)) if slide_count else []
+
+
+def _processing_preview_context(
+    request: Request,
+    job_id: str,
+    metadata: dict,
+    state: dict,
+    notice: str = "",
+    error: str = "",
+    selected_preview_slide: int | None = None,
+) -> dict:
+    all_slides = _processing_slide_items(state)
+    all_slide_numbers = [item["slide"] for item in all_slides]
+    full_render_limit = _preview_full_render_slide_limit()
+    preview_is_windowed = len(all_slide_numbers) > full_render_limit
+    preview_selected_slide = _preview_selected_slide(
+        all_slide_numbers,
+        selected_preview_slide if selected_preview_slide is not None else _preview_slide_from_request(request),
+    )
+    if preview_is_windowed and preview_selected_slide is not None:
+        visible_slides = [item for item in all_slides if item["slide"] == preview_selected_slide]
+    else:
+        visible_slides = all_slides
+    totals = state.get("totals") or {}
+    review_summary = {
+        "slides": int(totals.get("slides") or len(all_slides)),
+        "targets": int(totals.get("targets") or 0),
+        "mapped": int(totals.get("mapped") or 0),
+        "unmapped": int(totals.get("unmapped") or 0),
+    }
+    if _source_match_ai_enabled(metadata) and ai_configured(PROJECT_ROOT):
+        ai_status = {"state": "running", "message": state.get("message") or "Processando preview em background."}
+    elif _source_match_ai_enabled(metadata):
+        ai_status = {"state": "disabled", "message": "IA indisponivel: configure OPENAI_API_KEY no .env."}
+    else:
+        ai_status = {"state": "disabled", "message": "IA nao foi acionada neste preview."}
+    mapping_status = {"state": "running", "message": "Mapeamento sera exibido conforme os slides terminarem."}
+    return {
+        "job_id": job_id,
+        "metadata": metadata,
+        "squad": metadata["project"]["squad"].title(),
+        "project_name": metadata["project"]["name"],
+        "target_count": review_summary["targets"],
+        "source_count": 0,
+        "mapped_count": review_summary["mapped"],
+        "cards_by_slide": {},
+        "processing_slides": visible_slides,
+        "slide_summaries": _processing_slide_summaries(all_slides),
+        "review_summary": review_summary,
+        "process_steps": _processing_steps_from_state(state),
+        "slide_images": {},
+        "slide_datasources": {},
+        "slide_ai_state": {},
+        "preview_is_windowed": preview_is_windowed,
+        "preview_selected_slide": preview_selected_slide,
+        "preview_full_render_limit": full_render_limit,
+        "preview_total_slides": len(all_slide_numbers),
+        "mapping_status": mapping_status,
+        "mapping_candidates": [],
+        "ai_status": ai_status,
+        "ai_available": ai_configured(PROJECT_ROOT),
+        "ai_enabled": bool(metadata.get("use_ai")),
+        "analysis_warnings": [],
+        "slide_selection_label": _slide_selection_label(_preview_scope_slides(metadata)),
+        "notice": notice,
+        "error": error,
+        "ai_log_entries": _read_ai_logs(_job_dir(job_id)),
+        "preview_processing": {**state, "active": True},
+    }
+
+
+def _processing_slide_items(state: dict) -> list[dict]:
+    output = []
+    for key, item in (state.get("slides") or {}).items():
+        slide = int(item.get("slide") or key)
+        output.append(
+            {
+                "slide": slide,
+                "status": item.get("status") or "queued",
+                "stage": item.get("stage") or "",
+                "message": item.get("message") or "",
+                "target_count": int(item.get("target_count") or 0),
+                "mapped_count": int(item.get("mapped_count") or 0),
+                "unmapped_count": int(item.get("unmapped_count") or 0),
+            }
+        )
+    return sorted(output, key=lambda item: item["slide"])
+
+
+def _processing_slide_summaries(slides: list[dict]) -> list[dict]:
+    return [
+        {
+            "slide": item["slide"],
+            "target_count": item["target_count"],
+            "mapped_count": item["mapped_count"],
+            "unmapped_count": item["unmapped_count"],
+        }
+        for item in slides
+    ]
+
+
+def _processing_steps_from_state(state: dict) -> list[dict]:
+    current = str(state.get("current_stage") or "queued")
+    order = [
+        ("queued", "Fila", "Job recebido"),
+        ("analysis", "Analise", "PPT e XLSX do escopo"),
+        ("ai_match", "IA enxuta", "Datasource e receita estrutural"),
+        ("complete", "Preview", "Cards prontos"),
+    ]
+    current_index = next((index for index, item in enumerate(order) if item[0] == current), 0)
+    if str(state.get("status")) == "complete":
+        current_index = len(order) - 1
+    if str(state.get("status")) == "error":
+        return [
+            {"state": "done", "label": "Fila", "detail": "Job recebido"},
+            {"state": "error", "label": "Erro", "detail": state.get("message") or "Falha no processamento"},
+        ]
+    steps = []
+    for index, (_key, label, detail) in enumerate(order):
+        if index < current_index:
+            state_name = "done"
+        elif index == current_index:
+            state_name = "running"
+        else:
+            state_name = "pending"
+        steps.append({"state": state_name, "label": label, "detail": detail})
+    return steps
+
+
+def _save_completed_preview_cache(
+    job_dir: Path,
+    analysis: AnalysisResult,
+    mapping_status: dict,
+    mapping_candidates: list[dict],
+    ai_status: dict,
+) -> None:
+    try:
+        metadata = _load_job_metadata(job_dir)
+    except Exception:
+        metadata = {}
+    context = _preview_context_from_analysis(
+        job_dir,
+        job_dir.name,
+        metadata,
+        analysis,
+        mapping_status,
+        mapping_candidates,
+        ai_status,
+        _load_ai_diagnostics(job_dir),
+        processing_state=_load_preview_processing_state(job_dir),
+    )
+    _save_render_cache(job_dir, context)
+
+
+def _completed_preview_cache_usable(
+    request: Request,
+    cached: dict,
+    selected_preview_slide: int | None,
+) -> bool:
+    if not cached:
+        return False
+    if not cached.get("preview_is_windowed"):
+        return True
+    requested_slide = selected_preview_slide if selected_preview_slide is not None else _preview_slide_from_request(request)
+    if requested_slide is None:
+        return True
+    try:
+        return int(cached.get("preview_selected_slide") or 0) == int(requested_slide)
+    except (TypeError, ValueError):
+        return False
+
+
+def _preview_context_from_analysis(
+    job_dir: Path,
+    job_id: str,
+    metadata: dict,
+    analysis: AnalysisResult,
+    mapping_status: dict,
+    mapping_candidates: list[dict],
+    ai_status: dict,
+    ai_diagnostics: dict[str, dict],
+    notice: str = "",
+    error: str = "",
+    request: Request | None = None,
+    selected_preview_slide: int | None = None,
+    processing_state: dict | None = None,
+) -> dict:
+    selected_slides = _selected_slides_for_job(job_dir)
+    slide_ai_state = _load_slide_ai_state(job_dir)
+    all_cards_by_slide = _cards_by_slide(
+        analysis,
+        _manual_source_names(job_dir),
+        _manual_source_ranges(job_dir),
+        ai_diagnostics,
+        slide_ai_state,
+        apply_slide_ai_outputs=_apply_slide_ai_outputs_enabled(job_dir),
+    )
+    all_slide_numbers = sorted(all_cards_by_slide)
+    full_render_limit = _preview_full_render_slide_limit()
+    preview_is_windowed = len(all_slide_numbers) > full_render_limit
+    requested_slide = selected_preview_slide
+    if requested_slide is None and request is not None:
+        requested_slide = _preview_slide_from_request(request)
+    preview_selected_slide = _preview_selected_slide(all_slide_numbers, requested_slide)
+    if preview_is_windowed and preview_selected_slide is not None:
+        visible_slide_numbers = [preview_selected_slide]
+    else:
+        visible_slide_numbers = all_slide_numbers
+    cards_by_slide = {slide: all_cards_by_slide[slide] for slide in visible_slide_numbers}
+    slide_images = {slide: f"/jobs/{job_id}/slides/{slide}/image" for slide in visible_slide_numbers}
+    review_summary = _review_summary(all_cards_by_slide)
+    return {
+        "job_id": job_id,
+        "metadata": metadata,
+        "squad": metadata["project"]["squad"].title(),
+        "project_name": metadata["project"]["name"],
+        "target_count": analysis.target_count,
+        "source_count": analysis.source_count,
+        "mapped_count": len(analysis.plans),
+        "cards_by_slide": dict(sorted(cards_by_slide.items())),
+        "slide_summaries": _slide_summaries(all_cards_by_slide),
+        "review_summary": review_summary,
+        "process_steps": _process_steps(analysis, review_summary, mapping_status, ai_status, slide_ai_state),
+        "slide_images": slide_images,
+        "slide_datasources": _slide_datasource_summary(job_dir, visible_slide_numbers),
+        "slide_ai_state": slide_ai_state,
+        "preview_is_windowed": preview_is_windowed,
+        "preview_selected_slide": preview_selected_slide,
+        "preview_full_render_limit": full_render_limit,
+        "preview_total_slides": len(all_slide_numbers),
+        "mapping_status": mapping_status,
+        "mapping_candidates": mapping_candidates,
+        "ai_status": ai_status,
+        "ai_available": ai_configured(PROJECT_ROOT),
+        "ai_enabled": False,
+        "analysis_warnings": analysis.warnings,
+        "slide_selection_label": _slide_selection_label(selected_slides),
+        "notice": notice,
+        "error": error,
+        "ai_log_entries": _read_ai_logs(job_dir),
+        "preview_processing": {**(processing_state or {}), "active": False},
+        "processing_slides": [],
+    }
+
+
 def _render_preview(
     request: Request,
     job_id: str,
@@ -491,8 +1145,46 @@ def _render_preview(
             cached["ai_log_entries"] = _read_ai_logs(job_dir)
             return templates.TemplateResponse(request, "preview.html", cached)
     metadata = _load_job_metadata(job_dir)
-    selected_slides = _selected_slides_for_job(job_dir)
+    processing_state = _load_preview_processing_state(job_dir)
+    if _preview_processing_is_active(processing_state):
+        _log_job_debug_event(
+            job_dir,
+            "render_preview_processing",
+            {
+                "status": processing_state.get("status"),
+                "current_stage": processing_state.get("current_stage"),
+            },
+        )
+        return templates.TemplateResponse(
+            request,
+            "preview.html",
+            _processing_preview_context(
+                request,
+                job_id,
+                metadata,
+                processing_state,
+                notice=notice,
+                error=error,
+                selected_preview_slide=selected_preview_slide,
+            ),
+        )
+    cached = _load_render_cache(job_dir)
+    if ai_diagnostic_target_ids is None and _completed_preview_cache_usable(request, cached, selected_preview_slide):
+        _log_job_debug_event(
+            job_dir,
+            "render_preview_cache_hit",
+            {
+                "preview_is_windowed": cached.get("preview_is_windowed"),
+                "preview_selected_slide": cached.get("preview_selected_slide"),
+            },
+        )
+        cached["notice"] = notice
+        cached["error"] = error
+        cached["ai_log_entries"] = _read_ai_logs(job_dir)
+        return templates.TemplateResponse(request, "preview.html", cached)
     try:
+        render_started = time.perf_counter()
+        _log_job_debug_event(job_dir, "render_preview_recompute_start", {})
         analysis, mapping_status, mapping_candidates, pause_for_mapping = _analysis_for_job(job_dir)
     except Exception as exc:
         return _error_response(request, f"Nao consegui analisar os arquivos: {exc}", status_code=400)
@@ -524,60 +1216,35 @@ def _render_preview(
         ai_match_status, ai_diagnostic_status = _ai_waiting_status(pause_for_mapping)
 
     ai_status = _combine_ai_status(ai_match_status, ai_diagnostic_status)
-    slide_ai_state = _load_slide_ai_state(job_dir)
-    all_cards_by_slide = _cards_by_slide(
+    context = _preview_context_from_analysis(
+        job_dir,
+        job_id,
+        metadata,
         analysis,
-        _manual_source_names(job_dir),
-        _manual_source_ranges(job_dir),
+        mapping_status,
+        mapping_candidates,
+        ai_status,
         ai_diagnostics,
-        slide_ai_state,
+        notice=notice,
+        error=error,
+        request=request,
+        selected_preview_slide=selected_preview_slide,
+        processing_state=processing_state,
     )
-    all_slide_numbers = sorted(all_cards_by_slide)
-    full_render_limit = _preview_full_render_slide_limit()
-    preview_is_windowed = len(all_slide_numbers) > full_render_limit
-    preview_selected_slide = _preview_selected_slide(
-        all_slide_numbers,
-        selected_preview_slide if selected_preview_slide is not None else _preview_slide_from_request(request),
-    )
-    if preview_is_windowed and preview_selected_slide is not None:
-        visible_slide_numbers = [preview_selected_slide]
-    else:
-        visible_slide_numbers = all_slide_numbers
-    cards_by_slide = {slide: all_cards_by_slide[slide] for slide in visible_slide_numbers}
-    slide_images = {}
-    for slide in visible_slide_numbers:
-        slide_images[slide] = f"/jobs/{job_id}/slides/{slide}/image"
-    context = {
-        "job_id": job_id,
-        "metadata": metadata,
-        "squad": metadata["project"]["squad"].title(),
-        "project_name": metadata["project"]["name"],
-        "target_count": analysis.target_count,
-        "source_count": analysis.source_count,
-        "mapped_count": len(analysis.plans),
-        "cards_by_slide": dict(sorted(cards_by_slide.items())),
-        "slide_summaries": _slide_summaries(all_cards_by_slide),
-        "review_summary": _review_summary(all_cards_by_slide),
-        "slide_images": slide_images,
-        "slide_datasources": _slide_datasource_summary(job_dir, visible_slide_numbers),
-        "slide_ai_state": slide_ai_state,
-        "preview_is_windowed": preview_is_windowed,
-        "preview_selected_slide": preview_selected_slide,
-        "preview_full_render_limit": full_render_limit,
-        "preview_total_slides": len(all_slide_numbers),
-        "mapping_status": mapping_status,
-        "mapping_candidates": mapping_candidates,
-        "ai_status": ai_status,
-        "ai_available": ai_configured(PROJECT_ROOT),
-        "ai_enabled": False,
-        "analysis_warnings": analysis.warnings,
-        "slide_selection_label": _slide_selection_label(selected_slides),
-        "notice": notice,
-        "error": error,
-        "ai_log_entries": _read_ai_logs(job_dir),
-    }
-    if not preview_is_windowed:
+    if not context["preview_is_windowed"]:
         _save_render_cache(job_dir, context)
+    _log_job_debug_event(
+        job_dir,
+        "render_preview_recompute_done",
+        {
+            "elapsed_ms": round((time.perf_counter() - render_started) * 1000),
+            "target_count": analysis.target_count,
+            "source_count": analysis.source_count,
+            "plan_count": len(analysis.plans),
+            "preview_is_windowed": context["preview_is_windowed"],
+            "preview_selected_slide": context["preview_selected_slide"],
+        },
+    )
     _save_project_checkpoint(job_dir, status="in_progress")
     return templates.TemplateResponse(request, "preview.html", context)
 
@@ -642,7 +1309,7 @@ def _run_automatic_slide_ai_review(
     slide_numbers: list[int] | set[int] | None = None,
     force: bool = False,
 ) -> str:
-    if not _auto_slide_ai_enabled():
+    if not force and not _auto_slide_ai_enabled():
         return ""
     if not ai_configured(PROJECT_ROOT):
         return ""
@@ -677,6 +1344,7 @@ def _run_automatic_slide_ai_review(
     state = _load_slide_ai_state(job_dir)
     ran = 0
     skipped = 0
+    deterministic_skipped = 0
     errors: list[str] = []
     for slide in slides:
         slide_target_ids = {
@@ -684,8 +1352,35 @@ def _run_automatic_slide_ai_review(
             for target in analysis.targets
             if target.slide_number == slide and target.object_type in {"chart", "table"}
         }
-        if _slide_ai_outputs_complete(state, slide, slide_target_ids):
+        existing_slide_state = ((state.get("slides") or {}).get(str(slide)) or {})
+        signature = _slide_ai_signature(
+            job_dir,
+            analysis,
+            slide,
+            slide_target_ids,
+            str(existing_slide_state.get("manual_context") or ""),
+        )
+        if _slide_ai_outputs_complete(state, slide, slide_target_ids, signature):
             skipped += 1
+            continue
+        should_review, review_reason = _slide_needs_ai_review(analysis, slide, slide_target_ids)
+        if not force and not should_review:
+            _mark_slide_ai_skipped(state, slide, signature, review_reason)
+            _save_slide_ai_state(job_dir, state)
+            deterministic_skipped += 1
+            _append_ai_log(
+                job_dir,
+                {
+                    "operation": "auto_slide_review",
+                    "status": "skipped",
+                    "sent_at": _now_iso(),
+                    "returned_at": _now_iso(),
+                    "duration_ms": 0,
+                    "slide": slide,
+                    "target_count": len(slide_target_ids),
+                    "reason": review_reason,
+                },
+            )
             continue
         try:
             sent_at = _now_iso()
@@ -725,10 +1420,16 @@ def _run_automatic_slide_ai_review(
             )
 
     if not ran and not errors:
-        return "IA automatica por slide ja estava atualizada." if skipped else ""
+        if skipped:
+            return "IA automatica por slide ja estava atualizada."
+        if deterministic_skipped:
+            return f"IA automatica pulou {deterministic_skipped} slide(s): mapeamento deterministico suficiente."
+        return ""
     notice = f"IA automatica revisou {ran} slide(s)."
     if skipped:
         notice += f" {skipped} slide(s) ja tinham matriz IA valida."
+    if deterministic_skipped:
+        notice += f" {deterministic_skipped} slide(s) ficaram no fluxo deterministico por alta confianca."
     if errors:
         notice += f" {len(errors)} slide(s) falharam: {'; '.join(errors[:3])}."
     _save_project_checkpoint(job_dir, status="in_progress")
@@ -736,20 +1437,180 @@ def _run_automatic_slide_ai_review(
 
 
 def _auto_slide_ai_enabled() -> bool:
-    value = os.getenv("AUTO_PPT_AUTO_SLIDE_AI", "1").strip().lower()
+    value = os.getenv("AUTO_PPT_AUTO_SLIDE_AI", "0").strip().lower()
     return value not in {"0", "false", "no", "off"}
 
 
-def _slide_ai_outputs_complete(state: dict, slide_number: int, target_ids: set[str]) -> bool:
+def _slide_ai_outputs_complete(state: dict, slide_number: int, target_ids: set[str], signature: str = "") -> bool:
     if not target_ids:
         return False
     slide_state = ((state.get("slides") or {}).get(str(slide_number)) or {})
+    if signature and slide_state.get("input_signature") != signature:
+        return False
     outputs = slide_state.get("target_outputs") or {}
     for target_id in target_ids:
         output = outputs.get(target_id)
         if not output or output.get("validation_errors"):
             return False
     return True
+
+
+def _slide_needs_ai_review(analysis: AnalysisResult, slide_number: int, target_ids: set[str]) -> tuple[bool, str]:
+    mode = os.getenv("AUTO_PPT_AUTO_SLIDE_AI_MODE", "strict").strip().lower()
+    if mode in {"all", "always"}:
+        return True, "modo configurado para revisar todos os slides com IA"
+    if mode in {"off", "none", "disabled"}:
+        return False, "modo configurado para nao acionar IA automatica"
+
+    plans_by_id = {plan.target_id: plan for plan in analysis.plans}
+    slide_targets = [target for target in analysis.targets if target.target_id in target_ids]
+    missing = [target.target_id for target in slide_targets if target.target_id not in plans_by_id]
+    if missing:
+        return True, f"{len(missing)} target(s) sem datasource automatico"
+
+    confidence_floor = _env_float("AUTO_PPT_AUTO_SLIDE_AI_CONFIDENCE_FLOOR", 0.82)
+    low_confidence = [
+        plan.target_id
+        for plan in analysis.plans
+        if plan.target_id in target_ids and float(plan.confidence or 0) < confidence_floor
+    ]
+    if low_confidence:
+        return True, f"{len(low_confidence)} target(s) abaixo de {confidence_floor:.0%} de confianca"
+
+    warned = [
+        plan.target_id
+        for plan in analysis.plans
+        if plan.target_id in target_ids and (plan.warnings or "atencao" in _norm_text(plan.reason))
+    ]
+    if warned:
+        return True, f"{len(warned)} target(s) com aviso ou candidato parecido"
+
+    if mode in {"duplicates", "aggressive"} and _slide_has_duplicate_contracts(analysis, target_ids):
+        return True, "slide tem targets com contrato PPT repetido; IA ajuda a diferenciar filtros/titulos"
+
+    return False, "todos os targets tem match deterministico de alta confianca"
+
+
+def _slide_has_duplicate_contracts(analysis: AnalysisResult, target_ids: set[str]) -> bool:
+    signatures: dict[str, int] = {}
+    for target in analysis.targets:
+        if target.target_id not in target_ids or target.object_type not in {"chart", "table"}:
+            continue
+        signature = json.dumps(
+            {
+                "type": target.object_type,
+                "orientation": target.expected_orientation,
+                "categories": [_norm_text(item) for item in target.expected_categories],
+                "series": [_norm_text(item) for item in target.expected_series],
+                "table_shape": [len(row) for row in target.table_cells[:8]],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        signatures[signature] = signatures.get(signature, 0) + 1
+    return any(count > 1 for count in signatures.values())
+
+
+def _mark_slide_ai_skipped(state: dict, slide_number: int, signature: str, reason: str) -> None:
+    slide_state = state.setdefault("slides", {}).setdefault(str(slide_number), {})
+    slide_state["input_signature"] = signature
+    slide_state["auto_review_skipped_at"] = _now_iso()
+    slide_state["auto_review_skip_reason"] = reason
+
+
+def _slide_ai_signature(
+    job_dir: Path,
+    analysis: AnalysisResult,
+    slide_number: int,
+    target_ids: set[str] | None = None,
+    manual_context: str = "",
+) -> str:
+    selected_target_ids = set(target_ids or [])
+    targets = [
+        target
+        for target in analysis.targets
+        if target.slide_number == slide_number
+        and target.object_type in {"chart", "table"}
+        and (not selected_target_ids or target.target_id in selected_target_ids)
+    ]
+    selected_entries, _warnings = _datasource_entries_for_slide(job_dir, slide_number)
+    manifests = _source_manifests_for_entries(analysis.sources, selected_entries)
+    datasource_hashes = _datasource_entry_hashes(job_dir / "datasources.zip", selected_entries)
+    payload = {
+        "version": "slide-ai-v3",
+        "slide": slide_number,
+        "manual_context": manual_context.strip(),
+        "payload_profile": _ai_payload_profile(),
+        "targets": [_target_ai_payload(target) for target in targets],
+        "xlsx_manifests": manifests,
+        "xlsx_hashes": datasource_hashes,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _datasource_entry_hashes(datasources_zip: Path, entries: list) -> dict[str, str]:
+    output: dict[str, str] = {}
+    with ZipFile(datasources_zip) as zf:
+        for entry in entries:
+            try:
+                output[entry.zip_path] = hashlib.sha256(zf.read(entry.zip_path)).hexdigest()
+            except KeyError:
+                output[entry.zip_path] = "missing"
+    return output
+
+
+def _xlsx_prompt_texts(xlsx_dumps: list) -> list[str]:
+    mode = _xlsx_dump_mode()
+    max_cells = max(_env_int("AUTO_PPT_AI_XLSX_MAX_CELLS_PER_SHEET", 800), 1)
+    return [dump.as_prompt_text(max_cells_per_sheet=max_cells, mode=mode) for dump in xlsx_dumps]
+
+
+def _xlsx_dump_mode() -> str:
+    mode = os.getenv("AUTO_PPT_AI_XLSX_DUMP_MODE", "compact").strip().lower()
+    if mode in {"full", "verbose", "debug", "raw"}:
+        return "verbose"
+    return "compact"
+
+
+def _ai_payload_profile() -> dict:
+    return {
+        "xlsx_dump_mode": _xlsx_dump_mode(),
+        "xlsx_max_cells_per_sheet": max(_env_int("AUTO_PPT_AI_XLSX_MAX_CELLS_PER_SHEET", 800), 1),
+        "image_max_side": max(_env_int("AUTO_PPT_AI_IMAGE_MAX_SIDE", 1400), 0),
+        "image_in_matrix": _env_bool("AUTO_PPT_AI_IMAGE_IN_MATRIX", False),
+    }
+
+
+def _ai_input_stats(xlsx_prompt_texts: list[str], xlsx_manifests: list[dict], target_payloads: list[dict]) -> dict:
+    return {
+        **_ai_payload_profile(),
+        "xlsx_dump_count": len(xlsx_prompt_texts),
+        "xlsx_dump_bytes_utf8": sum(len(text.encode("utf-8")) for text in xlsx_prompt_texts),
+        "xlsx_manifest_count": len(xlsx_manifests),
+        "xlsx_manifest_bytes_utf8": _json_size_bytes(xlsx_manifests),
+        "target_count": len(target_payloads),
+        "target_payload_bytes_utf8": _json_size_bytes(target_payloads),
+    }
+
+
+def _json_size_bytes(value) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _format_bytes(value) -> str:
+    try:
+        size = float(value or 0)
+    except (TypeError, ValueError):
+        size = 0.0
+    units = ["B", "KB", "MB", "GB"]
+    unit_index = 0
+    while size >= 1024 and unit_index < len(units) - 1:
+        size /= 1024
+        unit_index += 1
+    if unit_index == 0:
+        return f"{int(size)} {units[unit_index]}"
+    return f"{size:.1f} {units[unit_index]}"
 
 
 def _run_slide_ai_review(
@@ -792,31 +1653,44 @@ def _run_slide_ai_review(
         slide_state["render_warning"] = render.warning
     selected_entries, warnings = _datasource_entries_for_slide(job_dir, slide_number)
     xlsx_dumps = dump_xlsx_zip_entries(job_dir / "datasources.zip", selected_entries)
-    xlsx_prompt_texts = [dump.as_prompt_text() for dump in xlsx_dumps]
+    xlsx_prompt_texts = _xlsx_prompt_texts(xlsx_dumps)
+    xlsx_manifests = _source_manifests_for_entries(analysis.sources, selected_entries)
     target_payloads = [_target_ai_payload(target) for target in slide_targets]
+    signature = _slide_ai_signature(job_dir, analysis, slide_number, target_ids, combined_context)
+    slide_state["ai_input_stats"] = _ai_input_stats(xlsx_prompt_texts, xlsx_manifests, target_payloads)
 
-    understanding = suggest_slide_understanding(
-        SlideUnderstandingInput(
-            slide_number=slide_number,
-            slide_image_path=render.image_path,
-            visual_map=render.visual_map,
-            slide_text=_slide_text_for_targets(analysis.targets, slide_number),
-            targets=target_payloads,
-            xlsx_dumps=xlsx_prompt_texts,
-            manual_context=combined_context,
-        ),
-        root=PROJECT_ROOT,
-    )
+    understanding = slide_state.get("understanding") if slide_state.get("understanding_signature") == signature else None
+    if not understanding:
+        understanding = _call_with_job_debug(
+            job_dir,
+            suggest_slide_understanding,
+            SlideUnderstandingInput(
+                slide_number=slide_number,
+                slide_image_path=render.image_path,
+                visual_map=render.visual_map,
+                slide_text=_slide_text_for_targets(analysis.targets, slide_number),
+                targets=target_payloads,
+                xlsx_manifests=xlsx_manifests,
+                xlsx_dumps=xlsx_prompt_texts,
+                manual_context=combined_context,
+            ),
+            root=PROJECT_ROOT,
+        )
+        slide_state["understanding_signature"] = signature
     slide_state["understanding"] = understanding
     slide_state["warnings"] = warnings
+    slide_state["input_signature"] = signature
 
-    matrix_result = build_slide_matrices_with_ai(
+    matrix_result = _call_with_job_debug(
+        job_dir,
+        build_slide_matrices_with_ai,
         SlideMatrixBuildInput(
             slide_number=slide_number,
             slide_image_path=render.image_path,
             visual_map=render.visual_map,
             slide_understanding=understanding,
             targets=target_payloads,
+            xlsx_manifests=xlsx_manifests,
             xlsx_dumps=xlsx_prompt_texts,
             target_ids=[target.target_id for target in slide_targets],
             manual_context=combined_context,
@@ -863,6 +1737,8 @@ def _save_slide_ai_state(job_dir: Path, state: dict) -> None:
 
 
 def _slide_ai_target_outputs(job_dir: Path) -> dict[str, dict]:
+    if not _apply_slide_ai_outputs_enabled(job_dir):
+        return {}
     state = _load_slide_ai_state(job_dir)
     output: dict[str, dict] = {}
     for slide_state in (state.get("slides") or {}).values():
@@ -870,6 +1746,13 @@ def _slide_ai_target_outputs(job_dir: Path) -> dict[str, dict]:
             if not target_output.get("validation_errors"):
                 output[target_id] = target_output
     return output
+
+
+def _apply_slide_ai_outputs_enabled(job_dir: Path) -> bool:
+    metadata = _load_job_metadata(job_dir)
+    if bool(metadata.get("apply_slide_ai_outputs")):
+        return True
+    return _env_bool("AUTO_PPT_APPLY_SLIDE_AI_OUTPUTS", False)
 
 
 def _render_slide_for_job(job_dir: Path, targets: list, slide_number: int):
@@ -884,6 +1767,11 @@ def _render_slide_for_job(job_dir: Path, targets: list, slide_number: int):
 def _datasource_entries_for_slide(job_dir: Path, slide_number: int):
     entries = collect_datasource_entries(job_dir / "datasources.zip")
     return entries_for_slide(entries, slide_number)
+
+
+def _source_manifests_for_entries(sources: list, entries: list) -> list[dict]:
+    selected = {entry.zip_path for entry in entries}
+    return [xlsx_source_manifest(source) for source in sources if source.file_name in selected]
 
 
 def _slide_datasource_summary(job_dir: Path, slide_numbers: list[int]) -> dict[int, dict]:
@@ -990,6 +1878,77 @@ def _review_summary(cards_by_slide: dict[int, list[dict]]) -> dict:
         "manual": sum(1 for item in cards if item["manual_file"]),
         "ai": sum(1 for item in cards if item["ai"]),
     }
+
+
+def _process_steps(
+    analysis: AnalysisResult,
+    review_summary: dict,
+    mapping_status: dict,
+    ai_status: dict,
+    slide_ai_state: dict,
+) -> list[dict]:
+    slide_summary = _slide_ai_progress_summary(slide_ai_state)
+    unmapped = int(review_summary.get("unmapped") or 0)
+    questions = int(slide_summary.get("questions") or 0)
+    ai_done = int(slide_summary.get("with_outputs") or 0)
+    ai_skipped = int(slide_summary.get("skipped") or 0)
+    return [
+        {
+            "label": "Arquivos",
+            "state": "done",
+            "detail": "PPTX e ZIP recebidos.",
+        },
+        {
+            "label": "Escopo",
+            "state": "done",
+            "detail": f"{review_summary.get('slides', 0)} slide(s), {review_summary.get('targets', 0)} target(s).",
+        },
+        {
+            "label": "XLSX",
+            "state": "done",
+            "detail": f"{analysis.source_count} fonte(s) lidas com contexto semantico.",
+        },
+        {
+            "label": "Mapeamento",
+            "state": "warn" if unmapped else "done",
+            "detail": f"{review_summary.get('mapped', 0)} mapeado(s), {unmapped} pendente(s).",
+        },
+        {
+            "label": "IA seletiva",
+            "state": _process_ai_state(ai_status, ai_done, ai_skipped),
+            "detail": f"{ai_done} slide(s) com matriz IA, {ai_skipped} em modo deterministico.",
+        },
+        {
+            "label": "Revisao",
+            "state": "warn" if questions or unmapped else "active",
+            "detail": "Revise perguntas/pendencias antes do download." if questions or unmapped else "Pronto para aprovacao e download.",
+        },
+    ]
+
+
+def _slide_ai_progress_summary(slide_ai_state: dict) -> dict[str, int]:
+    slides = (slide_ai_state or {}).get("slides") or {}
+    with_outputs = 0
+    skipped = 0
+    questions = 0
+    for slide_state in slides.values():
+        if slide_state.get("target_outputs"):
+            with_outputs += 1
+        if slide_state.get("auto_review_skipped_at"):
+            skipped += 1
+        questions += len(slide_state.get("questions_for_user") or [])
+    return {"with_outputs": with_outputs, "skipped": skipped, "questions": questions}
+
+
+def _process_ai_state(ai_status: dict, ai_done: int, ai_skipped: int) -> str:
+    state = str((ai_status or {}).get("state") or "")
+    if state == "warn":
+        return "warn"
+    if ai_done or ai_skipped:
+        return "done"
+    if state in {"disabled", "cached"}:
+        return "waiting"
+    return "active"
 
 
 def _slide_summaries(cards_by_slide: dict[int, list[dict]]) -> list[dict]:
@@ -1222,13 +2181,14 @@ def _cards_by_slide(
     manual_ranges: dict[str, str],
     ai_diagnostics: dict[str, dict],
     slide_ai_state: dict | None = None,
+    apply_slide_ai_outputs: bool = False,
 ) -> dict[int, list[dict]]:
     preview_by_target = {item.target: item for item in analysis.preview}
     plan_by_target = {plan.target_id: plan for plan in analysis.plans}
     cards: dict[int, list[dict]] = defaultdict(list)
     for target in analysis.targets:
         slide_state = ((slide_ai_state or {}).get("slides") or {}).get(str(target.slide_number), {})
-        target_output = (slide_state.get("target_outputs") or {}).get(target.target_id, {})
+        target_output = (slide_state.get("target_outputs") or {}).get(target.target_id, {}) if apply_slide_ai_outputs else {}
         target_approval = (slide_state.get("target_approvals") or {}).get(target.target_id, {})
         item = preview_by_target.get(target.target_id)
         plan = plan_by_target.get(target.target_id)
@@ -1257,6 +2217,7 @@ def _cards_by_slide(
                 "manual_range": manual_ranges.get(target.target_id, ""),
                 "ppt_contract": _ppt_contract_for_target(target),
                 "source_detected": _source_detected_for_plan(plan) if plan else None,
+                "source_context": _source_context_for_plan(plan) if plan else {},
                 "ai": ai_diagnostics.get(target.target_id),
                 "slide_ai": target_output,
                 "approval": target_approval,
@@ -1269,6 +2230,7 @@ def _cards_by_slide(
                         target.object_type,
                         datasource,
                         target.nearby_text,
+                        " ".join((plan.datasource.metadata or {}).values()) if plan else "",
                         item.reason if item else "",
                     ]
                 ).lower(),
@@ -1311,7 +2273,7 @@ def _ai_diagnostics_for_job(
         sent_at = _now_iso()
         started = time.perf_counter()
         payload_summary = _diagnostic_payload_summary(plans_to_send)
-        diagnostics = suggest_transform_diagnostics(plans_to_send, root=PROJECT_ROOT)
+        diagnostics = _call_with_job_debug(job_dir, suggest_transform_diagnostics, plans_to_send, root=PROJECT_ROOT)
         duration_ms = round((time.perf_counter() - started) * 1000)
         payload.update(
             {
@@ -1388,22 +2350,45 @@ def _ai_source_matches_for_job(
 ) -> tuple[dict[str, dict], dict[str, str]]:
     if not ai_configured(PROJECT_ROOT):
         return {}, {"state": "disabled", "message": "IA indisponivel: configure OPENAI_API_KEY no .env."}
-    planned_targets = {plan.target_id for plan in analysis.plans}
-    unmatched = [
+
+    try:
+        metadata = _load_job_metadata(job_dir)
+    except Exception:
+        metadata = {}
+    manual_target_ids = set(_manual_source_names(job_dir))
+    plans_by_target = {plan.target_id: plan for plan in analysis.plans}
+    planned_targets = set(plans_by_target)
+    reviewable_targets = [
         target
         for target in analysis.targets
-        if target.object_type in {"chart", "table"} and target.target_id not in planned_targets
+        if target.object_type in {"chart", "table"} and target.target_id not in manual_target_ids
     ]
     if target_ids is not None:
-        unmatched = [target for target in unmatched if target.target_id in target_ids]
-    if not unmatched:
-        return {}, {"state": "ok", "message": "IA nao precisou criar novos matches de datasource."}
+        reviewable_targets = [target for target in reviewable_targets if target.target_id in target_ids]
+
+    unmatched = [target for target in reviewable_targets if target.target_id not in planned_targets]
+    confidence_floor = _ai_review_confidence_floor()
+    selected_mapping_template = bool(_selected_mapping_template(metadata))
+    low_confidence = []
+    if not selected_mapping_template:
+        low_confidence = [
+            target
+            for target in reviewable_targets
+            if target.target_id in plans_by_target
+            and float(plans_by_target[target.target_id].confidence or 0) < confidence_floor
+        ]
+    review_targets = _unique_targets([*unmatched, *low_confidence])
+    if not review_targets:
+        return {}, {
+            "state": "ok",
+            "message": f"IA nao precisou revisar matches de datasource abaixo de {confidence_floor:.0%}.",
+        }
 
     cache_path = job_dir / "ai_source_matches.json"
     payload: dict[str, dict] = {}
     if cache_path.exists():
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
-    missing_targets = [target for target in unmatched if target.target_id not in payload]
+    missing_targets = [target for target in review_targets if target.target_id not in payload]
     if not missing_targets:
         return payload, {"state": "cached", "message": f"Matches IA carregados do cache ({len(payload)} sugestao/oes)."}
     if not allow_ai:
@@ -1414,18 +2399,42 @@ def _ai_source_matches_for_job(
     batch_limit = _ai_source_match_batch_limit()
     targets_to_send = missing_targets[:batch_limit]
     remaining_count = max(len(missing_targets) - len(targets_to_send), 0)
+    low_confidence_ids = {target.target_id for target in low_confidence}
+    review_target_ids = {target.target_id for target in targets_to_send}
+    existing_plan_ids = planned_targets - review_target_ids
+    log_debug_event(
+        "source_match_review_targets",
+        {
+            "confidence_floor": confidence_floor,
+            "unmatched_targets": [target.target_id for target in unmatched],
+            "low_confidence_targets": [
+                {
+                    "target": target.target_id,
+                    "confidence": plans_by_target[target.target_id].confidence,
+                    "datasource": plans_by_target[target.target_id].datasource.file_name,
+                }
+                for target in low_confidence
+            ],
+            "targets_to_send": [target.target_id for target in targets_to_send],
+            "remaining_count": remaining_count,
+            "selected_mapping_template": selected_mapping_template,
+        },
+    )
     try:
         sent_at = _now_iso()
         started = time.perf_counter()
         payload_summary = _match_payload_summary(targets_to_send, analysis.sources)
-        suggestions = suggest_source_matches_with_ai(
+        suggestions = _call_with_job_debug(
+            job_dir,
+            suggest_source_matches_with_ai,
             targets_to_send,
             analysis.sources,
-            existing_plan_ids=planned_targets,
+            existing_plan_ids=existing_plan_ids,
             root=PROJECT_ROOT,
         )
         duration_ms = round((time.perf_counter() - started) * 1000)
         for target in targets_to_send:
+            previous_plan = plans_by_target.get(target.target_id)
             payload.setdefault(
                 target.target_id,
                 {
@@ -1433,6 +2442,10 @@ def _ai_source_matches_for_job(
                     "confidence": 0,
                     "reason": "IA nao encontrou match confiavel para este target.",
                     "status": "no_match",
+                    "replace_existing": target.target_id in low_confidence_ids,
+                    "review_reason": "low_confidence" if target.target_id in low_confidence_ids else "unmatched",
+                    "previous_datasource": previous_plan.datasource.file_name if previous_plan else "",
+                    "previous_confidence": previous_plan.confidence if previous_plan else None,
                 },
             )
         payload.update(
@@ -1441,7 +2454,16 @@ def _ai_source_matches_for_job(
                     "datasource": item.datasource,
                     "confidence": item.confidence,
                     "reason": item.reason,
+                    "recipe_suggestion": item.recipe_suggestion,
                     "status": "matched",
+                    "replace_existing": item.target in low_confidence_ids,
+                    "review_reason": "low_confidence" if item.target in low_confidence_ids else "unmatched",
+                    "previous_datasource": (
+                        plans_by_target[item.target].datasource.file_name if item.target in plans_by_target else ""
+                    ),
+                    "previous_confidence": (
+                        plans_by_target[item.target].confidence if item.target in plans_by_target else None
+                    ),
                 }
                 for item in suggestions
             }
@@ -1467,7 +2489,7 @@ def _ai_source_matches_for_job(
         if suggestions:
             return payload, {
                 "state": "ok",
-                "message": f"IA criou {len(suggestions)} match(es) novo(s) de datasource neste lote de {len(targets_to_send)}.{suffix}",
+                "message": f"IA revisou {len(targets_to_send)} match(es) de datasource e retornou {len(suggestions)} sugestao/oes confiaveis.{suffix}",
             }
         return payload, {
             "state": "warn",
@@ -1637,6 +2659,26 @@ def _clear_ai_cache(
         if target_id in payload:
             payload.pop(target_id, None)
             cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _clear_slide_ai_state(job_dir, target_id=target_id)
+
+
+def _clear_slide_ai_state(job_dir: Path, target_id: str | None = None) -> None:
+    state_path = job_dir / "slide_ai_state.json"
+    if not state_path.exists():
+        return
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if target_id is None:
+        state_path.unlink()
+        return
+    changed = False
+    for slide_state in (state.get("slides") or {}).values():
+        outputs = slide_state.get("target_outputs") or {}
+        if target_id in outputs:
+            outputs.pop(target_id, None)
+            slide_state.pop("input_signature", None)
+            changed = True
+    if changed:
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _ppt_contract_for_target(target) -> dict:
@@ -1666,8 +2708,18 @@ def _ppt_contract_for_target(target) -> dict:
 def _source_detected_for_plan(plan) -> dict:
     return {
         "orientation": plan.datasource.orientation,
+        "context": _source_context_for_plan(plan),
         "headers": _display_row(plan.datasource.preview_rows[0]) if plan.datasource.preview_rows else [],
         "rows": [_display_row(row) for row in plan.datasource.preview_rows[1:9]] if plan.datasource.preview_rows else [],
+    }
+
+
+def _source_context_for_plan(plan) -> dict:
+    metadata = plan.datasource.metadata or {}
+    return {
+        "table_title": metadata.get("table_title", ""),
+        "row_group_label": metadata.get("row_group_label", ""),
+        "context_text": metadata.get("context_text", ""),
     }
 
 
@@ -2069,6 +3121,22 @@ def _ai_source_match_batch_limit() -> int:
     return max(_env_int("AUTO_PPT_AI_SOURCE_MATCH_BATCH_TARGETS", default_limit), 1)
 
 
+def _ai_review_confidence_floor() -> float:
+    return min(max(_env_float("AUTO_PPT_AI_REVIEW_CONFIDENCE_FLOOR", 0.80), 0.0), 1.0)
+
+
+def _auto_source_match_review_enabled() -> bool:
+    return _env_bool("AUTO_PPT_AI_AUTO_SOURCE_REVIEW", True)
+
+
+def _source_match_ai_enabled(metadata: dict) -> bool:
+    if bool(metadata.get("use_ai")):
+        return True
+    if metadata.get("mapping_template"):
+        return False
+    return bool(metadata.get("auto_source_review", _auto_source_match_review_enabled()))
+
+
 def _ai_diagnostic_batch_limit() -> int:
     return max(_env_int("AUTO_PPT_AI_DIAGNOSTIC_BATCH_TARGETS", 10), 1)
 
@@ -2081,6 +3149,38 @@ def _env_int(name: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on", "sim"}
+
+
+def _norm_text(value) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _unique_targets(targets: list) -> list:
+    seen = set()
+    output = []
+    for target in targets:
+        if target.target_id in seen:
+            continue
+        seen.add(target.target_id)
+        output.append(target)
+    return output
 
 
 def _projects_by_squad() -> dict[str, list]:

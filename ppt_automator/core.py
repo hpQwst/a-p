@@ -5,7 +5,7 @@ from difflib import SequenceMatcher
 from io import BytesIO
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZipFile
 import posixpath
 import re
 import shutil
@@ -16,6 +16,9 @@ import xml.etree.ElementTree as ET
 
 import openpyxl
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
+
+from .embedded_workbook_writer import update_embedded_workbook
+from .openxml_zip import replace_zip_parts_preserving_structure
 
 
 PML_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -518,12 +521,14 @@ def generate_pptx(pptx_file: InputFile, jobs: Iterable[ChartJob]) -> bytes:
         for job in jobs:
             if not job.ok or job.target is None:
                 continue
-            replacements[job.target.embedded_workbook_path] = _updated_workbook_bytes(
-                zf,
-                job.target.embedded_workbook_path,
-                job.headers,
-                job.rows,
-                job.values,
+            workbook_matrix = [
+                [" ", *job.headers],
+                *[[label, *row_values] for label, row_values in zip(job.rows, job.values)],
+            ]
+            replacements[job.target.embedded_workbook_path] = update_embedded_workbook(
+                zf.read(job.target.embedded_workbook_path),
+                job.target.sheet_name,
+                workbook_matrix,
             )
             replacements[job.target.chart_path] = _updated_chart_xml_bytes(
                 zf,
@@ -533,12 +538,7 @@ def generate_pptx(pptx_file: InputFile, jobs: Iterable[ChartJob]) -> bytes:
                 job.values,
             )
 
-        output = BytesIO()
-        with ZipFile(output, "w", ZIP_DEFLATED) as zout:
-            for info in zf.infolist():
-                data = replacements.get(info.filename)
-                zout.writestr(info, data if data is not None else zf.read(info.filename))
-    return output.getvalue()
+    return replace_zip_parts_preserving_structure(ppt_bytes, replacements)
 
 
 def _is_formula_value(value: Any) -> bool:
@@ -1334,38 +1334,6 @@ def _normalize_chart_value(value: Any) -> Any:
     if -1 <= number <= 1:
         return round(number * 100, 1)
     return round(number, 1)
-
-
-def _updated_workbook_bytes(
-    zf: ZipFile,
-    workbook_path: str,
-    headers: list[str],
-    rows: list[str],
-    values: list[list[Any]],
-) -> bytes:
-    wb = openpyxl.load_workbook(BytesIO(zf.read(workbook_path)))
-    ws = wb.worksheets[0]
-
-    max_row = max(ws.max_row, len(rows) + 1)
-    max_col = max(ws.max_column, len(headers) + 1)
-    for row in ws.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col):
-        for cell in row:
-            cell.value = None
-
-    ws.cell(row=1, column=1).value = None
-    for col_idx, header in enumerate(headers, 2):
-        ws.cell(row=1, column=col_idx).value = header
-    for row_idx, label in enumerate(rows, 2):
-        ws.cell(row=row_idx, column=1).value = label
-        for col_idx, value in enumerate(values[row_idx - 2], 2):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            cell.value = value
-            if isinstance(value, (int, float)):
-                cell.number_format = "0.0"
-
-    out = BytesIO()
-    wb.save(out)
-    return out.getvalue()
 
 
 def _updated_chart_xml_bytes(

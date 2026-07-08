@@ -49,12 +49,39 @@ class XlsxWorkbookDump:
     file_name: str
     sheets: list[XlsxSheetDump]
 
-    def as_prompt_text(self, max_cells_per_sheet: int = 800) -> str:
+    def as_prompt_text(self, max_cells_per_sheet: int = 800, mode: str = "compact") -> str:
+        if mode.strip().lower() in {"full", "verbose", "debug", "raw"}:
+            return self.as_verbose_prompt_text(max_cells_per_sheet=max_cells_per_sheet)
+        return self.as_compact_prompt_text(max_cells_per_sheet=max_cells_per_sheet)
+
+    def as_verbose_prompt_text(self, max_cells_per_sheet: int = 800) -> str:
         chunks = [f"WORKBOOK {self.file_name}"]
         for sheet in self.sheets:
             chunks.append(f"SHEET {sheet.sheet} used_range={sheet.used_range} merged={sheet.merged_cells}")
             for cell in sheet.cells[:max_cells_per_sheet]:
                 chunks.append(json.dumps(cell.__dict__, ensure_ascii=False))
+            if len(sheet.cells) > max_cells_per_sheet:
+                chunks.append(f"... {len(sheet.cells) - max_cells_per_sheet} cells omitted")
+        return "\n".join(chunks)
+
+    def as_compact_prompt_text(self, max_cells_per_sheet: int = 800) -> str:
+        chunks = [f"WORKBOOK {self.file_name}"]
+        for sheet in self.sheets:
+            chunks.append(
+                f"SHEET {sheet.sheet} used_range={sheet.used_range} "
+                f"merged={','.join(sheet.merged_cells[:20])}"
+            )
+            row_cells: dict[int, list[XlsxCellDump]] = {}
+            emitted = 0
+            for cell in sorted(sheet.cells, key=lambda item: _cell_sort_key(item.cell)):
+                if emitted >= max_cells_per_sheet:
+                    break
+                row, _col = _cell_sort_key(cell.cell)
+                row_cells.setdefault(row, []).append(cell)
+                emitted += 1
+            for row in sorted(row_cells):
+                compact_cells = [_compact_cell(cell) for cell in row_cells[row]]
+                chunks.append(f"ROW {row}: {json.dumps(compact_cells, ensure_ascii=False, separators=(',', ':'))}")
             if len(sheet.cells) > max_cells_per_sheet:
                 chunks.append(f"... {len(sheet.cells) - max_cells_per_sheet} cells omitted")
         return "\n".join(chunks)
@@ -180,6 +207,34 @@ def _shared_strings(workbook_bytes: bytes) -> list[str]:
             return []
         root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
     return ["".join(_node_text(node) for node in si.findall(".//s:t", NS)) for si in root.findall("./s:si", NS)]
+
+
+def _compact_cell(cell: XlsxCellDump) -> dict[str, str]:
+    output = {
+        "c": cell.cell,
+        "t": cell.type,
+        "v": cell.raw or cell.display,
+    }
+    if cell.formula:
+        output["f"] = cell.formula
+    if cell.number_format and cell.number_format != "General":
+        output["fmt"] = cell.number_format
+    if cell.merged_range:
+        output["m"] = cell.merged_range
+    if cell.comment:
+        output["comment"] = cell.comment
+    return output
+
+
+def _cell_sort_key(cell_ref: str) -> tuple[int, int]:
+    match = re.match(r"([A-Z]+)(\d+)", cell_ref.upper())
+    if not match:
+        return (10**9, 10**9)
+    col_letters, row_text = match.groups()
+    col = 0
+    for char in col_letters:
+        col = col * 26 + (ord(char) - ord("A") + 1)
+    return (int(row_text), col)
 
 
 def _merged_lookup(ws: Any) -> dict[str, str]:

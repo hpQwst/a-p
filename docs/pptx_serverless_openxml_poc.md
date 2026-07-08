@@ -245,6 +245,14 @@ Este caminho remove a dependencia de:
 
 Portanto, e adequado para Fargate/Linux.
 
+Para o preview visual/IA slide-first, o sistema tambem precisa renderizar o slide real com os IDs desenhados. Em Windows local, o renderer pode usar PowerPoint COM quando existir. Em Fargate/Linux, o caminho oficial e:
+
+1. LibreOffice Impress headless converte o PPTX para PDF.
+2. PyMuPDF renderiza a pagina do slide como PNG.
+3. O sistema desenha as caixas/labels dos targets sobre a imagem.
+
+Esse render e usado apenas para visualizacao e contexto da IA. A geracao final do PPTX editavel continua sendo feita pelo writer OpenXML preservador, nao pelo LibreOffice.
+
 Fargate e melhor que Lambda para este caso se:
 
 - os PPTX forem grandes;
@@ -263,4 +271,5 @@ Lambda pode ser possivel para jobs pequenos, mas Fargate da mais controle de CPU
 - Cobrir `numFmt` visual (`0.0`, `0.0%`, etc.).
 - Cobrir tabelas DrawingML `a:tbl`.
 - Garantir que o writer preservador de ZIP seja usado no caminho final.
+- Garantir que o Docker tenha LibreOffice Impress e PyMuPDF para renderizar slides no preview/IA.
 - Testar abertura no PowerPoint: visual atualizado antes de "Editar Dados" e workbook editavel depois.

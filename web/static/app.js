@@ -4,13 +4,58 @@
   function showProgress(message) {
     var overlay = document.getElementById("progress-overlay");
     var label = document.getElementById("progress-message");
+    var steps = document.getElementById("progress-steps");
     if (!overlay) {
       return;
     }
     if (label) {
       label.textContent = message || "Processando...";
     }
+    if (steps) {
+      renderProgressSteps(steps, progressStepsForMessage(message || ""));
+    }
     overlay.hidden = false;
+  }
+
+  function progressStepsForMessage(message) {
+    var text = (message || "").toLowerCase();
+    if (text.indexOf("preview") !== -1 || text.indexOf("analisando") !== -1) {
+      return ["Lendo PPTX e ZIP", "Extraindo contexto dos XLSX", "Mapeando targets", "Executando IA seletiva", "Montando preview"];
+    }
+    if (text.indexOf("ppt") !== -1 || text.indexOf("download") !== -1 || text.indexOf("gerando") !== -1) {
+      return ["Validando revisoes", "Aplicando matrizes", "Atualizando graficos/tabelas", "Gerando arquivo"];
+    }
+    if (text.indexOf("ia") !== -1) {
+      return ["Preparando contexto", "Enviando somente pendencias", "Validando resposta", "Atualizando preview"];
+    }
+    return ["Preparando dados", "Processando", "Atualizando tela"];
+  }
+
+  function renderProgressSteps(container, labels) {
+    container.innerHTML = "";
+    labels.forEach(function (label, index) {
+      var item = document.createElement("li");
+      item.textContent = label;
+      if (index === 0) {
+        item.className = "active";
+      }
+      container.appendChild(item);
+    });
+    var activeIndex = 0;
+    window.clearInterval(container._progressTimer);
+    container._progressTimer = window.setInterval(function () {
+      var items = container.querySelectorAll("li");
+      if (!items.length) {
+        return;
+      }
+      items[activeIndex].classList.remove("active");
+      items[activeIndex].classList.add("done");
+      activeIndex = Math.min(activeIndex + 1, items.length - 1);
+      items[activeIndex].classList.add("active");
+      if (activeIndex === items.length - 1) {
+        window.clearInterval(container._progressTimer);
+      }
+    }, 1800);
   }
 
   function activeSquad() {
@@ -77,6 +122,88 @@
     document.querySelectorAll("[data-slide-section], [data-target-card]").forEach(function (detail) {
       detail.open = open;
     });
+  }
+
+  function startPreviewPolling() {
+    var shell = document.querySelector("[data-preview-processing='1']");
+    if (!shell) {
+      return;
+    }
+    var url = shell.getAttribute("data-preview-status-url");
+    if (!url) {
+      return;
+    }
+    var previewUrl = shell.getAttribute("data-preview-url") || url.replace(/\/processing-status$/, "/preview");
+    var attempts = 0;
+    var timer = window.setInterval(function () {
+      attempts += 1;
+      fetch(url, { cache: "no-store" })
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("Falha ao consultar status.");
+          }
+          return response.json();
+        })
+        .then(function (state) {
+          updateProcessingSlides(state);
+          if (state.status === "complete" || state.status === "error" || state.active === false) {
+            window.clearInterval(timer);
+            window.location.replace(state.preview_url || previewUrl);
+          }
+        })
+        .catch(function () {
+          if (attempts > 8) {
+            window.clearInterval(timer);
+          }
+        });
+    }, 1800);
+  }
+
+  function updateProcessingSlides(state) {
+    var slides = state && state.slides ? state.slides : {};
+    Object.keys(slides).forEach(function (key) {
+      var item = slides[key] || {};
+      var slide = item.slide || key;
+      var section = document.querySelector("[data-processing-slide='" + slide + "']");
+      if (!section) {
+        return;
+      }
+      setText(section, "[data-processing-slide-count]", (item.target_count || "...") + " target(s)");
+      setText(section, "[data-processing-slide-status]", item.status || "");
+      setText(section, "[data-processing-slide-stage]", stageLabel(item.stage || item.status || ""));
+      setText(section, "[data-processing-slide-message]", item.message || "");
+      setText(section, "[data-processing-slide-mapped]", item.mapped_count || 0);
+      setText(section, "[data-processing-slide-targets]", item.target_count || 0);
+    });
+  }
+
+  function setText(root, selector, value) {
+    var el = root.querySelector(selector);
+    if (el) {
+      el.textContent = value;
+    }
+  }
+
+  function stageLabel(stage) {
+    if (stage === "queued") {
+      return "Na fila";
+    }
+    if (stage === "analysis") {
+      return "Analisando PPT e XLSX";
+    }
+    if (stage === "analysis_done") {
+      return "Mapeamento pronto";
+    }
+    if (stage === "ai_match") {
+      return "IA enxuta";
+    }
+    if (stage === "complete" || stage === "done") {
+      return "Cards prontos";
+    }
+    if (stage === "error") {
+      return "Erro no processamento";
+    }
+    return "Processando";
   }
 
   function parseSlideScope(value) {
@@ -273,4 +400,5 @@
 
   syncMappingTemplateOptions();
   applyPreviewFilters();
+  startPreviewPolling();
 })();

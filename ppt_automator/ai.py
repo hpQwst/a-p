@@ -4,8 +4,10 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import time
 from typing import Any, Iterable, Sequence
 
+from .ai_debug import log_ai_request, log_ai_response, log_debug_event
 from .core import ChartJob, SourceTable
 
 
@@ -137,10 +139,10 @@ def suggest_datasource_with_ai(
         "required": ["graph_id", "datasource", "confidence", "reason"],
     }
 
-    response = client.responses.create(
-        model=model,
-        store=False,
-        input=[
+    request_kwargs = {
+        "model": model,
+        "store": False,
+        "input": [
             {
                 "role": "system",
                 "content": (
@@ -150,7 +152,7 @@ def suggest_datasource_with_ai(
             },
             {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)},
         ],
-        text={
+        "text": {
             "format": {
                 "type": "json_schema",
                 "name": "ppt_datasource_match",
@@ -158,8 +160,23 @@ def suggest_datasource_with_ai(
                 "strict": True,
             }
         },
-    )
+    }
+    log_ai_request("legacy_datasource_match", request_kwargs)
+    started = time.perf_counter()
+    try:
+        response = client.responses.create(**request_kwargs)
+    except Exception as exc:
+        log_debug_event(
+            "ai_error",
+            {
+                "operation": "legacy_datasource_match",
+                "elapsed_ms": round((time.perf_counter() - started) * 1000),
+                "error": repr(exc),
+            },
+        )
+        raise
     text = getattr(response, "output_text", "") or _response_text_fallback(response)
+    log_ai_response("legacy_datasource_match", text, round((time.perf_counter() - started) * 1000), response)
     data = json.loads(text)
     return AiMatchSuggestion(
         graph_id=str(data.get("graph_id") or job.graph_id),
@@ -241,10 +258,10 @@ def suggest_datasources_with_ai(
         "required": ["suggestions"],
     }
 
-    response = client.responses.create(
-        model=model,
-        store=False,
-        input=[
+    request_kwargs = {
+        "model": model,
+        "store": False,
+        "input": [
             {
                 "role": "system",
                 "content": (
@@ -254,7 +271,7 @@ def suggest_datasources_with_ai(
             },
             {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)},
         ],
-        text={
+        "text": {
             "format": {
                 "type": "json_schema",
                 "name": "ppt_datasource_batch_match",
@@ -262,8 +279,23 @@ def suggest_datasources_with_ai(
                 "strict": True,
             }
         },
-    )
+    }
+    log_ai_request("legacy_datasource_suggestions", request_kwargs)
+    started = time.perf_counter()
+    try:
+        response = client.responses.create(**request_kwargs)
+    except Exception as exc:
+        log_debug_event(
+            "ai_error",
+            {
+                "operation": "legacy_datasource_suggestions",
+                "elapsed_ms": round((time.perf_counter() - started) * 1000),
+                "error": repr(exc),
+            },
+        )
+        raise
     text = getattr(response, "output_text", "") or _response_text_fallback(response)
+    log_ai_response("legacy_datasource_suggestions", text, round((time.perf_counter() - started) * 1000), response)
     data = json.loads(text)
     suggestions: list[AiMatchSuggestion] = []
     valid_sources = {str(source["file_name"]) for source in sources_payload}

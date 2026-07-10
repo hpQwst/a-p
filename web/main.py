@@ -422,7 +422,9 @@ async def review_job_with_ai(request: Request, job_id: str) -> HTMLResponse:
         metadata["use_ai"] = False
         _save_job_metadata(job_dir, metadata)
         _clear_render_cache(job_dir)
-        notice = await run_in_threadpool(_run_automatic_slide_ai_review, job_dir, force=True)
+        selected_slide = _preview_slide_from_request(request)
+        slide_scope = [selected_slide] if selected_slide else None
+        notice = await run_in_threadpool(_run_automatic_slide_ai_review, job_dir, slide_numbers=slide_scope, force=True)
         _save_project_checkpoint(job_dir, status="in_progress")
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc))
@@ -1701,7 +1703,7 @@ def _slide_ai_max_slides_per_run() -> int:
     # em Revisar com IA num deck de 100+ slides gere centenas de chamadas numa
     # unica execucao; os slides prioritarios rodam primeiro e o restante fica
     # para a proxima rodada.
-    return max(_env_int("AUTO_PPT_SLIDE_AI_MAX_SLIDES_PER_RUN", 12), 1)
+    return max(_env_int("AUTO_PPT_SLIDE_AI_MAX_SLIDES_PER_RUN", 1), 1)
 
 
 def _slide_ai_outputs_complete(state: dict, slide_number: int, target_ids: set[str], signature: str = "") -> bool:

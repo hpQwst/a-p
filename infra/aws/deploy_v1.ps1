@@ -4,11 +4,17 @@ param(
     [Parameter(Mandatory = $true)][string]$PublicSubnetIds,
     [Parameter(Mandatory = $true)][string]$CertificateArn,
     [Parameter(Mandatory = $true)][string]$AllowedCidr,
-    [string]$StackName = "qwst-auto-ppt-v1",
-    [string]$AppName = "qwst-auto-ppt",
+    [string]$StackName = "squad5-nat-auto-ppt-v1",
+    [string]$AppName = "squad5-nat-auto-ppt",
+    [string]$NameTagValue = "squad5-nat",
     [string]$Region = "us-east-1",
     [string]$OpenAISecretArn = "",
-    [string]$ExistingBucketName = ""
+    [string]$OpenAISecretJsonKey = "",
+    [string]$ExistingBucketName = "",
+    [string]$WebCpu = "512",
+    [string]$WebMemory = "2048",
+    [string]$WorkerCpu = "1024",
+    [string]$WorkerMemory = "3072"
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,13 +35,19 @@ if ($LASTEXITCODE -ne 0) { throw "Template CloudFormation invalido." }
 
 $Parameters = @(
     "AppName=$AppName",
+    "NameTagValue=$NameTagValue",
     "ImageUri=$ImageUri",
     "VpcId=$VpcId",
     "PublicSubnetIds=$PublicSubnetIds",
     "CertificateArn=$CertificateArn",
     "AllowedCidr=$AllowedCidr",
     "OpenAISecretArn=$OpenAISecretArn",
-    "ExistingBucketName=$ExistingBucketName"
+    "OpenAISecretJsonKey=$OpenAISecretJsonKey",
+    "ExistingBucketName=$ExistingBucketName",
+    "WebCpu=$WebCpu",
+    "WebMemory=$WebMemory",
+    "WorkerCpu=$WorkerCpu",
+    "WorkerMemory=$WorkerMemory"
 )
 
 aws cloudformation deploy `
@@ -44,7 +56,7 @@ aws cloudformation deploy `
     --capabilities CAPABILITY_NAMED_IAM `
     --parameter-overrides $Parameters `
     --no-fail-on-empty-changeset `
-    --tags "Name=$AppName" "Environment=v1" `
+    --tags "Name=$NameTagValue" "App=$AppName" "Environment=v1" `
     --region $Region
 if ($LASTEXITCODE -ne 0) { throw "Falha no deploy do stack $StackName." }
 

@@ -4,8 +4,12 @@ Description: QWST Auto PPT v1 - HTTPS web service with on-demand ECS Fargate wor
 Parameters:
   AppName:
     Type: String
-    Default: qwst-auto-ppt
+    Default: squad5-nat-auto-ppt
     AllowedPattern: "[a-z][a-z0-9-]{2,31}"
+  NameTagValue:
+    Type: String
+    Default: squad5-nat
+    AllowedPattern: "[a-z0-9-]{3,32}"
   ImageUri:
     Type: String
     Description: Immutable ECR image URI, preferably using a sha256 digest.
@@ -24,6 +28,9 @@ Parameters:
   OpenAISecretArn:
     Type: String
     Default: ""
+  OpenAISecretJsonKey:
+    Type: String
+    Default: ""
   ExistingBucketName:
     Type: String
     Default: ""
@@ -36,11 +43,19 @@ Parameters:
     Default: 1
     AllowedValues: [1]
     Description: V1 keeps one server-rendered web task; heavy preview and generation run in separate on-demand tasks.
-  Cpu:
+  WebCpu:
+    Type: String
+    Default: "512"
+    AllowedValues: ["256", "512", "1024", "2048"]
+  WebMemory:
+    Type: String
+    Default: "2048"
+    AllowedValues: ["512", "1024", "2048", "3072", "4096", "5120", "6144", "8192"]
+  WorkerCpu:
     Type: String
     Default: "1024"
     AllowedValues: ["512", "1024", "2048"]
-  Memory:
+  WorkerMemory:
     Type: String
     Default: "3072"
     AllowedValues: ["2048", "3072", "4096", "5120", "6144", "8192"]
@@ -57,6 +72,7 @@ Parameters:
 Conditions:
   CreateStorageBucket: !Equals [!Ref ExistingBucketName, ""]
   HasOpenAISecret: !Not [!Equals [!Ref OpenAISecretArn, ""]]
+  HasOpenAISecretJsonKey: !Not [!Equals [!Ref OpenAISecretJsonKey, ""]]
 
 Resources:
   StorageBucket:
@@ -92,6 +108,8 @@ Resources:
               NoncurrentDays: 30
       Tags:
         - Key: Name
+          Value: !Ref NameTagValue
+        - Key: App
           Value: !Ref AppName
 
   LogGroup:
@@ -101,6 +119,8 @@ Resources:
       RetentionInDays: !Ref LogRetentionDays
       Tags:
         - Key: Name
+          Value: !Ref NameTagValue
+        - Key: App
           Value: !Ref AppName
 
   Cluster:
@@ -112,6 +132,8 @@ Resources:
           Value: disabled
       Tags:
         - Key: Name
+          Value: !Ref NameTagValue
+        - Key: App
           Value: !Ref AppName
 
   ExecutionRole:
@@ -140,6 +162,8 @@ Resources:
           - !Ref AWS::NoValue
       Tags:
         - Key: Name
+          Value: !Ref NameTagValue
+        - Key: App
           Value: !Ref AppName
 
   TaskRole:
@@ -191,6 +215,8 @@ Resources:
                   - BucketName: !If [CreateStorageBucket, !Ref StorageBucket, !Ref ExistingBucketName]
       Tags:
         - Key: Name
+          Value: !Ref NameTagValue
+        - Key: App
           Value: !Ref AppName
 
   AlbSecurityGroup:
@@ -212,7 +238,9 @@ Resources:
           CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
-          Value: !Sub ${AppName}-alb
+          Value: !Ref NameTagValue
+        - Key: App
+          Value: !Ref AppName
 
   TaskSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -229,7 +257,9 @@ Resources:
           CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
-          Value: !Sub ${AppName}-task
+          Value: !Ref NameTagValue
+        - Key: App
+          Value: !Ref AppName
 
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
@@ -245,6 +275,8 @@ Resources:
           Value: "300"
       Tags:
         - Key: Name
+          Value: !Ref NameTagValue
+        - Key: App
           Value: !Ref AppName
 
   TargetGroup:
@@ -268,6 +300,8 @@ Resources:
           Value: "60"
       Tags:
         - Key: Name
+          Value: !Ref NameTagValue
+        - Key: App
           Value: !Ref AppName
 
   HttpListener:
@@ -302,8 +336,8 @@ Resources:
       Family: !Ref AppName
       RequiresCompatibilities: [FARGATE]
       NetworkMode: awsvpc
-      Cpu: !Ref Cpu
-      Memory: !Ref Memory
+      Cpu: !Ref WebCpu
+      Memory: !Ref WebMemory
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
       TaskRoleArn: !GetAtt TaskRole.Arn
       EphemeralStorage:
@@ -338,7 +372,11 @@ Resources:
             - Name: AUTO_PPT_ECS_SECURITY_GROUPS
               Value: !Ref TaskSecurityGroup
             - Name: AUTO_PPT_PREVIEW_WORKERS
-              Value: "2"
+              Value: "1"
+            - Name: AUTO_PPT_AI_AUTO_SOURCE_REVIEW
+              Value: "0"
+            - Name: AUTO_PPT_SLIDE_AI_MAX_SLIDES_PER_RUN
+              Value: "1"
             - Name: AUTO_PPT_MAX_UPLOAD_MB
               Value: "250"
             - Name: AUTO_PPT_MAX_REQUEST_MB
@@ -348,7 +386,10 @@ Resources:
           Secrets: !If
             - HasOpenAISecret
             - - Name: OPENAI_API_KEY
-                ValueFrom: !Ref OpenAISecretArn
+                ValueFrom: !If
+                  - HasOpenAISecretJsonKey
+                  - !Sub "${OpenAISecretArn}:${OpenAISecretJsonKey}::"
+                  - !Ref OpenAISecretArn
             - !Ref AWS::NoValue
           LogConfiguration:
             LogDriver: awslogs
@@ -367,6 +408,8 @@ Resources:
           StopTimeout: 120
       Tags:
         - Key: Name
+          Value: !Ref NameTagValue
+        - Key: App
           Value: !Ref AppName
 
   WorkerTaskDefinition:
@@ -375,8 +418,8 @@ Resources:
       Family: !Sub ${AppName}-worker
       RequiresCompatibilities: [FARGATE]
       NetworkMode: awsvpc
-      Cpu: !Ref Cpu
-      Memory: !Ref Memory
+      Cpu: !Ref WorkerCpu
+      Memory: !Ref WorkerMemory
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
       TaskRoleArn: !GetAtt TaskRole.Arn
       EphemeralStorage:
@@ -399,12 +442,19 @@ Resources:
               Value: /tmp/auto-ppt-jobs
             - Name: AUTO_PPT_EXECUTION_BACKEND
               Value: fargate
+            - Name: AUTO_PPT_AI_AUTO_SOURCE_REVIEW
+              Value: "0"
+            - Name: AUTO_PPT_SLIDE_AI_MAX_SLIDES_PER_RUN
+              Value: "1"
             - Name: OPENAI_MODEL
               Value: !Ref OpenAIModel
           Secrets: !If
             - HasOpenAISecret
             - - Name: OPENAI_API_KEY
-                ValueFrom: !Ref OpenAISecretArn
+                ValueFrom: !If
+                  - HasOpenAISecretJsonKey
+                  - !Sub "${OpenAISecretArn}:${OpenAISecretJsonKey}::"
+                  - !Ref OpenAISecretArn
             - !Ref AWS::NoValue
           LogConfiguration:
             LogDriver: awslogs
@@ -415,7 +465,9 @@ Resources:
           StopTimeout: 120
       Tags:
         - Key: Name
-          Value: !Sub ${AppName}-worker
+          Value: !Ref NameTagValue
+        - Key: App
+          Value: !Ref AppName
 
   Service:
     Type: AWS::ECS::Service
@@ -447,6 +499,8 @@ Resources:
       PropagateTags: SERVICE
       Tags:
         - Key: Name
+          Value: !Ref NameTagValue
+        - Key: App
           Value: !Ref AppName
 
 Outputs:

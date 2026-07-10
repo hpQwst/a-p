@@ -4,7 +4,17 @@
 
 `v1-fargate.yaml` cria um ECS Fargate Service para a interface e uma task definition separada para workers sob demanda, atras de um ALB HTTPS, com S3 privado, IAM de menor privilegio, Secrets Manager e CloudWatch Logs.
 
-Essa topologia mantem `DesiredCount=1` apenas para a interface server-rendered. Preview e geração são isolados em workers Fargate e sincronizados no S3; não usam disco compartilhado nem aplicativos Office.
+Por padrao, esta v1 sobe com:
+
+- `AppName=squad5-nat-auto-ppt`
+- `StackName=squad5-nat-auto-ppt-v1`
+- tag `Name=squad5-nat`
+- web menor e sempre ligado (`512` CPU / `2048` MB)
+- worker maior e sob demanda (`1024` CPU / `3072` MB)
+
+Isso reduz o custo do que fica 24x7 e deixa o processamento pesado isolado apenas quando houver job.
+
+Essa topologia mantem `DesiredCount=1` apenas para a interface server-rendered. Preview e geracao sao isolados em workers Fargate e sincronizados no S3; nao usam disco compartilhado nem aplicativos Office.
 
 Pre-requisitos:
 
@@ -30,4 +40,4 @@ Os scripts em `legacy/` preservam o prototipo anterior, que publica a porta 8501
 
 ## Crescimento posterior
 
-SQS e DynamoDB ficam para uma fase posterior, se houver necessidade de controle de concorrência, agendamento ou consultas de jobs em escala. A arquitetura atual já isola o processamento em tasks Fargate e mantém o estado compartilhado no S3.
+SQS e DynamoDB ficam para uma fase posterior, se houver necessidade de controle de concorrencia, agendamento ou consultas de jobs em escala. A arquitetura atual ja isola o processamento em tasks Fargate e mantem o estado compartilhado no S3.

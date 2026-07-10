@@ -69,15 +69,15 @@ Once a project has a successful download, the system creates/updates a **mapping
 
 To keep a chart's "Edit Data" working and to run without Microsoft Office, the writer path is **serverless OOXML surgery**: open the `.pptx`/`.xlsx` as ZIP/OPC packages, patch only the necessary parts (`openxml_zip.py`, `embedded_workbook_writer.py`), and update the chart's visual XML cache — never `python-pptx`'s chart replace, never a full `openpyxl.save()` of the embedded workbook. This is what makes generation work in headless Linux containers (ECS Fargate) without Office/COM. Don't reintroduce those shortcuts even if they look simpler — they were deliberately avoided (see `docs/pptx_serverless_openxml_poc.md` and the README section "Gráficos editáveis e Excel embutido").
 
-Formula evaluation for datasource XLSX prefers, in order: Excel via `pywin32` (Windows dev), LibreOffice headless (Linux/AWS), then an internal formula evaluator (`core.py: _SimpleFormulaEvaluator`) covering `SUM`/`SOMA`, `AVERAGE`/`MEDIA`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`/`SE`, `SUMIF`/`SOMASE`, `COUNTIF`/`CONT.SE`. Original files are never mutated in place.
+Formula evaluation for datasource XLSX uses only the internal, AST-restricted evaluator (`core.py: _SimpleFormulaEvaluator`) covering `SUM`/`SOMA`, `AVERAGE`/`MEDIA`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`/`SE`, `SUMIF`/`SOMASE`, `COUNTIF`/`CONT.SE`. Unsupported formulas fail by default; `AUTO_PPT_FORMULA_FALLBACK=cached` is an explicit opt-in to use a value already cached in the XLSX. Original files are never mutated in place.
 
-For visual slide preview and per-slide AI review, `slide_renderer.py` uses PowerPoint COM on Windows, or LibreOffice headless → PDF → PyMuPDF (`slide.png` with target IDs drawn) in Linux containers.
+Preview and per-slide AI review use extracted OpenXML contracts, titles and structured XLSX text only. Never add Office, COM, LibreOffice, PDF conversion or slide-image rendering back to the runtime.
 
 ### AI layers (all optional, degrade gracefully without a key)
 
 - **Enxuta (lean) source-match review**: runs automatically for unmatched targets or deterministic matches below `AUTO_PPT_AI_REVIEW_CONFIDENCE_FLOOR` (default 0.80). Chooses the datasource per target and may suggest a small structural `recipe_suggestion` (`keep`, `transpose`, `drop_and_keep`, `drop_and_transpose`); the matrix itself is still built and validated by deterministic code, never written directly by the AI.
 - **Per-slide AI** (`AUTO_PPT_AUTO_SLIDE_AI=1`): does not run automatically on the initial preview (keeps it fast, avoids the AI restructuring targets the deterministic normalizer already mapped well). Enable explicitly to investigate a hard deck; `AUTO_PPT_APPLY_SLIDE_AI_OUTPUTS=1` is required to actually apply AI-generated matrices to the final PPT.
-- Cost/latency controls: `AUTO_PPT_AI_XLSX_DUMP_MODE` (`compact` default, `verbose` for deep investigation), `AUTO_PPT_AI_IMAGE_IN_MATRIX`, `AUTO_PPT_AI_IMAGE_MAX_SIDE`.
+- Cost/latency controls: `AUTO_PPT_AI_XLSX_DUMP_MODE` (`compact` default, `verbose` for deep investigation).
 
 ### Web layer (`web/main.py`)
 

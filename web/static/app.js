@@ -453,6 +453,53 @@
   });
 
   document.addEventListener("click", function (event) {
+    var asyncDownload = event.target && event.target.closest ? event.target.closest("[data-async-download]") : null;
+    if (asyncDownload) {
+      event.preventDefault();
+      asyncDownload.disabled = true;
+      showProgress("Enviando geracao para o worker...");
+      fetch(asyncDownload.getAttribute("data-generate-url"), { method: "POST" })
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("Nao foi possivel iniciar a geracao.");
+          }
+          return response.json();
+        })
+        .then(function (payload) {
+          if (payload.download_url) {
+            window.location.assign(payload.download_url);
+            return;
+          }
+          var statusUrl = payload.status_url;
+          if (!statusUrl) {
+            throw new Error("O worker nao retornou uma URL de status.");
+          }
+          var timer = window.setInterval(function () {
+            fetch(statusUrl, { cache: "no-store" })
+              .then(function (response) { return response.json(); })
+              .then(function (state) {
+                if (state.status === "complete" && state.download_url) {
+                  window.clearInterval(timer);
+                  window.location.assign(state.download_url);
+                } else if (state.status === "error") {
+                  window.clearInterval(timer);
+                  asyncDownload.disabled = false;
+                  var overlay = document.getElementById("progress-overlay");
+                  if (overlay) { overlay.hidden = true; }
+                  window.alert(state.message || "A geracao do PPT falhou.");
+                }
+              })
+              .catch(function () {});
+          }, 1800);
+        })
+        .catch(function (error) {
+          asyncDownload.disabled = false;
+          var overlay = document.getElementById("progress-overlay");
+          if (overlay) { overlay.hidden = true; }
+          window.alert(error.message || "Nao foi possivel iniciar a geracao.");
+        });
+      return;
+    }
     if (event.target && event.target.closest && event.target.closest("[data-theme-toggle]")) {
       toggleTheme();
       return;

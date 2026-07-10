@@ -1486,19 +1486,9 @@ textarea::placeholder {
 /* slide workspace */
 
 .slide-workspace {
-  display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
-  gap: 16px;
   padding: 16px 20px;
   border-bottom: 1px solid var(--line-soft);
   background: var(--surface-soft);
-}
-
-.slide-preview-image {
-  width: 100%;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: #fff;
 }
 
 .slide-tools {

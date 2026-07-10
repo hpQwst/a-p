@@ -33,6 +33,8 @@
           <a class="ghost-button" href="/jobs/{{ job_id }}/debug-log" target="_blank" rel="noreferrer">Log debug</a>
           {% if preview_processing.active %}
             <button class="button" type="button" disabled>Preparando preview</button>
+          {% elif async_generation %}
+            <button class="button" type="button" data-async-download data-generate-url="/jobs/{{ job_id }}/generate">Gerar e baixar PPT</button>
           {% else %}
             <a class="button" href="/jobs/{{ job_id }}/download" data-progress-message="Gerando PPT atualizado...">Baixar PPT</a>
           {% endif %}
@@ -234,9 +236,6 @@
                 </summary>
 
                 <div class="slide-workspace">
-                  {% if slide_images.get(slide) %}
-                    <img class="slide-preview-image" loading="lazy" src="{{ slide_images.get(slide) }}" alt="Slide {{ slide }} com IDs dos targets">
-                  {% endif %}
                   <div class="slide-tools">
                     <div class="slide-datasources">
                       <strong>XLSX deste slide</strong>
@@ -256,12 +255,6 @@
                         <summary>Entendimento IA do slide</summary>
                         <pre>{{ current_slide_state.understanding }}</pre>
                       </details>
-                    {% endif %}
-                    {% if current_slide_state.render_warning %}
-                      <div class="warning-list compact-warning">
-                        <strong>Imagem do slide</strong>
-                        <p>{{ current_slide_state.render_warning }}</p>
-                      </div>
                     {% endif %}
                     {% if current_slide_state.auto_review_skip_reason %}
                       <div class="info-list compact-warning">

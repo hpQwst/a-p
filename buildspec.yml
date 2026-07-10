@@ -7,7 +7,9 @@ phases:
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
-      - IMAGE_TAG=${IMAGE_TAG:-latest}
+      - COMMIT_SHA=${CODEBUILD_RESOLVED_SOURCE_VERSION:-manual}
+      - SHORT_SHA=$(printf "%.12s" "$COMMIT_SHA")
+      - IMAGE_TAG=${IMAGE_TAG:-$SHORT_SHA}
   build:
     commands:
       - docker build -t $REPOSITORY_URI:$IMAGE_TAG .

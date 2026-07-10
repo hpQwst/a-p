@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 import json
 import time
 
 from .ai import build_openai_client
 from .ai_debug import log_ai_request, log_ai_response, log_debug_event
-from .ai_payload import image_data_url
 
 
 @dataclass(frozen=True)
 class SlideUnderstandingInput:
     slide_number: int
-    slide_image_path: Path | None
-    visual_map: list[dict[str, str]]
     slide_text: str
     targets: list[dict[str, Any]]
     xlsx_manifests: list[dict[str, Any]]
@@ -27,23 +23,20 @@ def suggest_slide_understanding(payload: SlideUnderstandingInput, root: Path | s
     client, model = build_openai_client(root, operation="slide_understanding")
     user_payload = {
         "slide_number": payload.slide_number,
-        "visual_target_map": payload.visual_map,
         "slide_text": payload.slide_text,
         "targets": payload.targets,
         "xlsx_manifests": payload.xlsx_manifests,
         "xlsx_plaintext_dumps": payload.xlsx_dumps,
         "manual_context": payload.manual_context,
         "instructions": [
-            "Interprete o papel visual de cada target usando a imagem do slide e os IDs visuais.",
+            "Interprete o papel de cada target pelo contrato OpenXML, titulos e contexto textual do slide.",
             "Use xlsx_manifests como indice semantico principal dos arquivos; use xlsx_plaintext_dumps para conferir celulas, coordenadas e valores raw.",
-            "Interprete os XLSX somente pelo dump textual compacto/JSON. Nao use imagem de planilha.",
+            "Interprete os XLSX somente pelo dump textual compacto/JSON. Nao use rasterizacao de planilha.",
             "Nao invente valores. Nesta etapa, apenas descreva partes uteis e como extrair.",
             "Se o arquivo nao tiver dados suficientes, retorne questions_for_user.",
         ],
     }
     content: list[dict[str, Any]] = [{"type": "input_text", "text": json.dumps(user_payload, ensure_ascii=False)}]
-    if payload.slide_image_path and payload.slide_image_path.exists():
-        content.insert(0, {"type": "input_image", "image_url": image_data_url(payload.slide_image_path)})
     request_kwargs = {
         "model": model,
         "store": False,

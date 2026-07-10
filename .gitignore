@@ -31,6 +31,12 @@ venv.bak/
 # Build outputs
 outputs/
 workspace_data/
+graphify-out/
+
+# Local tooling and generated reports
+.coverage
+coverage.xml
+*.sarif
 
 # Editor / OS files
 .vscode/

@@ -7,6 +7,10 @@ __pycache__
 .streamlit
 outputs
 workspace_data
+graphify-out
+tests
+docs
+.github
 streamlit.log
 streamlit.err.log
 *.pptx

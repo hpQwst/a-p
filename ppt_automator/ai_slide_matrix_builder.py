@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 import json
 import time
 
 from .ai import build_openai_client
 from .ai_debug import log_ai_request, log_ai_response, log_debug_event
-from .ai_payload import env_bool, image_data_url
 
 
 @dataclass(frozen=True)
 class SlideMatrixBuildInput:
     slide_number: int
-    slide_image_path: Path | None
-    visual_map: list[dict[str, str]]
     slide_understanding: dict[str, Any]
     targets: list[dict[str, Any]]
     xlsx_manifests: list[dict[str, Any]]
@@ -28,7 +24,6 @@ def build_slide_matrices_with_ai(payload: SlideMatrixBuildInput, root: Path | st
     client, model = build_openai_client(root, operation="slide_matrix_builder")
     user_payload = {
         "slide_number": payload.slide_number,
-        "visual_target_map": payload.visual_map,
         "slide_understanding": payload.slide_understanding,
         "targets": payload.targets,
         "target_ids_to_process": payload.target_ids or [],
@@ -56,8 +51,6 @@ def build_slide_matrices_with_ai(payload: SlideMatrixBuildInput, root: Path | st
         ],
     }
     content: list[dict[str, Any]] = [{"type": "input_text", "text": json.dumps(user_payload, ensure_ascii=False)}]
-    if env_bool("AUTO_PPT_AI_IMAGE_IN_MATRIX", False) and payload.slide_image_path and payload.slide_image_path.exists():
-        content.insert(0, {"type": "input_image", "image_url": image_data_url(payload.slide_image_path)})
     request_kwargs = {
         "model": model,
         "store": False,
@@ -67,7 +60,7 @@ def build_slide_matrices_with_ai(payload: SlideMatrixBuildInput, root: Path | st
                 "content": (
                     "Voce monta matrizes finais para o Editar dados do PowerPoint. "
                     "A saida deve ser exata, tipada e rastreavel. "
-                    "Voce nao interpreta valores por imagem de planilha; usa apenas dumps textuais compactos dos XLSX. "
+                    "Voce nao interpreta valores por rasterizacao de planilha; usa apenas dumps textuais compactos dos XLSX. "
                     "Quando um label do XLSX for mais completo que o label atual do PPT, use o label do XLSX na matriz final."
                 ),
             },

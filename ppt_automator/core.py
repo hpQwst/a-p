@@ -6,11 +6,10 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable
 from zipfile import ZipFile
+import ast
+import os
 import posixpath
 import re
-import shutil
-import subprocess
-import tempfile
 import unicodedata
 import xml.etree.ElementTree as ET
 
@@ -604,30 +603,19 @@ def _matches_criteria(value: Any, criteria: Any) -> bool:
 def prepare_workbook_values(workbook_bytes: bytes, formula_mode: FormulaMode = "auto") -> bytes:
     """Return workbook bytes with formulas resolved to static values when requested.
 
-    `openpyxl` can read cached formula results, but it cannot calculate formulas.
-    In auto mode we only launch Excel when formulas are actually present.
+    The server never launches Excel, PowerPoint or LibreOffice. Formulas are
+    resolved by the deterministic internal evaluator; unsupported formulas fail
+    by default instead of producing a potentially incorrect PPT.
     """
 
     normalized_mode = (formula_mode or "cached").lower()
     if normalized_mode in {"cached", "none", "off"}:
         return workbook_bytes
-    if normalized_mode not in {"auto", "excel", "libreoffice", "internal"}:
-        raise ValueError("formula_mode must be 'auto', 'excel', 'libreoffice', 'internal' or 'cached'.")
+    if normalized_mode not in {"auto", "internal"}:
+        raise ValueError("formula_mode must be 'auto', 'internal' or 'cached'.")
     if normalized_mode == "auto" and not workbook_has_formulas(workbook_bytes):
         return workbook_bytes
-    if normalized_mode == "internal":
-        return calculate_workbook_with_internal_engine(workbook_bytes)
-    if normalized_mode == "libreoffice":
-        return calculate_workbook_with_libreoffice(workbook_bytes)
-    try:
-        return calculate_workbook_with_excel(workbook_bytes)
-    except FormulaCalculationError:
-        if normalized_mode == "auto":
-            try:
-                return calculate_workbook_with_libreoffice(workbook_bytes)
-            except FormulaCalculationError:
-                return calculate_workbook_with_internal_engine(workbook_bytes)
-        raise
+    return calculate_workbook_with_internal_engine(workbook_bytes)
 
 
 def workbook_has_formulas(workbook_bytes: bytes) -> bool:
@@ -646,133 +634,49 @@ def workbook_has_formulas(workbook_bytes: bytes) -> bool:
         wb.close()
 
 
-def calculate_workbook_with_excel(workbook_bytes: bytes) -> bytes:
-    """Use local Excel COM automation to calculate and replace formulas with values."""
-
-    try:
-        import pythoncom
-        import win32com.client
-    except Exception as exc:  # pragma: no cover - depends on host machine
-        raise FormulaCalculationError(
-            "Este arquivo tem formulas, mas o Excel/pywin32 nao esta disponivel para calcula-las."
-        ) from exc
-
-    with tempfile.TemporaryDirectory(prefix="ppt_automator_excel_") as tmp_dir:
-        tmp = Path(tmp_dir)
-        input_path = tmp / "input.xlsx"
-        output_path = tmp / "calculated.xlsx"
-        input_path.write_bytes(workbook_bytes)
-        shutil.copy2(input_path, output_path)
-
-        excel = None
-        workbook = None
-        pythoncom.CoInitialize()
-        try:
-            excel = win32com.client.DispatchEx("Excel.Application")
-            excel.Visible = False
-            excel.DisplayAlerts = False
-            excel.AskToUpdateLinks = False
-            workbook = excel.Workbooks.Open(str(output_path), UpdateLinks=0, ReadOnly=False)
-            excel.CalculateFullRebuild()
-            for sheet in workbook.Worksheets:
-                used_range = sheet.UsedRange
-                used_range.Value = used_range.Value
-            workbook.Save()
-            workbook.Close(SaveChanges=True)
-            workbook = None
-            return output_path.read_bytes()
-        except Exception as exc:  # pragma: no cover - depends on host machine
-            raise FormulaCalculationError(f"Nao consegui calcular formulas com o Excel: {exc}") from exc
-        finally:
-            if workbook is not None:
-                try:
-                    workbook.Close(SaveChanges=False)
-                except Exception:
-                    pass
-            if excel is not None:
-                try:
-                    excel.Quit()
-                except Exception:
-                    pass
-            pythoncom.CoUninitialize()
-
-
-def calculate_workbook_with_libreoffice(workbook_bytes: bytes) -> bytes:
-    """Use LibreOffice headless to recalculate workbook formula caches."""
-
-    executable = shutil.which("soffice") or shutil.which("libreoffice")
-    if not executable:
-        raise FormulaCalculationError("LibreOffice nao esta disponivel para calcular formulas.")
-
-    with tempfile.TemporaryDirectory(prefix="ppt_automator_libreoffice_") as tmp_dir:
-        tmp = Path(tmp_dir)
-        input_path = tmp / "input.xlsx"
-        output_dir = tmp / "out"
-        output_dir.mkdir()
-        input_path.write_bytes(workbook_bytes)
-
-        command = [
-            executable,
-            "--headless",
-            "--nologo",
-            "--nofirststartwizard",
-            "--nolockcheck",
-            "--convert-to",
-            "xlsx",
-            "--outdir",
-            str(output_dir),
-            str(input_path),
-        ]
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=180,
-                check=False,
-            )
-        except Exception as exc:  # pragma: no cover - depends on host machine
-            raise FormulaCalculationError(f"Nao consegui executar LibreOffice: {exc}") from exc
-
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "").strip()
-            raise FormulaCalculationError(f"LibreOffice falhou ao calcular formulas: {detail}")
-
-        output_path = output_dir / "input.xlsx"
-        if not output_path.exists():
-            candidates = list(output_dir.glob("*.xlsx"))
-            if not candidates:
-                raise FormulaCalculationError("LibreOffice nao gerou um arquivo XLSX recalculado.")
-            output_path = candidates[0]
-        return output_path.read_bytes()
-
-
 def calculate_workbook_with_internal_engine(workbook_bytes: bytes) -> bytes:
     """Calculate common Excel formulas without launching Excel.
 
     This intentionally covers the formulas most often used in support tables:
     arithmetic, cell/range references, SUM/SOMA, AVERAGE/MEDIA, MIN, MAX,
     COUNT, COUNTA, IF/SE and simple SUMIF/COUNTIF criteria.
-    Unsupported formulas fall back to cached values when the workbook has them.
+    Unsupported formulas fail by default. Set AUTO_PPT_FORMULA_FALLBACK=cached
+    only when accepting the workbook's previously saved cached values is an
+    explicit business decision.
     """
 
     formula_wb = openpyxl.load_workbook(BytesIO(workbook_bytes), data_only=False)
     cached_wb = openpyxl.load_workbook(BytesIO(workbook_bytes), data_only=True)
-    evaluator = _SimpleFormulaEvaluator(formula_wb, cached_wb)
-
-    for ws in formula_wb.worksheets:
-        cached_ws = cached_wb[ws.title]
-        for row in ws.iter_rows():
-            for cell in row:
-                if _is_formula_value(cell.value):
-                    try:
-                        cell.value = evaluator.evaluate_cell(ws.title, cell.coordinate)
-                    except Exception:
-                        cell.value = cached_ws[cell.coordinate].value
-
-    out = BytesIO()
-    formula_wb.save(out)
-    return out.getvalue()
+    try:
+        evaluator = _SimpleFormulaEvaluator(formula_wb, cached_wb)
+        for ws in formula_wb.worksheets:
+            cached_ws = cached_wb[ws.title]
+            for row in ws.iter_rows():
+                for cell in row:
+                    if _is_formula_value(cell.value):
+                        try:
+                            cell.value = evaluator.evaluate_cell(ws.title, cell.coordinate)
+                        except Exception as exc:
+                            cached_value = cached_ws[cell.coordinate].value
+                            if _formula_uses_external_link(cell.value) and cached_value is not None:
+                                # Links externos, por exemplo =[1]Sheet1!B2, nao podem
+                                # ser recalculados sem abrir a fonte. O cache gravado no
+                                # proprio XLSX e a unica leitura segura e reproduzivel.
+                                cell.value = cached_value
+                            elif _formula_fallback_policy() == "cached":
+                                cell.value = cached_value
+                            else:
+                                raise FormulaCalculationError(
+                                    f"Formula nao suportada ou insegura em {ws.title}!{cell.coordinate}: {cell.value}. "
+                                    "Corrija a formula, salve o XLSX com valores calculados ou configure explicitamente "
+                                    "AUTO_PPT_FORMULA_FALLBACK=cached."
+                                ) from exc
+        out = BytesIO()
+        formula_wb.save(out)
+        return out.getvalue()
+    finally:
+        formula_wb.close()
+        cached_wb.close()
 
 
 class _SimpleFormulaEvaluator:
@@ -834,8 +738,7 @@ class _SimpleFormulaEvaluator:
         for i, value in enumerate(strings):
             expression = expression.replace(f"__STR{i}__", value)
 
-        env = self._eval_env(current_sheet)
-        return eval(expression, {"__builtins__": {}}, env)
+        return _evaluate_formula_expression(expression, self._eval_env(current_sheet))
 
     def _replace_qualified_refs(self, expression: str, keep_ref: Any) -> str:
         quoted = r"'([^']+)'"
@@ -893,6 +796,7 @@ class _SimpleFormulaEvaluator:
             "COUNTIF": "_countif",
             "CONT.SE": "_countif",
             "CONTSE": "_countif",
+            "ABS": "abs",
         }
 
         def repl(match: re.Match[str]) -> str:
@@ -961,6 +865,118 @@ class _SimpleFormulaEvaluator:
 
     def _countif(self, criteria_range: Any, criteria: Any) -> int:
         return sum(1 for value in _flatten([criteria_range]) if _matches_criteria(value, criteria))
+
+
+def _evaluate_formula_expression(expression: str, env: dict[str, Any]) -> Any:
+    """Evaluate the narrow formula grammar after references/functions are normalized.
+
+    The parser accepts only arithmetic, comparisons, boolean operators, constants
+    and calls to the local allowlist. Attribute access, subscripts, comprehensions
+    and every unknown identifier are rejected before any code is executed.
+    """
+
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError("Sintaxe de formula nao suportada.") from exc
+
+    allowed_nodes = (
+        ast.Expression,
+        ast.BinOp,
+        ast.UnaryOp,
+        ast.BoolOp,
+        ast.Compare,
+        ast.Call,
+        ast.Name,
+        ast.Constant,
+        ast.Load,
+        ast.Add,
+        ast.Sub,
+        ast.Mult,
+        ast.Div,
+        ast.Pow,
+        ast.Mod,
+        ast.UAdd,
+        ast.USub,
+        ast.Not,
+        ast.And,
+        ast.Or,
+        ast.Eq,
+        ast.NotEq,
+        ast.Lt,
+        ast.LtE,
+        ast.Gt,
+        ast.GtE,
+    )
+    for node in ast.walk(tree):
+        if not isinstance(node, allowed_nodes):
+            raise ValueError(f"Elemento de formula nao permitido: {type(node).__name__}.")
+        if isinstance(node, ast.Name) and node.id not in env and node.id not in {"True", "False", "None"}:
+            raise ValueError(f"Funcao ou nome nao suportado: {node.id}.")
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name) or node.func.id not in env:
+                raise ValueError("Chamada de formula nao permitida.")
+
+    def evaluate(node: ast.AST) -> Any:
+        if isinstance(node, ast.Expression):
+            return evaluate(node.body)
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            constants = {"True": True, "False": False, "None": None}
+            if node.id in constants:
+                return constants[node.id]
+            return env[node.id]
+        if isinstance(node, ast.Call):
+            return env[node.func.id](*(evaluate(arg) for arg in node.args))
+        if isinstance(node, ast.BinOp):
+            left, right = evaluate(node.left), evaluate(node.right)
+            operations = {
+                ast.Add: lambda: left + right,
+                ast.Sub: lambda: left - right,
+                ast.Mult: lambda: left * right,
+                ast.Div: lambda: left / right,
+                ast.Pow: lambda: left**right,
+                ast.Mod: lambda: left % right,
+            }
+            return operations[type(node.op)]()
+        if isinstance(node, ast.UnaryOp):
+            value = evaluate(node.operand)
+            if isinstance(node.op, ast.UAdd):
+                return +value
+            if isinstance(node.op, ast.USub):
+                return -value
+            return not value
+        if isinstance(node, ast.BoolOp):
+            values = [evaluate(value) for value in node.values]
+            return all(values) if isinstance(node.op, ast.And) else any(values)
+        if isinstance(node, ast.Compare):
+            left = evaluate(node.left)
+            comparisons = {
+                ast.Eq: lambda a, b: a == b,
+                ast.NotEq: lambda a, b: a != b,
+                ast.Lt: lambda a, b: a < b,
+                ast.LtE: lambda a, b: a <= b,
+                ast.Gt: lambda a, b: a > b,
+                ast.GtE: lambda a, b: a >= b,
+            }
+            for operator, comparator in zip(node.ops, node.comparators):
+                right = evaluate(comparator)
+                if not comparisons[type(operator)](left, right):
+                    return False
+                left = right
+            return True
+        raise ValueError("Elemento de formula nao suportado.")
+
+    return evaluate(tree)
+
+
+def _formula_fallback_policy() -> str:
+    return "cached" if os.getenv("AUTO_PPT_FORMULA_FALLBACK", "").strip().lower() == "cached" else "error"
+
+
+def _formula_uses_external_link(value: Any) -> bool:
+    return bool(re.search(r"=\s*\[[^\]]+\]", str(value or "")))
 
 
 def _cell(row: tuple[Any, ...], index: dict[str, int], name: str) -> Any:

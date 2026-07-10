@@ -24,6 +24,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from ppt_automator import generate_updated_pptx
+from ppt_automator.archive_safety import (
+    validate_datasource_zip_bytes,
+    validate_pptx_bytes,
+    validate_xlsx_bytes,
+)
 from ppt_automator.ai import ai_configured, format_ai_error
 from ppt_automator.ai_debug import log_debug_event, reset_ai_debug_log_path, set_ai_debug_log_path
 from ppt_automator.embedded_workbook_writer import EmbeddedWorkbookWriterUnavailable
@@ -34,7 +39,6 @@ from ppt_automator.ai_slide_understanding import SlideUnderstandingInput, sugges
 from ppt_automator.ai_transform import suggest_transform_diagnostics
 from ppt_automator.edit_data_validator import validate_typed_edit_data
 from ppt_automator.slide_datasources import collect_datasource_entries, entries_for_slide
-from ppt_automator.slide_renderer import render_slide_with_target_labels
 from ppt_automator.source_manifest import xlsx_source_manifest
 from ppt_automator.table_normalizer import source_match_candidates
 from ppt_automator.target_labeler import target_aliases, visual_label
@@ -68,6 +72,7 @@ from worker.processor import (
     apply_typed_outputs_to_analysis,
     parse_slide_selection,
 )
+from worker import aws_runtime
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -77,6 +82,8 @@ RENDER_CACHE_VERSION = 7
 PREVIEW_EXECUTOR = ThreadPoolExecutor(max_workers=max(int(os.getenv("AUTO_PPT_PREVIEW_WORKERS", "2") or "2"), 1))
 PREVIEW_RUNNING: set[str] = set()
 PREVIEW_RUNNING_LOCK = threading.Lock()
+GENERATION_RUNNING: set[str] = set()
+GENERATION_RUNNING_LOCK = threading.Lock()
 
 # Cache em processo do resultado caro de analyze_files() (discovery do PPT + parse/
 # recalculo de formula dos XLSX + matching deterministico). input.pptx/datasources.zip
@@ -97,6 +104,25 @@ app = FastAPI(title="QWST Auto PPT")
 app.mount("/static", StaticFiles(directory=APP_ROOT / "static"), name="static")
 templates = Jinja2Templates(directory=APP_ROOT / "templates")
 templates.env.filters["format_bytes"] = lambda value: _format_bytes(value)
+
+
+@app.middleware("http")
+async def production_guardrails(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", "").strip() or uuid.uuid4().hex
+    content_length = request.headers.get("content-length", "").strip()
+    if content_length.isdigit() and int(content_length) > _max_request_bytes():
+        return JSONResponse(
+            {"error": "A requisicao excede o limite de upload configurado.", "request_id": request_id},
+            status_code=413,
+            headers={"X-Request-ID": request_id},
+        )
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -121,7 +147,9 @@ async def index(request: Request) -> HTMLResponse:
 async def ppt_summary(pptx: UploadFile = File(...)) -> JSONResponse:
     try:
         _validate_upload(pptx, ".pptx", "Envie um arquivo PPTX.")
-        summary = _inspect_ppt_upload(await pptx.read())
+        pptx_bytes = await _read_upload_limited(pptx, "PPTX")
+        validate_pptx_bytes(pptx_bytes)
+        summary = _inspect_ppt_upload(pptx_bytes)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     threshold = _large_deck_slide_threshold()
@@ -152,13 +180,17 @@ async def preview(
         project = _resolve_project(project_ref, squad, project_name)
         mapping_template = _resolve_mapping_template(project, mapping_template_ref)
         selected_slides = parse_slide_selection(slides_to_update)
-        pptx_bytes = await pptx.read()
-        datasource_bytes = await datasources.read()
-        mapping_bytes = await mapping.read() if mapping and mapping.filename else b""
         _validate_upload(pptx, ".pptx", "Envie um arquivo PPTX.")
         _validate_upload(datasources, ".zip", "Envie um ZIP com os XLSX.")
         if mapping and mapping.filename:
             _validate_upload(mapping, ".xlsx", "A planilha de mapeamento precisa ser XLSX.")
+        pptx_bytes = await _read_upload_limited(pptx, "PPTX")
+        datasource_bytes = await _read_upload_limited(datasources, "ZIP de datasources")
+        mapping_bytes = await _read_upload_limited(mapping, "XLSX de mapeamento") if mapping and mapping.filename else b""
+        validate_pptx_bytes(pptx_bytes)
+        validate_datasource_zip_bytes(datasource_bytes)
+        if mapping_bytes:
+            validate_xlsx_bytes(mapping_bytes)
         ppt_summary = _inspect_ppt_upload(pptx_bytes)
         _validate_slide_scope(ppt_summary, selected_slides)
         requires_large_confirmation = _large_scope_requires_confirmation(ppt_summary, selected_slides)
@@ -252,12 +284,16 @@ async def resume_project_preview(request: Request, squad: str, slug: str) -> HTM
 
 @app.get("/jobs/{job_id}/preview", response_class=HTMLResponse)
 async def job_preview(request: Request, job_id: str, slide: int | None = None) -> HTMLResponse:
+    if aws_runtime.uses_fargate_workers():
+        aws_runtime.hydrate_job(job_id, _job_dir(job_id))
     return _render_preview(request, job_id, selected_preview_slide=slide, allow_ai=False)
 
 
 @app.get("/jobs/{job_id}/processing-status")
 async def job_processing_status(job_id: str) -> JSONResponse:
     job_dir = _job_dir(job_id)
+    if aws_runtime.uses_fargate_workers():
+        aws_runtime.refresh_job_file(job_id, job_dir, "preview_processing.json")
     state = _load_preview_processing_state(job_dir)
     if not state:
         payload = {
@@ -485,7 +521,8 @@ async def override_target_datasource(
         _validate_target_id(target_id)
         _validate_cell_range(cell_range)
         _validate_upload(datasource, ".xlsx", "Envie um XLSX para substituir o datasource deste target.")
-        data = await datasource.read()
+        data = await _read_upload_limited(datasource, "XLSX")
+        validate_xlsx_bytes(data)
         target_dir = job_dir / "overrides" / target_id
         target_dir.mkdir(parents=True, exist_ok=True)
         for existing in target_dir.glob("*.xlsx"):
@@ -524,36 +561,58 @@ async def override_target_datasource(
 @app.get("/jobs/{job_id}/download")
 async def download(job_id: str) -> Response:
     job_dir = _job_dir(job_id)
-    pptx_path = job_dir / "input.pptx"
-    datasource_path = job_dir / "datasources.zip"
-    if not pptx_path.exists() or not datasource_path.exists():
-        raise HTTPException(status_code=404, detail="Job nao encontrado.")
-
-    manual_sources = _manual_sources_for_job(job_dir)
-    selected_slides = _selected_slides_for_job(job_dir)
-    pptx_bytes = pptx_path.read_bytes()
-    analysis = await run_in_threadpool(_cached_analyze_files, job_dir, manual_sources, selected_slides)
-    analysis, _mapping_status = _apply_mapping_template_to_analysis(
-        job_dir,
-        analysis,
-        skip_targets=set(manual_sources),
-    )
-    ai_matches, _ai_match_status = _ai_source_matches_for_job(job_dir, analysis, allow_ai=False)
-    analysis = apply_ai_source_matches_to_analysis(analysis, ai_matches)
-    ai_diagnostics, _ai_status = _ai_diagnostics_for_job(job_dir, analysis, allow_ai=False)
-    analysis = apply_ai_recommendations_to_analysis(analysis, ai_diagnostics)
-    analysis = apply_typed_outputs_to_analysis(analysis, _slide_ai_target_outputs(job_dir))
-    try:
-        output = await run_in_threadpool(generate_updated_pptx, pptx_bytes, analysis.plans, targets=analysis.targets)
-    except (EmbeddedWorkbookWriterUnavailable, ChartSheetUnresolvedError) as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    file_name = f"ppt_automatizado_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
-    await run_in_threadpool(_save_project_run, job_dir, output, analysis, file_name)
-    _save_project_checkpoint(job_dir, status="completed")
-    return Response(
-        output,
+    if aws_runtime.uses_fargate_workers():
+        aws_runtime.hydrate_job(job_id, job_dir)
+    generated = _generated_ppt_path(job_dir)
+    if not generated.exists() and aws_runtime.uses_fargate_workers():
+        return JSONResponse(
+            {"error": "A geracao precisa ser iniciada pelo endpoint /generate."}, status_code=409
+        )
+    if not generated.exists():
+        await run_in_threadpool(_generate_job_output, job_dir)
+    return FileResponse(
+        _generated_ppt_path(job_dir),
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
+        filename=_generated_filename(job_dir),
+    )
+
+
+@app.post("/jobs/{job_id}/generate")
+async def start_generation(job_id: str) -> JSONResponse:
+    job_dir = _job_dir(job_id)
+    if aws_runtime.uses_fargate_workers():
+        aws_runtime.hydrate_job(job_id, job_dir)
+    if _generated_ppt_path(job_dir).exists():
+        return JSONResponse({"status": "complete", "download_url": f"/jobs/{job_id}/download"})
+    state = _load_generation_state(job_dir)
+    if state.get("active"):
+        return JSONResponse({"status": state.get("status", "running"), "status_url": f"/jobs/{job_id}/generation-status"})
+
+    _init_generation_state(job_dir)
+    if aws_runtime.uses_fargate_workers():
+        aws_runtime.upload_job(job_dir)
+        task_arn = aws_runtime.launch_fargate_job(job_id, "generate", _generation_launch_token(job_dir))
+        _log_job_debug_event(job_dir, "generation_worker_fargate_submitted", {"task_arn": task_arn})
+    else:
+        with GENERATION_RUNNING_LOCK:
+            if job_id not in GENERATION_RUNNING:
+                GENERATION_RUNNING.add(job_id)
+                PREVIEW_EXECUTOR.submit(_generate_job_worker, job_dir)
+    return JSONResponse({"status": "queued", "status_url": f"/jobs/{job_id}/generation-status"}, status_code=202)
+
+
+@app.get("/jobs/{job_id}/generation-status")
+async def generation_status(job_id: str) -> JSONResponse:
+    job_dir = _job_dir(job_id)
+    if aws_runtime.uses_fargate_workers():
+        aws_runtime.refresh_job_file(job_id, job_dir, "generation_processing.json")
+    state = _load_generation_state(job_dir)
+    return JSONResponse(
+        {
+            **state,
+            "job_id": job_id,
+            "download_url": f"/jobs/{job_id}/download" if _generated_ppt_path(job_dir).exists() else "",
+        }
     )
 
 
@@ -562,22 +621,21 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/jobs/{job_id}/slides/{slide_number}/image")
-async def slide_image(job_id: str, slide_number: int) -> FileResponse:
-    job_dir = _job_dir(job_id)
-    image_path = job_dir / "rendered" / f"slide_{slide_number:03d}.png"
-    if not image_path.exists():
-        analysis, _mapping_status, _mapping_candidates, _pause = await run_in_threadpool(_analysis_for_job, job_dir)
-        await run_in_threadpool(
-            render_slide_with_target_labels,
-            job_dir / "input.pptx",
-            analysis.targets,
-            slide_number,
-            job_dir / "rendered",
-        )
-    if not image_path.exists():
-        raise HTTPException(status_code=404, detail="Imagem do slide nao encontrada.")
-    return FileResponse(image_path, media_type="image/png")
+@app.get("/health/live")
+async def health_live() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def health_ready() -> JSONResponse:
+    try:
+        RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+        probe = RUNTIME_ROOT / ".readiness"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError:
+        return JSONResponse({"status": "not_ready"}, status_code=503)
+    return JSONResponse({"status": "ok"})
 
 
 def _preview_processing_path(job_dir: Path) -> Path:
@@ -586,6 +644,95 @@ def _preview_processing_path(job_dir: Path) -> Path:
 
 def _debug_log_path(job_dir: Path) -> Path:
     return job_dir / "log.txt"
+
+
+def _generation_processing_path(job_dir: Path) -> Path:
+    return job_dir / "generation_processing.json"
+
+
+def _generated_ppt_path(job_dir: Path) -> Path:
+    return job_dir / "generated.pptx"
+
+
+def _generated_metadata_path(job_dir: Path) -> Path:
+    return job_dir / "generated.json"
+
+
+def _generated_filename(job_dir: Path) -> str:
+    try:
+        return str(json.loads(_generated_metadata_path(job_dir).read_text(encoding="utf-8")).get("file_name") or "ppt_automatizado.pptx")
+    except Exception:
+        return "ppt_automatizado.pptx"
+
+
+def _load_generation_state(job_dir: Path) -> dict:
+    path = _generation_processing_path(job_dir)
+    if not path.exists():
+        return {"status": "idle", "active": False, "message": ""}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"status": "error", "active": False, "message": "Estado de geracao invalido."}
+
+
+def _save_generation_state(job_dir: Path, state: dict) -> None:
+    state = {**state, "updated_at": _now_iso()}
+    path = _generation_processing_path(job_dir)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    if aws_runtime.uses_fargate_workers():
+        aws_runtime.upload_job_file(job_dir, "generation_processing.json")
+
+
+def _init_generation_state(job_dir: Path) -> None:
+    _save_generation_state(
+        job_dir,
+        {"status": "queued", "active": True, "message": "Aguardando geracao do PPT.", "created_at": _now_iso()},
+    )
+
+
+def _generation_launch_token(job_dir: Path) -> str:
+    state = _load_generation_state(job_dir)
+    return str(state.get("created_at") or _now_iso())
+
+
+def _generate_job_worker(job_dir: Path) -> None:
+    try:
+        _generate_job_output(job_dir)
+    except Exception as exc:
+        _save_generation_state(job_dir, {"status": "error", "active": False, "message": str(exc)})
+        _log_job_debug_event(job_dir, "generation_worker_error", {"error": repr(exc)})
+    finally:
+        with GENERATION_RUNNING_LOCK:
+            GENERATION_RUNNING.discard(job_dir.name)
+
+
+def _generate_job_output(job_dir: Path) -> None:
+    pptx_path = job_dir / "input.pptx"
+    datasource_path = job_dir / "datasources.zip"
+    if not pptx_path.exists() or not datasource_path.exists():
+        raise FileNotFoundError("Job nao encontrado.")
+    _save_generation_state(job_dir, {"status": "running", "active": True, "message": "Gerando PPT atualizado."})
+    manual_sources = _manual_sources_for_job(job_dir)
+    selected_slides = _selected_slides_for_job(job_dir)
+    analysis = _cached_analyze_files(job_dir, manual_sources, selected_slides)
+    analysis, _mapping_status = _apply_mapping_template_to_analysis(job_dir, analysis, skip_targets=set(manual_sources))
+    ai_matches, _ai_match_status = _ai_source_matches_for_job(job_dir, analysis, allow_ai=False)
+    analysis = apply_ai_source_matches_to_analysis(analysis, ai_matches)
+    ai_diagnostics, _ai_status = _ai_diagnostics_for_job(job_dir, analysis, allow_ai=False)
+    analysis = apply_ai_recommendations_to_analysis(analysis, ai_diagnostics)
+    analysis = apply_typed_outputs_to_analysis(analysis, _slide_ai_target_outputs(job_dir))
+    try:
+        output = generate_updated_pptx(pptx_path.read_bytes(), analysis.plans, targets=analysis.targets)
+    except (EmbeddedWorkbookWriterUnavailable, ChartSheetUnresolvedError) as exc:
+        raise RuntimeError(str(exc)) from exc
+    file_name = f"ppt_automatizado_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
+    _generated_ppt_path(job_dir).write_bytes(output)
+    _generated_metadata_path(job_dir).write_text(json.dumps({"file_name": file_name}, ensure_ascii=False), encoding="utf-8")
+    _save_project_run(job_dir, output, analysis, file_name)
+    _save_project_checkpoint(job_dir, status="completed")
+    _save_generation_state(job_dir, {"status": "complete", "active": False, "message": "PPT pronto para download."})
 
 
 def _reset_debug_log(job_dir: Path) -> None:
@@ -651,6 +798,11 @@ def _init_preview_processing_state(job_dir: Path) -> None:
 
 
 def _start_preview_processing(job_dir: Path) -> None:
+    if aws_runtime.uses_fargate_workers():
+        aws_runtime.upload_job(job_dir)
+        task_arn = aws_runtime.launch_fargate_job(job_dir.name, "preview", _preview_launch_token(job_dir))
+        _log_job_debug_event(job_dir, "preview_worker_fargate_submitted", {"task_arn": task_arn})
+        return
     job_id = job_dir.name
     with PREVIEW_RUNNING_LOCK:
         if job_id in PREVIEW_RUNNING:
@@ -813,12 +965,19 @@ def _load_preview_processing_state(job_dir: Path) -> dict:
         return {}
 
 
+def _preview_launch_token(job_dir: Path) -> str:
+    state = _load_preview_processing_state(job_dir)
+    return str(state.get("created_at") or _now_iso())
+
+
 def _save_preview_processing_state(job_dir: Path, state: dict) -> None:
     state["updated_at"] = _now_iso()
     path = _preview_processing_path(job_dir)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
+    if aws_runtime.uses_fargate_workers():
+        aws_runtime.upload_job_file(job_dir, "preview_processing.json")
 
 
 def _update_preview_processing_state(
@@ -953,7 +1112,6 @@ def _processing_preview_context(
         "slide_summaries": _processing_slide_summaries(all_slides),
         "review_summary": review_summary,
         "process_steps": _processing_steps_from_state(state),
-        "slide_images": {},
         "slide_datasources": {},
         "slide_ai_state": {},
         "preview_is_windowed": preview_is_windowed,
@@ -965,6 +1123,7 @@ def _processing_preview_context(
         "ai_status": ai_status,
         "ai_available": ai_configured(PROJECT_ROOT),
         "ai_enabled": bool(metadata.get("use_ai")),
+        "async_generation": aws_runtime.uses_fargate_workers(),
         "analysis_warnings": [],
         "slide_selection_label": _slide_selection_label(_preview_scope_slides(metadata)),
         "notice": notice,
@@ -1112,7 +1271,6 @@ def _preview_context_from_analysis(
     else:
         visible_slide_numbers = all_slide_numbers
     cards_by_slide = {slide: all_cards_by_slide[slide] for slide in visible_slide_numbers}
-    slide_images = {slide: f"/jobs/{job_id}/slides/{slide}/image" for slide in visible_slide_numbers}
     review_summary = _review_summary(all_cards_by_slide)
     return {
         "job_id": job_id,
@@ -1126,7 +1284,6 @@ def _preview_context_from_analysis(
         "slide_summaries": _slide_summaries(all_cards_by_slide),
         "review_summary": review_summary,
         "process_steps": _process_steps(analysis, review_summary, mapping_status, ai_status, slide_ai_state),
-        "slide_images": slide_images,
         "slide_datasources": _slide_datasource_summary(job_dir, visible_slide_numbers),
         "slide_ai_state": slide_ai_state,
         "preview_is_windowed": preview_is_windowed,
@@ -1138,6 +1295,7 @@ def _preview_context_from_analysis(
         "ai_status": ai_status,
         "ai_available": ai_configured(PROJECT_ROOT),
         "ai_enabled": False,
+        "async_generation": aws_runtime.uses_fargate_workers(),
         "analysis_warnings": analysis.warnings,
         "slide_selection_label": _slide_selection_label(selected_slides),
         "notice": notice,
@@ -1366,14 +1524,14 @@ def _run_target_ai_review(job_dir: Path, target_id: str, manual_context: str = "
     if target is None or target.object_type not in {"chart", "table"}:
         raise ValueError("Target nao encontrado no escopo atual.")
     # Revisao de UM target (upload manual ou botao "Revisar este target"): leve e
-    # sem imagem. O cliente ja escolheu o XLSX; aqui a IA so precisa do Editar dados
-    # do target + a estrutura do XLSX + o titulo para decidir orientacao/colunas.
+    # sem rasterizacao. O cliente ja escolheu o XLSX; aqui a IA so precisa do
+    # Editar dados do target + a estrutura do XLSX + o titulo para decidir
+    # orientacao/colunas.
     return _run_slide_ai_review(
         job_dir,
         target.slide_number,
         target_ids={target_id},
         manual_context=manual_context,
-        use_image=False,
     )
 
 
@@ -1539,7 +1697,7 @@ def _auto_slide_ai_enabled() -> bool:
 
 def _slide_ai_max_slides_per_run() -> int:
     # A revisao por slide dispara as 2 chamadas mais pesadas do sistema
-    # (understanding com imagem + matrix builder). Este teto impede que um clique
+    # (understanding estrutural + matrix builder). Este teto impede que um clique
     # em Revisar com IA num deck de 100+ slides gere centenas de chamadas numa
     # unica execucao; os slides prioritarios rodam primeiro e o restante fica
     # para a proxima rodada.
@@ -1629,9 +1787,7 @@ def _slide_ai_signature(
     slide_number: int,
     target_ids: set[str] | None = None,
     manual_context: str = "",
-    use_image: bool | None = None,
 ) -> str:
-    use_image = _slide_ai_image_enabled() if use_image is None else use_image
     selected_target_ids = set(target_ids or [])
     targets = [
         target
@@ -1644,10 +1800,9 @@ def _slide_ai_signature(
     manifests = _source_manifests_for_entries(analysis.sources, selected_entries)
     datasource_hashes = _datasource_entry_hashes(job_dir / "datasources.zip", selected_entries)
     payload = {
-        "version": "slide-ai-v4",
+        "version": "slide-ai-v5-text-only",
         "slide": slide_number,
         "manual_context": manual_context.strip(),
-        "use_image": use_image,
         "payload_profile": _ai_payload_profile(),
         "targets": [_target_ai_payload(target) for target in targets],
         "xlsx_manifests": manifests,
@@ -1691,9 +1846,6 @@ def _ai_payload_profile() -> dict:
     return {
         "xlsx_dump_mode": _xlsx_dump_mode(),
         "xlsx_max_cells_per_sheet": max(_env_int("AUTO_PPT_AI_XLSX_MAX_CELLS_PER_SHEET", 800), 1),
-        "slide_image_enabled": _slide_ai_image_enabled(),
-        "image_max_side": max(_env_int("AUTO_PPT_AI_IMAGE_MAX_SIDE", 1400), 0),
-        "image_in_matrix": _env_bool("AUTO_PPT_AI_IMAGE_IN_MATRIX", False),
     }
 
 
@@ -1728,15 +1880,6 @@ def _format_bytes(value) -> str:
     return f"{size:.1f} {units[unit_index]}"
 
 
-class _NoRender:
-    """Render vazio para revisoes leves (sem imagem): pula a renderizacao cara do
-    slide e faz o entendimento rodar so com texto/XLSX."""
-
-    image_path = None
-    warning = ""
-    visual_map = {}
-
-
 @dataclass(frozen=True)
 class _ManualDatasourceEntry:
     zip_path: str
@@ -1753,9 +1896,7 @@ def _run_slide_ai_review(
     slide_number: int,
     target_ids: set[str] | None = None,
     manual_context: str = "",
-    use_image: bool | None = None,
 ) -> str:
-    use_image = _slide_ai_image_enabled() if use_image is None else use_image
     analysis, _mapping_status, _mapping_candidates, _pause_for_mapping = _analysis_for_job(
         job_dir,
         apply_cached_source_matches=True,
@@ -1780,9 +1921,6 @@ def _run_slide_ai_review(
     if incoming_context:
         slide_state["manual_context"] = incoming_context
     combined_context = incoming_context or previous_context
-    render = _render_slide_for_job(job_dir, analysis.targets, slide_number) if use_image else _NoRender()
-    if render.warning:
-        slide_state["render_warning"] = render.warning
     selected_entries, warnings = _datasource_entries_for_ai_review(
         job_dir,
         slide_number,
@@ -1793,7 +1931,7 @@ def _run_slide_ai_review(
     xlsx_prompt_texts = _xlsx_prompt_texts(xlsx_dumps)
     xlsx_manifests = _source_manifests_for_entries(analysis.sources, selected_entries)
     target_payloads = [_target_ai_payload(target) for target in slide_targets]
-    signature = _slide_ai_signature(job_dir, analysis, slide_number, target_ids, combined_context, use_image=use_image)
+    signature = _slide_ai_signature(job_dir, analysis, slide_number, target_ids, combined_context)
     slide_state["ai_input_stats"] = _ai_input_stats(xlsx_prompt_texts, xlsx_manifests, target_payloads)
 
     understanding = slide_state.get("understanding") if slide_state.get("understanding_signature") == signature else None
@@ -1803,13 +1941,7 @@ def _run_slide_ai_review(
             suggest_slide_understanding,
             SlideUnderstandingInput(
                 slide_number=slide_number,
-                slide_image_path=render.image_path,
-                visual_map=render.visual_map,
-                slide_text=(
-                    _structured_titles(slide_targets)
-                    if not use_image
-                    else _slide_text_for_targets(analysis.targets, slide_number)
-                ),
+                slide_text=_structured_titles(slide_targets),
                 targets=target_payloads,
                 xlsx_manifests=xlsx_manifests,
                 xlsx_dumps=xlsx_prompt_texts,
@@ -1830,8 +1962,6 @@ def _run_slide_ai_review(
         build_slide_matrices_with_ai,
         SlideMatrixBuildInput(
             slide_number=slide_number,
-            slide_image_path=render.image_path,
-            visual_map=render.visual_map,
             slide_understanding=understanding,
             targets=target_payloads,
             xlsx_manifests=builder_manifests,
@@ -1899,15 +2029,6 @@ def _apply_slide_ai_outputs_enabled(job_dir: Path) -> bool:
     if bool(metadata.get("apply_slide_ai_outputs")):
         return True
     return _env_bool("AUTO_PPT_APPLY_SLIDE_AI_OUTPUTS", False)
-
-
-def _render_slide_for_job(job_dir: Path, targets: list, slide_number: int):
-    return render_slide_with_target_labels(
-        job_dir / "input.pptx",
-        targets,
-        slide_number,
-        job_dir / "rendered",
-    )
 
 
 def _datasource_entries_for_slide(job_dir: Path, slide_number: int):
@@ -2072,13 +2193,6 @@ def _target_ai_payload(target) -> dict:
         "nearby_text": target.nearby_text,
         "ppt_contract": _ppt_contract_for_target(target),
     }
-
-
-def _slide_text_for_targets(targets: list, slide_number: int) -> str:
-    for target in targets:
-        if target.slide_number == slide_number and target.slide_text:
-            return target.slide_text
-    return ""
 
 
 def _structured_titles(targets: list) -> str:
@@ -3401,6 +3515,9 @@ def _job_dir(job_id: str, create: bool = False) -> Path:
     path = RUNTIME_ROOT / job_id
     if create:
         path.mkdir(parents=True, exist_ok=True)
+    elif not path.exists() and aws_runtime.uses_fargate_workers():
+        path.mkdir(parents=True, exist_ok=True)
+        aws_runtime.hydrate_job(job_id, path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Job nao encontrado.")
     return path
@@ -3424,6 +3541,23 @@ def _validate_upload(upload: UploadFile, extension: str, message: str) -> None:
     filename = upload.filename or ""
     if not filename.lower().endswith(extension):
         raise ValueError(message)
+
+
+async def _read_upload_limited(upload: UploadFile, label: str) -> bytes:
+    limit = _max_upload_bytes()
+    data = await upload.read(limit + 1)
+    if len(data) > limit:
+        limit_mb = limit // (1024 * 1024)
+        raise ValueError(f"{label} excede o limite de {limit_mb} MB.")
+    return data
+
+
+def _max_upload_bytes() -> int:
+    return max(_env_int("AUTO_PPT_MAX_UPLOAD_MB", 250), 1) * 1024 * 1024
+
+
+def _max_request_bytes() -> int:
+    return max(_env_int("AUTO_PPT_MAX_REQUEST_MB", 600), 1) * 1024 * 1024
 
 
 def _save_job_metadata(job_dir: Path, payload: dict) -> None:
@@ -3461,7 +3595,7 @@ def _ai_source_match_max_calls() -> int:
 #    pelo matching local ainda assim recebe uma segunda opiniao enxuta de IA
 #    (troca de datasource + receita estrutural) antes do preview ficar pronto.
 # 3. _auto_slide_ai_confidence_floor() (este arquivo): decide se a revisao mais
-#    pesada por slide (imagem + matriz tipada) roda automaticamente quando
+#    pesada por slide (understanding + matriz tipada) roda automaticamente quando
 #    AUTO_PPT_AUTO_SLIDE_AI esta ligado.
 def _ai_review_confidence_floor() -> float:
     return min(max(_env_float("AUTO_PPT_AI_REVIEW_CONFIDENCE_FLOOR", 0.80), 0.0), 1.0)
@@ -3477,12 +3611,6 @@ def _ai_source_match_plausibility_floor() -> float:
     # de match). Nesses casos nao gastamos uma chamada de IA - o alvo fica pendente
     # para upload manual. Evita, por exemplo, mandar tabelas "Base:" sem fonte.
     return min(max(_env_float("AUTO_PPT_AI_MATCH_PLAUSIBILITY_FLOOR", 0.30), 0.0), 1.0)
-
-
-def _slide_ai_image_enabled() -> bool:
-    # Por padrao, a IA recebe somente estrutura extraida por codigo (Editar dados,
-    # titulos e dumps XLSX). Ative so quando um caso precisar de contexto visual.
-    return _env_bool("AUTO_PPT_AI_SLIDE_IMAGE", False)
 
 
 def _auto_source_match_review_enabled() -> bool:

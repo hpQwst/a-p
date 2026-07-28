@@ -95,7 +95,9 @@ Single shared team password in `AUTO_PPT_TEAM_PASSWORD`, enforced by the `requir
 
 ## Deploy
 
-**AWS App Runner** (`us-east-1`), single container that does everything in-process — no separate workers, no queue. Image built in CodeBuild (`buildspec.yml`) from `Dockerfile`, so no local Docker required. Shared state lives in S3 (`AUTO_PPT_STORAGE_BACKEND=s3`), which is what makes every user see the same projects and mapping templates.
+**AWS App Runner** (`us-east-1`), single container that does everything in-process — no separate workers, no queue. Shared state lives in S3 (`AUTO_PPT_STORAGE_BACKEND=s3`), which is what makes every user see the same projects and mapping templates.
+
+Code lives in **Azure DevOps** (`qwst-auto-ppt`); AWS never connects to the repo. `deploy.ps1` packs the current commit with `git archive`, uploads the zip to S3 and CodeBuild builds from that — CodeBuild cannot read Azure Repos natively, and this avoids mirroring or cross-cloud credentials. No local Docker needed, no console setup.
 
 ```powershell
 .\infra\aws\deploy.ps1 -TeamPassword "a-senha-da-equipe"

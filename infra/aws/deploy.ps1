@@ -3,12 +3,13 @@
     Publica o QWST Auto PPT no AWS App Runner.
 
 .DESCRIPTION
-    Faz, em ordem: garante o repositorio ECR, constroi a imagem no CodeBuild (nao
-    precisa de Docker na sua maquina), guarda os segredos no Secrets Manager e
-    cria/atualiza a stack do App Runner.
+    O codigo e enviado como um zip para o S3 e construido no CodeBuild, entao a
+    AWS nao precisa de conexao com o repositorio. O Azure DevOps continua sendo a
+    fonte da verdade do codigo; a AWS so recebe o conteudo do commit atual.
 
-    Rodar de novo publica uma versao nova: reconstroi a imagem e manda o App
-    Runner trocar. Nenhuma maquina da equipe precisa ser atualizada.
+    Nao e preciso ter Docker na maquina, nem configurar nada no console.
+
+    Rodar de novo publica uma versao nova.
 
 .EXAMPLE
     .\infra\aws\deploy.ps1 -TeamPassword "senha-da-equipe"
@@ -22,23 +23,70 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
-$Template = Join-Path $PSScriptRoot "apprunner.yaml"
-$StackName = "$AppName-stack"
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$SourceKey = "source/source.zip"
 
 if (-not $AppName.StartsWith("squad4") -and -not $AppName.StartsWith("squad5")) {
     throw "AppName precisa comecar com squad4/squad5. Recursos fora disso pertencem a outras pessoas."
 }
-if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
-    throw "AWS CLI nao encontrado."
+foreach ($tool in @("aws", "git")) {
+    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "$tool nao encontrado." }
 }
 
 $AccountId = (aws sts get-caller-identity --query Account --output text).Trim()
-$RepositoryUri = "$AccountId.dkr.ecr.$Region.amazonaws.com/$AppName"
-$BucketName = "$AppName-$AccountId"
 Write-Host "Conta $AccountId | regiao $Region | app $AppName" -ForegroundColor Cyan
 
-# --- segredos -------------------------------------------------------------
+# --- 1. infraestrutura de build ------------------------------------------
+Write-Host "[1/5] Infraestrutura de build (ECR, bucket, CodeBuild)..." -ForegroundColor Cyan
+aws cloudformation deploy `
+    --template-file (Join-Path $PSScriptRoot "build.yaml") `
+    --stack-name "$AppName-build" `
+    --capabilities CAPABILITY_NAMED_IAM `
+    --region $Region `
+    --parameter-overrides "AppName=$AppName" "SourceObjectKey=$SourceKey" | Out-Null
+
+$BuildBucket = aws cloudformation describe-stacks --stack-name "$AppName-build" --region $Region `
+    --query "Stacks[0].Outputs[?OutputKey=='BuildBucketName'].OutputValue" --output text
+$RepositoryUri = aws cloudformation describe-stacks --stack-name "$AppName-build" --region $Region `
+    --query "Stacks[0].Outputs[?OutputKey=='RepositoryUri'].OutputValue" --output text
+
+# --- 2. empacota o commit atual ------------------------------------------
+$ImageTag = (git -C $RepoRoot rev-parse --short=12 HEAD).Trim()
+$ImageUri = "${RepositoryUri}:${ImageTag}"
+
+if (-not $SkipBuild) {
+    $dirty = git -C $RepoRoot status --porcelain
+    if ($dirty) {
+        Write-Warning "Ha alteracoes nao commitadas. O deploy publica o ULTIMO COMMIT ($ImageTag), nao o que esta no disco."
+    }
+
+    Write-Host "[2/5] Empacotando o commit $ImageTag..." -ForegroundColor Cyan
+    # git archive respeita o .gitignore e nao leva .git, workspace_data nem .env.
+    $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) "$AppName-$ImageTag.zip"
+    git -C $RepoRoot archive --format=zip --output $zipPath HEAD
+    if (-not (Test-Path $zipPath)) { throw "Falha ao empacotar o codigo." }
+
+    Write-Host "[3/5] Enviando para s3://$BuildBucket/$SourceKey..." -ForegroundColor Cyan
+    aws s3 cp $zipPath "s3://$BuildBucket/$SourceKey" --region $Region | Out-Null
+    Remove-Item $zipPath -Force
+
+    # --- 3. build --------------------------------------------------------
+    Write-Host "[4/5] Construindo a imagem no CodeBuild..." -ForegroundColor Cyan
+    $buildId = aws codebuild start-build `
+        --project-name "$AppName-build" `
+        --environment-variables-override "name=IMAGE_TAG,value=$ImageTag,type=PLAINTEXT" `
+        --region $Region --query "build.id" --output text
+    do {
+        Start-Sleep -Seconds 10
+        $status = (aws codebuild batch-get-builds --ids $buildId --region $Region --query "builds[0].buildStatus" --output text).Trim()
+        Write-Host "      $status" -ForegroundColor DarkGray
+    } while ($status -eq "IN_PROGRESS")
+    if ($status -ne "SUCCEEDED") {
+        throw "Build falhou ($status). Logs: aws codebuild batch-get-builds --ids $buildId --region $Region"
+    }
+}
+
+# --- 4. segredos ----------------------------------------------------------
 if (-not $OpenAIKey) {
     $envFile = Join-Path $RepoRoot ".env"
     if (Test-Path $envFile) {
@@ -52,50 +100,20 @@ if (-not $TeamPassword) { throw "Informe -TeamPassword: e a senha que a equipe v
 function Set-Secret([string]$Name, [string]$Value) {
     $arn = aws secretsmanager create-secret --name $Name --secret-string $Value --region $Region --query ARN --output text 2>$null
     if (-not $arn) {
-        aws secretsmanager put-secret-value --secret-id $Name --secret-string $Value --region $Region --query ARN --output text | Out-Null
+        aws secretsmanager put-secret-value --secret-id $Name --secret-string $Value --region $Region | Out-Null
         $arn = aws secretsmanager describe-secret --secret-id $Name --region $Region --query ARN --output text
     }
     return $arn.Trim()
 }
 
-Write-Host "Guardando segredos no Secrets Manager..." -ForegroundColor Cyan
 $OpenAISecretArn = Set-Secret "$AppName/openai-api-key" $OpenAIKey
 $TeamPasswordSecretArn = Set-Secret "$AppName/team-password" $TeamPassword
 
-# --- repositorio de imagens ----------------------------------------------
-aws ecr describe-repositories --repository-names $AppName --region $Region 2>$null | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Criando repositorio ECR $AppName..." -ForegroundColor Cyan
-    aws ecr create-repository --repository-name $AppName --image-scanning-configuration scanOnPush=true --region $Region | Out-Null
-}
-
-# --- build da imagem no CodeBuild ----------------------------------------
-$ImageTag = (git -C $RepoRoot rev-parse --short=12 HEAD 2>$null)
-if (-not $ImageTag) { $ImageTag = Get-Date -Format "yyyyMMddHHmmss" }
-$ImageUri = "${RepositoryUri}:${ImageTag}"
-
-if (-not $SkipBuild) {
-    Write-Host "Construindo a imagem no CodeBuild (sem Docker local)..." -ForegroundColor Cyan
-    Write-Host "  Projeto CodeBuild esperado: $AppName-build" -ForegroundColor DarkGray
-    Write-Host "  Se ainda nao existir, veja DEPLOYMENT.md secao 'Build da imagem'." -ForegroundColor DarkGray
-    $buildId = aws codebuild start-build `
-        --project-name "$AppName-build" `
-        --environment-variables-override "name=IMAGE_REPO_NAME,value=$AppName,type=PLAINTEXT" "name=IMAGE_TAG,value=$ImageTag,type=PLAINTEXT" `
-        --region $Region --query "build.id" --output text
-    Write-Host "  build: $buildId" -ForegroundColor DarkGray
-    do {
-        Start-Sleep -Seconds 10
-        $status = aws codebuild batch-get-builds --ids $buildId --region $Region --query "builds[0].buildStatus" --output text
-        Write-Host "  status: $status" -ForegroundColor DarkGray
-    } while ($status -eq "IN_PROGRESS")
-    if ($status -ne "SUCCEEDED") { throw "Build falhou: $status" }
-}
-
-# --- stack ----------------------------------------------------------------
-Write-Host "Publicando a stack $StackName..." -ForegroundColor Cyan
+# --- 5. aplicacao ---------------------------------------------------------
+Write-Host "[5/5] Publicando a aplicacao..." -ForegroundColor Cyan
 aws cloudformation deploy `
-    --template-file $Template `
-    --stack-name $StackName `
+    --template-file (Join-Path $PSScriptRoot "apprunner.yaml") `
+    --stack-name "$AppName-stack" `
     --capabilities CAPABILITY_NAMED_IAM `
     --region $Region `
     --parameter-overrides `
@@ -103,9 +121,9 @@ aws cloudformation deploy `
         "ImageUri=$ImageUri" `
         "OpenAISecretArn=$OpenAISecretArn" `
         "TeamPasswordSecretArn=$TeamPasswordSecretArn" `
-        "BucketName=$BucketName"
+        "BucketName=$AppName-$AccountId" | Out-Null
 
-$ServiceUrl = aws cloudformation describe-stacks --stack-name $StackName --region $Region `
+$ServiceUrl = aws cloudformation describe-stacks --stack-name "$AppName-stack" --region $Region `
     --query "Stacks[0].Outputs[?OutputKey=='ServiceUrl'].OutputValue" --output text
 
 Write-Host ""

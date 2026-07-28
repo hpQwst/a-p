@@ -7,15 +7,23 @@ nenhuma, e todo mundo enxerga os mesmos projetos e mapeamentos.
 ## Arquitetura
 
 ```
-Equipe (navegador)
-      │  HTTPS
+Azure DevOps  ──► (repositório: fonte da verdade do código)
+      │
+      │  deploy.ps1 empacota o commit e envia
       ▼
-App Runner  squad4e5-auto-ppt        1 vCPU / 2 GB, no máximo 1 instância
-      │  imagem
-      ├─────────► ECR  squad4e5-auto-ppt
-      │  estado compartilhado
-      └─────────► S3   squad4e5-auto-ppt-<conta>
+S3 (build) ──► CodeBuild ──► ECR ──┐
+                                   │
+Equipe (navegador) ──HTTPS──► App Runner  squad4e5-auto-ppt
+                                   │       1 vCPU / 2 GB, no máx. 1 instância
+                                   └──► S3  squad4e5-auto-ppt-<conta>
+                                            (estado compartilhado)
 ```
+
+O código vive no Azure DevOps. A AWS **não se conecta ao repositório**: o
+`deploy.ps1` empacota o commit atual com `git archive`, envia o zip para o S3 e o
+CodeBuild constrói a partir dele. Isso evita credencial cruzada entre nuvens e
+funciona com qualquer serviço de repositório — o CodeBuild, aliás, não consegue
+ler Azure Repos nativamente.
 
 Um único container faz tudo: recebe o upload, analisa, chama a IA quando
 necessário e gera o PPT. Não existem workers separados nem fila.
@@ -38,32 +46,33 @@ escrita condicional por ETag no `project_store.py`.
 - `OPENAI_API_KEY` no `.env` local (ou passado por parâmetro)
 - Uma senha para a equipe
 
-Não é preciso ter Docker: a imagem é construída no CodeBuild.
+Não é preciso ter Docker nem conectar a AWS ao repositório: a imagem é
+construída no CodeBuild a partir de um zip.
 
 > **Limite de recursos:** só criar/alterar recursos que comecem com `squad4`/`squad5`.
 > Tudo o mais na conta pertence a outras pessoas.
 
-## Build da imagem (configuração única)
-
-O deploy usa um projeto CodeBuild chamado `squad4e5-auto-ppt-build`, que lê o
-`buildspec.yml` da raiz. Crie-o uma única vez (console do CodeBuild ou CLI),
-apontando para este repositório, com:
-
-- Ambiente: Amazon Linux, imagem padrão, **modo privilegiado ligado** (necessário para `docker build`)
-- Variáveis: `AWS_DEFAULT_REGION=us-east-1`, `IMAGE_REPO_NAME=squad4e5-auto-ppt`
-- Permissão na role do CodeBuild para `ecr:GetAuthorizationToken`,
-  `ecr:BatchCheckLayerAvailability`, `ecr:PutImage`, `ecr:InitiateLayerUpload`,
-  `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`
-
 ## Publicar
+
+Não há configuração manual no console: o próprio script cria tudo.
 
 ```powershell
 .\infra\aws\deploy.ps1 -TeamPassword "a-senha-da-equipe"
 ```
 
-O script cria o repositório ECR, constrói a imagem, guarda os segredos no
-Secrets Manager e sobe a stack `apprunner.yaml`. No fim ele imprime a URL. Envie
-essa URL para a equipe — a primeira visita pede a senha.
+O que ele faz, em ordem:
+
+1. Sobe a stack de build (`build.yaml`): repositório ECR, bucket de build e projeto CodeBuild
+2. Empacota o **último commit** com `git archive` e envia o zip para o S3
+3. Dispara o CodeBuild e espera a imagem ficar pronta
+4. Guarda a chave da OpenAI e a senha da equipe no Secrets Manager
+5. Sobe a stack da aplicação (`apprunner.yaml`) e imprime a URL
+
+Envie a URL para a equipe — a primeira visita pede a senha.
+
+> O deploy publica o **último commit**, não o que está no disco. Se houver
+> alterações não commitadas, o script avisa. Commite e envie para o Azure DevOps
+> antes de publicar.
 
 ## Publicar uma versão nova
 

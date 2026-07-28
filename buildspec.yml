@@ -1,15 +1,17 @@
 version: 0.2
 
+# O codigo chega como um zip no S3 (ver infra/aws/deploy.ps1), entao nao existe
+# CODEBUILD_RESOLVED_SOURCE_VERSION aqui: a tag da imagem vem em IMAGE_TAG,
+# definida pelo script a partir do commit que esta sendo publicado.
+
 phases:
   pre_build:
     commands:
-      - aws --version
+      - test -n "$IMAGE_TAG" || { echo "IMAGE_TAG e obrigatorio"; exit 1; }
+      - test -n "$IMAGE_REPO_NAME" || { echo "IMAGE_REPO_NAME e obrigatorio"; exit 1; }
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
-      - COMMIT_SHA=${CODEBUILD_RESOLVED_SOURCE_VERSION:-manual}
-      - SHORT_SHA=$(printf "%.12s" "$COMMIT_SHA")
-      - IMAGE_TAG=${IMAGE_TAG:-$SHORT_SHA}
   build:
     commands:
       - docker build -t $REPOSITORY_URI:$IMAGE_TAG .

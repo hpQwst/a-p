@@ -1,18 +1,29 @@
 # Infraestrutura AWS
 
-Dois arquivos, um caminho só:
+Três arquivos, um caminho só:
 
 | Arquivo | O que faz |
 | --- | --- |
-| `apprunner.yaml` | CloudFormation: bucket S3 do estado compartilhado, roles IAM, escala e o serviço App Runner |
-| `deploy.ps1` | Publica: garante o ECR, constrói no CodeBuild, guarda os segredos e sobe a stack |
+| `build.yaml` | CloudFormation: ECR, bucket de build e projeto CodeBuild |
+| `apprunner.yaml` | CloudFormation: bucket do estado compartilhado, roles IAM, escala e o serviço App Runner |
+| `deploy.ps1` | Publica: empacota o commit, envia ao S3, constrói, guarda segredos e sobe as stacks |
 
 ```powershell
 .\infra\aws\deploy.ps1 -TeamPassword "a-senha-da-equipe"
 ```
 
-O passo a passo completo, incluindo a configuração única do projeto CodeBuild,
-está em [`DEPLOYMENT.md`](../../DEPLOYMENT.md).
+Nada precisa ser configurado no console. O passo a passo está em
+[`DEPLOYMENT.md`](../../DEPLOYMENT.md).
+
+## Por que o build vem de um zip no S3
+
+O código mora no Azure DevOps, e o CodeBuild **não lê Azure Repos** (as origens
+aceitas são CodeCommit, GitHub, GitLab, Bitbucket, S3 e CodePipeline). Em vez de
+espelhar o repositório ou guardar credencial de uma nuvem na outra, o
+`deploy.ps1` empacota o commit atual com `git archive` e envia o zip.
+
+Isso mantém o Azure DevOps como fonte da verdade, não depende de nenhum serviço
+descontinuado e não exige integração entre as nuvens.
 
 ## Regras que valem aqui
 

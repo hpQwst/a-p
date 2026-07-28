@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 import json
 import os
 import re
+import time
 import uuid
 
 
 SQUADS = [f"squad{i}" for i in range(1, 6)]
 DEFAULT_DATA_ROOT = "workspace_data"
+LOCK_TIMEOUT_SECONDS = 20
 
 
 @dataclass(frozen=True)
@@ -245,6 +248,26 @@ def save_mapping_template(
     description: str = "",
     metadata: dict | None = None,
 ) -> MappingTemplateRef:
+    """Salva o mapeamento aprendido pelo squad.
+
+    E uma sequencia ler-modificar-gravar (le o template existente, funde e grava).
+    No backend local ela roda inteira sob lock: sem isso, duas pessoas terminando
+    um PPT ao mesmo tempo fariam uma apagar o aprendizado da outra."""
+    if storage_backend() == "local":
+        lock_target = data_root() / "squads" / normalize_squad(project.squad) / "mapping_templates" / "_squad"
+        with _file_lock(lock_target):
+            return _save_mapping_template_unlocked(project, name, entries, slug, description, metadata)
+    return _save_mapping_template_unlocked(project, name, entries, slug, description, metadata)
+
+
+def _save_mapping_template_unlocked(
+    project: ProjectRef,
+    name: str,
+    entries: dict,
+    slug: str = "",
+    description: str = "",
+    metadata: dict | None = None,
+) -> MappingTemplateRef:
     squad = normalize_squad(project.squad)
     backend = storage_backend()
     clean_entries = _normalize_mapping_entries(entries)
@@ -318,8 +341,7 @@ def save_project_bytes(project: ProjectRef, parts: list[str], filename: str, dat
     backend = storage_backend()
     if backend == "local":
         path = _local_project_path(project, parts, filename)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        _atomic_write_bytes(path, data)
         return str(path)
     if backend == "s3":
         key = _s3_project_prefix(project.squad, project.slug, *parts, filename)
@@ -357,6 +379,20 @@ def load_project_json(project: ProjectRef, parts: list[str], filename: str):
 
 
 def append_memory_correction(project: ProjectRef, correction: dict) -> str:
+    """Le, acrescenta e grava. No backend local a sequencia inteira fica sob lock,
+    senao duas correcoes simultaneas se sobrescrevem (a ultima apaga a outra).
+
+    No S3 cada put_object e atomico (ninguem le um arquivo pela metade), mas duas
+    escritas simultaneas ainda podem perder uma correcao. Com o volume de uso
+    atual isso e improvavel; se virar problema, o caminho e escrita condicional
+    por ETag."""
+    if storage_backend() == "local":
+        path = _local_project_path(project, ["memory"], "corrections.json")
+        with _file_lock(path):
+            corrections = load_memory_corrections(project)
+            corrections.append(correction)
+            _atomic_write_bytes(path, json.dumps(corrections, ensure_ascii=False, indent=2).encode("utf-8"))
+            return str(path)
     corrections = load_memory_corrections(project)
     corrections.append(correction)
     return save_project_json(project, ["memory"], "corrections.json", corrections)
@@ -450,12 +486,112 @@ def _local_project_path(project: ProjectRef, parts: list[str], filename: str) ->
 
 
 def _read_json_file(path: Path):
-    return json.loads(path.read_text(encoding="utf-8"))
+    """No Windows, ler um arquivo bem no instante em que ele esta sendo trocado
+    levanta PermissionError momentaneo. Tentamos de novo por alguns instantes em
+    vez de estourar erro para o usuario."""
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def _write_json_file(path: Path, payload) -> None:
+    _atomic_write_bytes(path, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Grava tudo-ou-nada: escreve num temporario na mesma pasta e troca com
+    os.replace, que e atomico. Sem isso, um crash (ou dois processos gravando ao
+    mesmo tempo) deixa o JSON truncado e o mapeamento do squad se perde."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        with open(temp_path, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # No Windows os.replace falha com PermissionError enquanto alguem tiver o
+        # destino aberto (no Linux a troca sempre funciona). Tentamos de novo por
+        # alguns instantes em vez de perder a gravacao.
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                os.replace(temp_path, path)
+                break
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+@contextmanager
+def _file_lock(path: Path):
+    """Trava exclusiva entre processos, para sequencias ler-modificar-gravar.
+    O lock e do sistema operacional: se o processo morrer, ele e liberado
+    sozinho (nao existe lock preso)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f"{path.name}.lock")
+    handle = open(lock_path, "a+b")
+    try:
+        _acquire_lock(handle)
+        try:
+            yield
+        finally:
+            _release_lock(handle)
+    finally:
+        handle.close()
+
+
+def _acquire_lock(handle) -> None:
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    if os.name == "nt":
+        import msvcrt
+
+        while True:
+            try:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Outro processo esta gravando este arquivo. Tente de novo.")
+                time.sleep(0.15)
+    else:
+        import fcntl
+
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Outro processo esta gravando este arquivo. Tente de novo.")
+                time.sleep(0.15)
+
+
+def _release_lock(handle) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
 
 
 def _s3_bucket(required: bool = False) -> str:

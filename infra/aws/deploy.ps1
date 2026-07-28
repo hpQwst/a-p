@@ -98,12 +98,28 @@ if (-not $OpenAIKey) { throw "Informe -OpenAIKey ou deixe OPENAI_API_KEY no .env
 if (-not $TeamPassword) { throw "Informe -TeamPassword: e a senha que a equipe vai digitar para entrar." }
 
 function Set-Secret([string]$Name, [string]$Value) {
-    $arn = aws secretsmanager create-secret --name $Name --secret-string $Value --region $Region --query ARN --output text 2>$null
-    if (-not $arn) {
-        aws secretsmanager put-secret-value --secret-id $Name --secret-string $Value --region $Region | Out-Null
-        $arn = aws secretsmanager describe-secret --secret-id $Name --region $Region --query ARN --output text
+    # Sem redirecionar stderr: no PowerShell 5.1 isso vira NativeCommandError e,
+    # com ErrorActionPreference=Stop, aborta o script mesmo quando o comando so
+    # avisou que o secret ja existe. Decidimos pelo codigo de saida.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        # list-secrets devolve vazio quando nao existe. describe-secret serviria,
+        # mas escreve no stderr e polui a saida do deploy na primeira execucao.
+        $existing = aws secretsmanager list-secrets --region $Region `
+            --filters "Key=name,Values=$Name" --query "SecretList[?Name=='$Name'].ARN | [0]" --output text
+        if ($LASTEXITCODE -eq 0 -and $existing -and $existing -ne "None") {
+            aws secretsmanager put-secret-value --secret-id $Name --secret-string $Value --region $Region | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Nao consegui atualizar o secret $Name." }
+            return $existing.Trim()
+        }
+        $created = aws secretsmanager create-secret --name $Name --secret-string $Value --region $Region --query ARN --output text
+        if ($LASTEXITCODE -ne 0 -or -not $created) { throw "Nao consegui criar o secret $Name." }
+        return $created.Trim()
     }
-    return $arn.Trim()
+    finally {
+        $ErrorActionPreference = $previous
+    }
 }
 
 $OpenAISecretArn = Set-Secret "$AppName/openai-api-key" $OpenAIKey

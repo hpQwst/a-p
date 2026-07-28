@@ -104,5 +104,32 @@ class AnalysisWarningTests(unittest.TestCase):
         self.assertNotIn("mesmo nome de arquivo", text)
 
 
+class UploadDuplicateNameTests(unittest.TestCase):
+    """Renomear duplicata em silencio faria o mapeamento salvo reaplicar a
+    planilha errada depois, porque ele procura a fonte pelo nome do arquivo."""
+
+    def setUp(self) -> None:
+        from web.main import _coalesce_datasources_to_zip
+
+        self.coalesce = _coalesce_datasources_to_zip
+        self.book = _workbook_bytes({"Base": SIMPLE})
+
+    def test_rejects_two_files_with_the_same_name(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self.coalesce([("dados.xlsx", self.book), ("dados.xlsx", self.book)])
+        self.assertIn("mesmo nome", str(caught.exception))
+        self.assertIn("dados.xlsx", str(caught.exception))
+
+    def test_same_name_in_different_folders_still_collides(self) -> None:
+        with self.assertRaises(ValueError):
+            self.coalesce([("a/dados.xlsx", self.book), ("b/dados.xlsx", self.book)])
+
+    def test_distinct_names_are_packed(self) -> None:
+        data, label = self.coalesce([("um.xlsx", self.book), ("dois.xlsx", self.book)])
+        with ZipFile(BytesIO(data)) as archive:
+            self.assertEqual(sorted(archive.namelist()), ["dois.xlsx", "um.xlsx"])
+        self.assertEqual(label, "2 planilhas")
+
+
 if __name__ == "__main__":
     unittest.main()

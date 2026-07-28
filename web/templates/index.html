@@ -108,6 +108,11 @@
               <strong>Memória do squad</strong>
             </div>
             <p class="section-hint">Opcional — se este squad já ajustou um deck parecido antes, a ferramenta reaplica sozinha o que aprendeu.</p>
+            <details class="explainer">
+              <summary>O que a ferramenta lembra?</summary>
+              <p>Toda vez que você baixa um PowerPoint, ela guarda <strong>qual planilha alimenta cada gráfico</strong>. Na próxima vez, refaz essas ligações sozinha.</p>
+              <p>Ela reconhece pelo <strong>conteúdo</strong>, não só pelo nome: se as planilhas forem renomeadas, ou o deck for refeito do zero, o aprendizado continua valendo. Gráficos novos aparecem para você ligar, e entram na memória do squad.</p>
+            </details>
             <label>
               <span>Usar memória salva</span>
               <select name="mapping_template_ref" data-mapping-template-select>
@@ -280,8 +285,8 @@
               </div>
             {% else %}
               <div class="empty-state compact">
-                <strong>Nenhum mapeamento salvo</strong>
-                <p>Ao baixar um PPT, o mapeamento do squad é aprendido e reaproveitado na próxima vez.</p>
+                <strong>Nada memorizado ainda</strong>
+                <p>Quando você baixar o primeiro PowerPoint, a ferramenta guarda qual planilha alimenta cada gráfico e reaproveita na próxima vez.</p>
               </div>
             {% endif %}
           </section>

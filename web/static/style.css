@@ -2626,6 +2626,37 @@ body:not(.show-advanced) .advanced-only {
   font-size: 12px;
 }
 
+/* explicador recolhido: responde uma duvida sem poluir quem ja sabe */
+.explainer {
+  margin-top: -4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-left: 2px solid var(--wire);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.explainer > summary {
+  cursor: pointer;
+  color: var(--accent-strong);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.explainer[open] > summary {
+  margin-bottom: 8px;
+}
+
+.explainer p {
+  color: var(--text-soft);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.explainer p + p {
+  margin-top: 7px;
+}
+
 .field-hint {
   display: block;
   margin-top: 5px;

@@ -3640,19 +3640,24 @@ def _coalesce_datasources_to_zip(payloads: list[tuple[str, bytes]]) -> tuple[byt
         return zips[0][1], zips[0][0] or "datasources.zip"
     if not xlsx:
         raise ValueError("Formato não suportado. Envie planilhas .xlsx ou um .zip com elas.")
+
+    # Recusa nomes repetidos em vez de renomear escondido: o mapeamento salvo
+    # procura a planilha pelo nome do arquivo antes de olhar o conteudo, entao
+    # dois arquivos homonimos podem alimentar o grafico errado na proxima vez.
+    names = [safe_filename(name or "planilha.xlsx") or "planilha.xlsx" for name, _data in xlsx]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(
+            "Estas planilhas foram enviadas com o mesmo nome: "
+            + ", ".join(repeated)
+            + ". Renomeie para nomes diferentes e envie de novo — o nome do arquivo é usado "
+            "para lembrar qual planilha alimenta cada gráfico."
+        )
+
     buffer = BytesIO()
-    seen: set[str] = set()
     with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
-        for name, data in xlsx:
-            base = safe_filename(name or "planilha.xlsx") or "planilha.xlsx"
-            final = base
-            counter = 1
-            while final in seen:
-                stem = base[:-5] if base.lower().endswith(".xlsx") else base
-                final = f"{stem}_{counter}.xlsx"
-                counter += 1
-            seen.add(final)
-            archive.writestr(final, data)
+        for final_name, (_name, data) in zip(names, xlsx):
+            archive.writestr(final_name, data)
     label = xlsx[0][0] if len(xlsx) == 1 else f"{len(xlsx)} planilhas"
     return buffer.getvalue(), label
 

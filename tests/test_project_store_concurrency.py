@@ -30,6 +30,27 @@ class AtomicWriteTests(unittest.TestCase):
         leftovers = [item.name for item in path.parent.iterdir() if item.name.endswith(".tmp")]
         self.assertEqual(leftovers, [])
 
+    def test_write_still_lands_when_the_os_refuses_to_replace(self) -> None:
+        """No Windows o antivirus segura arquivos grandes recem-escritos e o
+        os.replace falha com PermissionError. A gravacao nao pode se perder."""
+        path = Path(self._tempdir.name) / "travado.json"
+        path.write_bytes(b'{"antes": true}')
+        original_replace = os.replace
+
+        def always_denied(src, dst):
+            raise PermissionError(5, "Acesso negado")
+
+        os.replace = always_denied
+        try:
+            project_store.LOCK_TIMEOUT_SECONDS  # garante import intacto
+            project_store._atomic_write_bytes(path, b'{"depois": true}')
+        finally:
+            os.replace = original_replace
+
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"depois": True})
+        leftovers = [item.name for item in path.parent.iterdir() if item.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
     def test_concurrent_mapping_template_saves_do_not_lose_entries(self) -> None:
         project = project_store.create_project("squad1", "Projeto concorrencia")
 

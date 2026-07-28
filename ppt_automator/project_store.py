@@ -515,17 +515,27 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         # No Windows os.replace falha com PermissionError enquanto alguem tiver o
-        # destino aberto (no Linux a troca sempre funciona). Tentamos de novo por
-        # alguns instantes em vez de perder a gravacao.
-        deadline = time.monotonic() + 5
-        while True:
+        # destino (ou o proprio temporario) aberto; no Linux a troca sempre
+        # funciona. Antivirus costuma segurar arquivos grandes recem-escritos,
+        # como .pptx, por varios segundos.
+        deadline = time.monotonic() + 10
+        replaced = False
+        while not replaced:
             try:
                 os.replace(temp_path, path)
-                break
+                replaced = True
             except PermissionError:
                 if time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.05)
+                    break
+                time.sleep(0.1)
+        if not replaced:
+            # Ultimo recurso: grava direto no destino. Perde a atomicidade, mas
+            # e melhor que abortar a operacao do usuario - e era exatamente o
+            # comportamento anterior a esta funcao existir.
+            with open(path, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
     finally:
         if temp_path.exists():
             try:

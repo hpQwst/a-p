@@ -587,9 +587,10 @@
                               <span>Enviar outra planilha (.xlsx)</span>
                               <input name="datasource" type="file" accept=".xlsx" required>
                             </label>
-                            <label class="advanced-only">
+                            <label>
                               <span>Intervalo de células (opcional)</span>
                               <input name="cell_range" type="text" value="{{ item.manual_range }}" placeholder="D5:G12 ou Aba!D5:G12">
+                              <small class="field-hint">Use quando a planilha tem várias abas ou mais de uma tabela. Ex.: <code>Base!A1:D10</code>.</small>
                             </label>
                             <button type="submit">Aplicar planilha</button>
                           </form>

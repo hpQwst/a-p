@@ -407,6 +407,10 @@ def _source_match_key(value: Any) -> str:
     return Path(text).name.lower()
 
 
+def _basename(file_name: str) -> str:
+    return str(file_name or "").replace("\\", "/").split("/")[-1]
+
+
 def _analysis_warnings(
     targets: list[PptTarget],
     sources: list[ParsedXlsxTable],
@@ -430,6 +434,46 @@ def _analysis_warnings(
             "Existem XLSX com o mesmo identificador numerico: "
             + ", ".join(duplicate_sources[:12])
             + ". O sistema usa estrutura e contexto como desempate, mas vale revisar o preview."
+        )
+
+    # Planilhas com mais de uma aba: so a primeira e lida, o resto some sem aviso.
+    multi_sheet = [
+        f"{_basename(source.file_name)} (lida: {source.sheet_name}; ignoradas: "
+        + ", ".join(name for name in source.sheet_names if name != source.sheet_name)
+        + ")"
+        for source in sources
+        if len(source.sheet_names) > 1
+    ]
+    if multi_sheet:
+        warnings.append(
+            "Estas planilhas tem mais de uma aba e so a primeira foi lida: "
+            + "; ".join(multi_sheet[:8])
+            + ". Se os dados certos estao em outra aba, use Trocar a planilha e informe o intervalo "
+            "no formato Aba!A1:D10."
+        )
+
+    # Varias tabelas na mesma aba viram um retangulo so: numero errado em silencio.
+    multi_block = [
+        f"{_basename(source.file_name)} ({source.table_blocks} tabelas)"
+        for source in sources
+        if source.table_blocks > 1
+    ]
+    if multi_block:
+        warnings.append(
+            "Estas planilhas parecem ter mais de uma tabela na mesma aba: "
+            + "; ".join(multi_block[:8])
+            + ". A leitura junta tudo num bloco so, o que gera numeros errados. Informe o intervalo "
+            "exato da tabela certa (ex.: A1:D10) em Trocar a planilha."
+        )
+
+    # Nomes repetidos: o mapeamento aprendido casa por nome do arquivo primeiro.
+    basename_counts = Counter(_basename(source.file_name).lower() for source in sources)
+    duplicate_names = sorted(name for name, count in basename_counts.items() if count > 1)
+    if duplicate_names:
+        warnings.append(
+            "Ha planilhas com o mesmo nome de arquivo: "
+            + ", ".join(duplicate_names[:8])
+            + ". Renomeie para nomes distintos, senao o mapeamento salvo pode reaplicar a planilha errada."
         )
 
     mapped_ids = {plan.target_id for plan in plans}

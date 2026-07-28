@@ -2626,6 +2626,22 @@ body:not(.show-advanced) .advanced-only {
   font-size: 12px;
 }
 
+.field-hint {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 400;
+}
+
+.field-hint code {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-inset);
+}
+
 /* L3 — trocar planilha recolhido + planilha faltando */
 .swap-source {
   margin-top: 6px;

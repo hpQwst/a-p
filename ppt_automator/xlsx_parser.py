@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
@@ -30,6 +30,12 @@ class ParsedXlsxTable:
     used_range: tuple[int, int, int, int] | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     preview_rows: list[list[Any]] = field(default_factory=list)
+    # Abas existentes no arquivo. So a primeira e lida quando nao ha range com
+    # nome de aba, entao mais de uma aqui significa conteudo ignorado em silencio.
+    sheet_names: list[str] = field(default_factory=list)
+    # Blocos retangulares separados encontrados na aba lida. Mais de um significa
+    # que varias tabelas foram somadas num retangulo so, gerando numero errado.
+    table_blocks: int = 1
 
     @property
     def graph_id(self) -> str:
@@ -83,6 +89,11 @@ def parse_xlsx_table(
         sheet_name=data_ws.title,
         used_range=used_range,
         metadata=metadata,
+    )
+    parsed = replace(
+        parsed,
+        sheet_names=list(data_wb.sheetnames),
+        table_blocks=count_table_blocks(trimmed_rows),
     )
     data_wb.close()
     formula_wb.close()
@@ -335,6 +346,50 @@ def _trim_table(rows: list[list[Any]]) -> tuple[list[list[Any]], tuple[int, int,
     for row in rows[min_row : max_row + 1]:
         trimmed.append(list(row[min_col : max_col + 1]))
     return trimmed, (min_row + 1, min_col + 1, max_row + 1, max_col + 1)
+
+
+def count_table_blocks(rows: list[list[Any]]) -> int:
+    """Quantas tabelas de dados separadas existem nesta aba.
+
+    Serve so para avisar o usuario: o parser junta a aba inteira num retangulo,
+    entao duas tabelas empilhadas viram numeros errados sem ninguem perceber.
+
+    Criterio deliberadamente conservador. Separador e apenas LINHA totalmente
+    vazia, nunca coluna: coluna vazia de espacamento entre rotulos e dados e
+    comum em planilha exportada e nao significa segunda tabela. Cada bloco
+    tambem precisa ter ao menos duas linhas e duas colunas para contar, senao
+    titulo solto e linha de nota seriam contados como tabela.
+
+    Falso negativo (duas tabelas lado a lado) e preferivel a falso positivo:
+    aviso que dispara em todo arquivo vira ruido e faz ignorarem os avisos reais.
+    """
+    filled: list[list[bool]] = [
+        [bool(_text(value) or _is_value(value)) for value in row] for row in rows
+    ]
+    if not any(any(row) for row in filled):
+        return 0
+
+    blocks = 0
+    run: list[list[bool]] = []
+    for row in filled + [[]]:
+        if any(row):
+            run.append(row)
+            continue
+        if run:
+            if _looks_like_table(run):
+                blocks += 1
+            run = []
+    return blocks
+
+
+def _looks_like_table(run: list[list[bool]]) -> bool:
+    if len(run) < 2:
+        return False
+    width = max((len(row) for row in run), default=0)
+    occupied_columns = sum(
+        1 for column in range(width) if any(column < len(row) and row[column] for row in run)
+    )
+    return occupied_columns >= 2
 
 
 def _preview_rows(categories: list[str], series: list[str], values: list[list[Any]], orientation: str) -> list[list[Any]]:

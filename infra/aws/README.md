@@ -1,43 +1,31 @@
 # Infraestrutura AWS
 
-## Caminho recomendado para a v1
+Dois arquivos, um caminho só:
 
-`v1-fargate.yaml` cria um ECS Fargate Service para a interface e uma task definition separada para workers sob demanda, atras de um ALB HTTPS, com S3 privado, IAM de menor privilegio, Secrets Manager e CloudWatch Logs.
-
-Por padrao, esta v1 sobe com:
-
-- `AppName=squad5-nat-auto-ppt`
-- `StackName=squad5-nat-auto-ppt-v1`
-- tag `Name=squad5-nat`
-- web menor e sempre ligado (`512` CPU / `2048` MB)
-- worker maior e sob demanda (`1024` CPU / `3072` MB)
-
-Isso reduz o custo do que fica 24x7 e deixa o processamento pesado isolado apenas quando houver job.
-
-Essa topologia mantem `DesiredCount=1` apenas para a interface server-rendered. Preview e geracao sao isolados em workers Fargate e sincronizados no S3; nao usam disco compartilhado nem aplicativos Office.
-
-Pre-requisitos:
-
-1. Imagem publicada no ECR com tag de commit ou digest.
-2. VPC com pelo menos duas subnets publicas.
-3. Certificado ACM na mesma regiao.
-4. Secret do OpenAI no Secrets Manager, se a IA for usada.
-5. CIDR corporativo/VPN. O script recusa `0.0.0.0/0` enquanto nao houver autenticacao.
-
-Deploy:
+| Arquivo | O que faz |
+| --- | --- |
+| `apprunner.yaml` | CloudFormation: bucket S3 do estado compartilhado, roles IAM, escala e o serviço App Runner |
+| `deploy.ps1` | Publica: garante o ECR, constrói no CodeBuild, guarda os segredos e sobe a stack |
 
 ```powershell
-.\infra\aws\deploy_v1.ps1 `
-  -ImageUri "123456789012.dkr.ecr.us-east-1.amazonaws.com/qwst-auto-ppt@sha256:..." `
-  -VpcId "vpc-..." `
-  -PublicSubnetIds "subnet-a,subnet-b" `
-  -CertificateArn "arn:aws:acm:us-east-1:123456789012:certificate/..." `
-  -AllowedCidr "203.0.113.0/24" `
-  -OpenAISecretArn "arn:aws:secretsmanager:us-east-1:123456789012:secret:..."
+.\infra\aws\deploy.ps1 -TeamPassword "a-senha-da-equipe"
 ```
 
-Os scripts em `legacy/` preservam o prototipo anterior, que publica a porta 8501 diretamente por IP e nao deve ser usado como deploy de producao.
+O passo a passo completo, incluindo a configuração única do projeto CodeBuild,
+está em [`DEPLOYMENT.md`](../../DEPLOYMENT.md).
 
-## Crescimento posterior
+## Regras que valem aqui
 
-SQS e DynamoDB ficam para uma fase posterior, se houver necessidade de controle de concorrencia, agendamento ou consultas de jobs em escala. A arquitetura atual ja isola o processamento em tasks Fargate e mantem o estado compartilhado no S3.
+- **Só criar ou alterar recursos que comecem com `squad4`/`squad5`.** Todo o resto
+  da conta pertence a outras pessoas. O `deploy.ps1` recusa outros nomes.
+- **Região `us-east-1`.** App Runner não existe em `sa-east-1`.
+- **No máximo uma instância.** O estado compartilhado é JSON no S3; duas
+  instâncias gravando ao mesmo tempo poderiam perder uma atualização. Aumentar
+  `MaxSize` exige antes escrita condicional por ETag no `project_store.py`.
+
+## Histórico
+
+A arquitetura anterior (ECS Fargate + ALB + workers sob demanda) foi removida:
+nunca chegou a ser publicada e trazia complexidade que o volume de uso não
+justifica. O código dos workers Fargate saiu junto. Está tudo no histórico do git
+se algum dia for preciso consultar.

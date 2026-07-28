@@ -1,0 +1,169 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  QWST Auto PPT - App Runner + S3. Um container unico serve a aplicacao e guarda
+  o estado compartilhado (projetos, mapeamentos e memoria dos squads) no S3, para
+  que todo mundo veja o mesmo aprendizado.
+
+Parameters:
+  AppName:
+    Type: String
+    Default: squad4e5-auto-ppt
+    Description: Nome base de todos os recursos. Precisa comecar com squad4/squad5.
+  ImageUri:
+    Type: String
+    Description: Imagem no ECR ja publicada (ex. 1234.dkr.ecr.us-east-1.amazonaws.com/squad4e5-auto-ppt:abc123).
+  OpenAISecretArn:
+    Type: String
+    Description: ARN do secret com a chave da OpenAI.
+  TeamPasswordSecretArn:
+    Type: String
+    Description: ARN do secret com a senha compartilhada da equipe.
+  BucketName:
+    Type: String
+    Description: Bucket S3 que guarda o estado compartilhado.
+  StoragePrefix:
+    Type: String
+    Default: auto-ppt
+    Description: Prefixo dentro do bucket.
+
+Resources:
+  # Estado compartilhado. Versionamento ligado de proposito: se um mapeamento for
+  # sobrescrito por engano, da para recuperar a versao anterior.
+  StateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Ref AppName
+
+  # Permite ao App Runner puxar a imagem do ECR.
+  EcrAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-ecr-access"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: build.apprunner.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess
+
+  # Permissoes do container em execucao: so o bucket do app e os dois secrets.
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-instance"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: tasks.apprunner.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: state-bucket-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "arn:aws:s3:::${BucketName}/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !Sub "arn:aws:s3:::${BucketName}"
+        - PolicyName: read-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref OpenAISecretArn
+                  - !Ref TeamPasswordSecretArn
+
+  # Uma instancia no maximo. O project_store grava JSON no S3 e duas instancias
+  # gravando ao mesmo tempo poderiam perder uma atualizacao. Com o uso atual
+  # (poucas vezes por mes) uma instancia sobra.
+  ScalingConfig:
+    Type: AWS::AppRunner::AutoScalingConfiguration
+    Properties:
+      AutoScalingConfigurationName: !Sub "${AppName}-single"
+      MaxConcurrency: 20
+      MinSize: 1
+      MaxSize: 1
+
+  Service:
+    Type: AWS::AppRunner::Service
+    Properties:
+      ServiceName: !Ref AppName
+      AutoScalingConfigurationArn: !Ref ScalingConfig
+      SourceConfiguration:
+        AutoDeploymentsEnabled: false
+        AuthenticationConfiguration:
+          AccessRoleArn: !GetAtt EcrAccessRole.Arn
+        ImageRepository:
+          ImageIdentifier: !Ref ImageUri
+          ImageRepositoryType: ECR
+          ImageConfiguration:
+            Port: "8501"
+            RuntimeEnvironmentVariables:
+              - Name: AUTO_PPT_STORAGE_BACKEND
+                Value: s3
+              - Name: AUTO_PPT_S3_BUCKET
+                Value: !Ref BucketName
+              - Name: AUTO_PPT_S3_PREFIX
+                Value: !Ref StoragePrefix
+              - Name: AUTO_PPT_RUNTIME_ROOT
+                Value: /tmp/auto-ppt-jobs
+            RuntimeEnvironmentSecrets:
+              - Name: OPENAI_API_KEY
+                Value: !Ref OpenAISecretArn
+              - Name: AUTO_PPT_TEAM_PASSWORD
+                Value: !Ref TeamPasswordSecretArn
+      InstanceConfiguration:
+        Cpu: "1024"
+        Memory: "2048"
+        InstanceRoleArn: !GetAtt InstanceRole.Arn
+      HealthCheckConfiguration:
+        Protocol: HTTP
+        Path: /health/live
+        Interval: 20
+        Timeout: 5
+        HealthyThreshold: 1
+        UnhealthyThreshold: 5
+      Tags:
+        - Key: Name
+          Value: !Ref AppName
+
+Outputs:
+  ServiceUrl:
+    Description: Endereco para a equipe abrir no navegador.
+    Value: !Sub "https://${Service.ServiceUrl}"
+  ServiceArn:
+    Description: Usado para publicar novas versoes (start-deployment).
+    Value: !GetAtt Service.ServiceArn
+  BucketName:
+    Description: Bucket com o estado compartilhado.
+    Value: !Ref BucketName

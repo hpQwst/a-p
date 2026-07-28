@@ -67,7 +67,7 @@ Once a project has a successful download, the system creates/updates a **mapping
 
 ### Preserving "Edit Data" (no python-pptx chart.replace_data / no full openpyxl workbook save)
 
-To keep a chart's "Edit Data" working and to run without Microsoft Office, the writer path is **serverless OOXML surgery**: open the `.pptx`/`.xlsx` as ZIP/OPC packages, patch only the necessary parts (`openxml_zip.py`, `embedded_workbook_writer.py`), and update the chart's visual XML cache — never `python-pptx`'s chart replace, never a full `openpyxl.save()` of the embedded workbook. This is what makes generation work in headless Linux containers (ECS Fargate) without Office/COM. Don't reintroduce those shortcuts even if they look simpler — they were deliberately avoided (see `docs/pptx_serverless_openxml_poc.md` and the README section "Gráficos editáveis e Excel embutido").
+To keep a chart's "Edit Data" working and to run without Microsoft Office, the writer path is **serverless OOXML surgery**: open the `.pptx`/`.xlsx` as ZIP/OPC packages, patch only the necessary parts (`openxml_zip.py`, `embedded_workbook_writer.py`), and update the chart's visual XML cache — never `python-pptx`'s chart replace, never a full `openpyxl.save()` of the embedded workbook. This is what makes generation work in headless Linux containers (App Runner) without Office/COM. Don't reintroduce those shortcuts even if they look simpler — they were deliberately avoided (see `docs/pptx_serverless_openxml_poc.md` and the README section "Gráficos editáveis e Excel embutido").
 
 Formula evaluation for datasource XLSX uses only the internal, AST-restricted evaluator (`core.py: _SimpleFormulaEvaluator`) covering `SUM`/`SOMA`, `AVERAGE`/`MEDIA`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`/`SE`, `SUMIF`/`SOMASE`, `COUNTIF`/`CONT.SE`. Unsupported formulas fail by default; `AUTO_PPT_FORMULA_FALLBACK=cached` is an explicit opt-in to use a value already cached in the XLSX. Original files are never mutated in place.
 
@@ -89,16 +89,26 @@ FastAPI app. Preview runs as a **background job**: `POST /preview` creates a job
 
 Single storage abstraction switched by `AUTO_PPT_STORAGE_BACKEND` (`local` default, or `s3` with `AUTO_PPT_S3_BUCKET`/`AUTO_PPT_S3_PREFIX`). In dev, everything lives under `workspace_data/` (git-ignored). Layout: `squads/<squad>/projects/<slug>/{templates,runs,memory,memory/manual_sources}` and `squads/<squad>/mapping_templates/<slug>/template.json`. Manual mapping corrections are appended to `memory/corrections.json` per project for audit/future learning.
 
+## Auth (`web/auth.py`)
+
+Single shared team password in `AUTO_PPT_TEAM_PASSWORD`, enforced by the `require_team_password` middleware in `web/main.py`. The password never goes in the cookie: the session cookie holds only an expiry plus an HMAC signature, keyed off the password itself (so every instance validates the same cookie without extra shared state). `/static/*`, `/health*` and `/login` stay public. **Empty password = app fully open** — fine for local dev, never in production.
+
 ## Deploy
 
-ECS Fargate (Linux), image built in CodeBuild (`buildspec.yml`) from `Dockerfile` — no local Docker required. Region `us-east-1`; resources tagged `Name=qwst-auto-ppt`.
+**AWS App Runner** (`us-east-1`), single container that does everything in-process — no separate workers, no queue. Image built in CodeBuild (`buildspec.yml`) from `Dockerfile`, so no local Docker required. Shared state lives in S3 (`AUTO_PPT_STORAGE_BACKEND=s3`), which is what makes every user see the same projects and mapping templates.
 
 ```powershell
-.\infra\aws\deploy_fargate.ps1 -AppName qwst-auto-ppt -Region us-east-1 -AllowedCidr 0.0.0.0/0
-.\infra\aws\stop_fargate.ps1 -AppName qwst-auto-ppt -Region us-east-1   # pause to save cost
+.\infra\aws\deploy.ps1 -TeamPassword "a-senha-da-equipe"
 ```
 
-The deploy script also reads `OPENAI_API_KEY` from the local `.env` and writes it to AWS Secrets Manager. See `DEPLOYMENT.md` for the fuller target architecture (ALB+HTTPS, Cognito/corporate IdP, DynamoDB job metadata, SQS worker) — none of that is built yet, it's the documented direction.
+Same command publishes a new version. Infra is `infra/aws/apprunner.yaml` + `infra/aws/deploy.ps1`; the full runbook is in `DEPLOYMENT.md`.
+
+Two constraints that are deliberate, not accidental:
+
+- **Only touch AWS resources named `squad4*`/`squad5*`** — everything else in the account belongs to other people. Resources for this project are `squad4e5-auto-ppt`.
+- **App Runner max instances = 1.** `project_store.py` writes JSON objects; each write is atomic, but two instances writing the same object could lose an update. Raising `MaxSize` requires ETag-conditional writes first.
+
+The old ECS Fargate + ALB + on-demand-worker architecture was removed (never deployed, complexity the usage volume didn't justify). It's in git history.
 
 ## graphify
 

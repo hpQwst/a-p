@@ -1,65 +1,139 @@
-# Deploy e operacao
+# Deploy — AWS App Runner
 
-## Arquitetura inicial na AWS
+O QWST Auto PPT roda como um site interno: a equipe abre uma URL no navegador,
+digita a senha compartilhada e usa. Não há programa para instalar em máquina
+nenhuma, e todo mundo enxerga os mesmos projetos e mapeamentos.
 
-O deploy atual usa uma arquitetura simples e suficiente para validar a v1:
+## Arquitetura
 
-- ECS Fargate Linux roda o app FastAPI continuamente para upload, preview, status e download.
-- Preview e geracao sobem workers Fargate sob demanda via `RunTask`.
-- CodeBuild monta a imagem Docker na nuvem, sem Docker local.
-- ECR armazena a imagem.
-- S3 guarda jobs, checkpoints, projetos, execucoes, inputs, outputs e relatorios.
-- Secrets Manager guarda `OPENAI_API_KEY`.
-- CloudWatch Logs guarda logs separados de web e worker.
-- ALB com HTTPS publica a aplicacao; o acesso fica restrito ao CIDR configurado enquanto nao houver autenticacao.
-
-Importante: a etapa de geracao final de PPT com graficos editaveis agora roda sem Microsoft Office/COM. O caminho validado edita o pacote Office Open XML de forma cirurgica: atualiza o workbook `.xlsx` embutido, preserva a estrutura ZIP/OPC original e atualiza o cache visual do grafico no `ppt/charts/chartX.xml`. Isso evita o problema do `python-pptx chart.replace_data()` e permite rodar em ECS Fargate Linux.
-
-Portanto, a arquitetura de producao pode manter o fluxo inteiro em containers Linux:
-
-- `web/api`: FastAPI em ECS Fargate Linux para upload, preview, IA, geracao e download.
-- `storage`: S3 para inputs, outputs, checkpoints, mapeamentos e estado dos jobs.
-- `jobs`: tasks Fargate sob demanda para `preview` e `generate`, sem EFS e sem Office.
-
-Para a v1, nao e obrigatorio adicionar mais servicos. O proximo degrau natural, se houver aumento de volume ou necessidade de controle de concorrencia, e:
-
-- Cognito ou IdP corporativo para autenticacao.
-- DynamoDB para status/metadados de jobs, projetos e execucoes.
-- SQS para fila de analise/geracao.
-- Um worker Fargate Linux separado consumindo a fila, se o volume ou o tempo de IA por slide exigir orquestracao extra.
-
-O container nao instala nem chama Microsoft Office, COM ou LibreOffice. Formulas de XLSX passam pelo avaliador interno deterministico; preview e IA usam apenas estrutura OpenXML e texto extraido. A geracao final continua sendo feita pelo writer OpenXML preservador.
-
-O core ja esta separado em `ppt_automator/`, a UI em `web/` e o ponto de worker em `worker/processor.py`, para permitir essa troca sem reescrever a logica de PowerPoint.
-
-## Comandos
-
-Deploy ou atualizacao:
-
-```powershell
-.\infra\aws\deploy_v1.ps1 `
-  -ImageUri "123456789012.dkr.ecr.us-east-1.amazonaws.com/qwst-auto-ppt@sha256:..." `
-  -VpcId "vpc-..." `
-  -PublicSubnetIds "subnet-a,subnet-b" `
-  -CertificateArn "arn:aws:acm:us-east-1:123456789012:certificate/..." `
-  -AllowedCidr "203.0.113.0/24" `
-  -OpenAISecretArn "arn:aws:secretsmanager:us-east-1:123456789012:secret:..."
+```
+Equipe (navegador)
+      │  HTTPS
+      ▼
+App Runner  squad4e5-auto-ppt        1 vCPU / 2 GB, no máximo 1 instância
+      │  imagem
+      ├─────────► ECR  squad4e5-auto-ppt
+      │  estado compartilhado
+      └─────────► S3   squad4e5-auto-ppt-<conta>
 ```
 
-O script legado `infra/aws/deploy_fargate.ps1` foi movido para `infra/aws/legacy/` e nao deve ser usado como caminho principal de producao.
+Um único container faz tudo: recebe o upload, analisa, chama a IA quando
+necessário e gera o PPT. Não existem workers separados nem fila.
 
-Todos os recursos criados pelo script devem receber a tag `Name=qwst-auto-ppt` para acompanhamento de custos.
+A geração do PPT roda sem Microsoft Office: o pacote Office Open XML é editado de
+forma cirúrgica (atualiza o `.xlsx` embutido, preserva a estrutura ZIP/OPC e
+atualiza o cache visual do gráfico). É isso que permite rodar em container Linux
+mantendo o "Editar dados" funcional.
 
-## Git Azure DevOps
+**Por que no máximo uma instância:** o estado compartilhado é gravado como JSON no
+S3. Cada gravação isolada é atômica, mas duas instâncias gravando o mesmo arquivo
+ao mesmo tempo poderiam perder uma atualização. Com o uso atual (poucas vezes por
+mês) uma instância sobra. Antes de aumentar `MaxSize`, é preciso implementar
+escrita condicional por ETag no `project_store.py`.
 
-Quando quiser versionar este projeto no Azure DevOps:
+## Pré-requisitos
+
+- AWS CLI logado com permissão na conta (`aws sts get-caller-identity`)
+- Região `us-east-1` — **App Runner não existe em `sa-east-1`**
+- `OPENAI_API_KEY` no `.env` local (ou passado por parâmetro)
+- Uma senha para a equipe
+
+Não é preciso ter Docker: a imagem é construída no CodeBuild.
+
+> **Limite de recursos:** só criar/alterar recursos que comecem com `squad4`/`squad5`.
+> Tudo o mais na conta pertence a outras pessoas.
+
+## Build da imagem (configuração única)
+
+O deploy usa um projeto CodeBuild chamado `squad4e5-auto-ppt-build`, que lê o
+`buildspec.yml` da raiz. Crie-o uma única vez (console do CodeBuild ou CLI),
+apontando para este repositório, com:
+
+- Ambiente: Amazon Linux, imagem padrão, **modo privilegiado ligado** (necessário para `docker build`)
+- Variáveis: `AWS_DEFAULT_REGION=us-east-1`, `IMAGE_REPO_NAME=squad4e5-auto-ppt`
+- Permissão na role do CodeBuild para `ecr:GetAuthorizationToken`,
+  `ecr:BatchCheckLayerAvailability`, `ecr:PutImage`, `ecr:InitiateLayerUpload`,
+  `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`
+
+## Publicar
 
 ```powershell
-git init
-git add .
-git commit -m "Initial auto-ppt app"
-git remote add origin https://qwst-equipe-tecnica@dev.azure.com/qwst-equipe-tecnica/qwst-equipe-tecnica/_git/qwst-auto-ppt
-git push -u origin main
+.\infra\aws\deploy.ps1 -TeamPassword "a-senha-da-equipe"
 ```
 
-Antes do push, confira que `.env`, `workspace_data/`, `outputs/`, `.venv/` e arquivos grandes/sensiveis nao entraram no commit.
+O script cria o repositório ECR, constrói a imagem, guarda os segredos no
+Secrets Manager e sobe a stack `apprunner.yaml`. No fim ele imprime a URL. Envie
+essa URL para a equipe — a primeira visita pede a senha.
+
+## Publicar uma versão nova
+
+O mesmo comando. Ele constrói a imagem do commit atual e manda o App Runner
+trocar. Ninguém precisa atualizar nada na própria máquina.
+
+```powershell
+.\infra\aws\deploy.ps1 -TeamPassword "a-senha-da-equipe"
+```
+
+Para trocar apenas a senha da equipe, sem reconstruir a imagem:
+
+```powershell
+.\infra\aws\deploy.ps1 -TeamPassword "nova-senha" -SkipBuild
+```
+
+## Variáveis no ambiente publicado
+
+Definidas pela stack — não altere à mão no console:
+
+| Variável | Valor |
+| --- | --- |
+| `AUTO_PPT_STORAGE_BACKEND` | `s3` |
+| `AUTO_PPT_S3_BUCKET` | `squad4e5-auto-ppt-<conta>` |
+| `AUTO_PPT_RUNTIME_ROOT` | `/tmp/auto-ppt-jobs` |
+| `OPENAI_API_KEY` | secret |
+| `AUTO_PPT_TEAM_PASSWORD` | secret |
+
+`AUTO_PPT_TEAM_PASSWORD` é o que protege a URL. **Se ficar vazia, o app fica
+aberto para qualquer pessoa que tenha o link.**
+
+## Verificar
+
+```powershell
+aws apprunner list-services --region us-east-1 --query "ServiceSummaryList[?ServiceName=='squad4e5-auto-ppt']"
+```
+
+Logs da aplicação ficam no CloudWatch, em `/aws/apprunner/squad4e5-auto-ppt`.
+
+Depois de subir, teste o ciclo inteiro: entrar com a senha, subir um `.pptx` com
+as planilhas, gerar o preview e baixar o PPT. Depois abra de outra máquina e
+confirme que o projeto e o mapeamento aparecem — é isso que prova que o estado
+compartilhado está funcionando.
+
+## Custo
+
+O App Runner cobra a memória provisionada continuamente e a CPU só durante as
+requisições; some ECR e S3, ambos baratos no volume deste projeto. A conta já tem
+outro serviço App Runner igual (1 vCPU / 2 GB), então a fatura atual é a melhor
+referência de custo real.
+
+Para pausar sem destruir nada:
+
+```powershell
+aws apprunner pause-service --service-arn <arn-do-servico> --region us-east-1
+```
+
+## Recuperar um mapeamento sobrescrito
+
+O bucket tem versionamento ligado. Se um mapeamento for salvo errado, dá para
+listar e restaurar a versão anterior:
+
+```powershell
+aws s3api list-object-versions --bucket squad4e5-auto-ppt-<conta> --prefix auto-ppt/squads/
+```
+
+## Próximos degraus (ainda não construídos)
+
+Se o volume crescer ou surgir necessidade de mais controle:
+
+- Login corporativo (OIDC) no lugar da senha compartilhada
+- Escrita condicional por ETag no `project_store.py`, para permitir mais de uma instância
+- `AUTO_PPT_ASYNC_GENERATION=1` se algum deck grande estourar o tempo limite da requisição

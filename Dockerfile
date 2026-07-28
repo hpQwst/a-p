@@ -1,4 +1,7 @@
-FROM python:3.12-slim
+# Espelho oficial da AWS para a mesma imagem do Docker Hub. O Docker Hub limita
+# pulls anonimos por IP e o CodeBuild sai por IPs compartilhados, entao puxar de
+# la falha com "429 Too Many Requests" de forma intermitente.
+FROM public.ecr.aws/docker/library/python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \

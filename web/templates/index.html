@@ -13,7 +13,7 @@
         document.documentElement.setAttribute("data-theme", theme);
       })();
     </script>
-    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ asset_version('style.css') }}">
   </head>
   <body>
     <main class="app-shell home-shell">
@@ -31,6 +31,30 @@
         </div>
       </header>
 
+      <section class="how-strip" aria-label="Como funciona">
+        <article class="how-step">
+          <span class="how-index">01</span>
+          <div>
+            <strong>Solte os arquivos</strong>
+            <p>A apresentação (.pptx) e as planilhas com os números novos.</p>
+          </div>
+        </article>
+        <article class="how-step">
+          <span class="how-index">02</span>
+          <div>
+            <strong>A ferramenta conecta</strong>
+            <p>Ela acha cada gráfico e a planilha certa de cada um — sozinha.</p>
+          </div>
+        </article>
+        <article class="how-step">
+          <span class="how-index">03</span>
+          <div>
+            <strong>Você confere e baixa</strong>
+            <p>Veja a prévia de cada gráfico e baixe o PowerPoint pronto.</p>
+          </div>
+        </article>
+      </section>
+
       <section class="home-layout">
         <form class="workspace-card upload-workspace" action="/preview" method="post" enctype="multipart/form-data" data-progress-message="Analisando arquivos e preparando preview..." data-large-deck-threshold="{{ large_deck_slide_threshold }}">
           <div class="workspace-head">
@@ -41,9 +65,10 @@
             <span class="mini-pill">Squad + projeto</span>
           </div>
 
+          <div class="bench-steps">
           <div class="form-section">
             <div class="section-title">
-                <span>1</span>
+                <span>01</span>
                 <strong>Projeto</strong>
             </div>
             <div class="grid two">
@@ -79,12 +104,12 @@
 
           <div class="form-section">
             <div class="section-title">
-              <span>2</span>
-              <strong>Modelo de mapeamento</strong>
+              <span>02</span>
+              <strong>Memória do squad</strong>
             </div>
-            <p class="section-hint">Opcional — se o squad já tem um mapeamento salvo para este deck, ele é aplicado antes de qualquer IA.</p>
+            <p class="section-hint">Opcional — se este squad já ajustou um deck parecido antes, a ferramenta reaplica sozinha o que aprendeu.</p>
             <label>
-              <span>Mapeamento salvo</span>
+              <span>Usar memória salva</span>
               <select name="mapping_template_ref" data-mapping-template-select>
                 <option value="" data-squad="">Detectar no preview</option>
                 {% for squad, templates in mapping_templates_by_squad.items() %}
@@ -104,29 +129,29 @@
 
           <div class="form-section">
             <div class="section-title">
-              <span>3</span>
+              <span>03</span>
               <strong>Arquivos</strong>
             </div>
-            <p class="section-hint">Arraste os arquivos ou clique para selecionar. Os XLSX podem ter qualquer nome — o ideal é conter <code>slideN</code>.</p>
+            <p class="section-hint">Arraste ou clique. As planilhas podem ter qualquer nome — a ferramenta descobre qual pertence a cada gráfico.</p>
             <div class="file-grid">
               <label class="file-card" data-dropzone>
-                <span>PowerPoint modelo</span>
+                <span>Apresentação</span>
                 <span class="file-hint">.pptx · arraste aqui</span>
                 <span class="file-selected" data-file-name></span>
                 <input name="pptx" type="file" accept=".pptx" required data-pptx-input>
               </label>
               <label class="file-card" data-dropzone>
-                <span>ZIP com datasources XLSX</span>
-                <span class="file-hint">.zip · arraste aqui</span>
+                <span>Planilhas</span>
+                <span class="file-hint">.xlsx (vários) ou .zip · arraste aqui</span>
                 <span class="file-selected" data-file-name></span>
-                <input name="datasources" type="file" accept=".zip" required>
+                <input name="datasources" type="file" accept=".zip,.xlsx" multiple required>
               </label>
             </div>
           </div>
 
           <div class="form-section compact">
             <div class="section-title">
-                <span>4</span>
+                <span>04</span>
                 <strong>Escopo</strong>
             </div>
             <label>
@@ -144,6 +169,7 @@
               </label>
             </div>
           </div>
+          </div>
 
           <div class="form-actions">
             <button type="submit">Gerar preview</button>
@@ -151,6 +177,31 @@
         </form>
 
         <aside class="library-column">
+          <section class="workspace-card library-card">
+            <div class="workspace-head">
+              <div>
+                <p class="eyebrow">Squads</p>
+                <h2>Times e o que já sabem</h2>
+              </div>
+            </div>
+            <div class="squad-overview">
+              {% for squad in squads %}
+                {% set projs = projects_by_squad.get(squad.value, []) %}
+                {% set mems = mapping_templates_by_squad.get(squad.value, []) %}
+                <div class="squad-row {% if not projs and not mems %}is-empty{% endif %}">
+                  <span class="squad-id">
+                    <span class="squad-dot" aria-hidden="true"></span>
+                    <strong>{{ squad.label }}</strong>
+                  </span>
+                  <span class="squad-counts">
+                    <span>{{ projs|length }} proj.</span>
+                    <span>{{ mems|length }} mem.</span>
+                  </span>
+                </div>
+              {% endfor %}
+            </div>
+          </section>
+
           <section class="workspace-card library-card">
             <div class="workspace-head">
               <div>
@@ -214,15 +265,17 @@
             {% if has_templates %}
               <div class="mapping-list">
                 {% for squad, templates in mapping_templates_by_squad.items() %}
-                  {% for template in templates %}
-                    <article class="mapping-card">
-                      <div class="mapping-card-head">
-                        <strong>{{ template.name }}</strong>
-                        <span class="resume-squad">{{ squad.title() }}</span>
-                      </div>
-                      <span>{{ template.entry_count }} targets · atualizado {{ template.updated_at }}</span>
-                    </article>
-                  {% endfor %}
+                  {% if templates %}
+                    <div class="mapping-squad-group">
+                      <p class="mapping-squad-head">{{ squad.title() }} <span>{{ templates|length }}</span></p>
+                      {% for template in templates %}
+                        <article class="mapping-card">
+                          <strong>{{ template.name }}</strong>
+                          <span>{{ template.entry_count }} targets · atualizado {{ template.updated_at }}</span>
+                        </article>
+                      {% endfor %}
+                    </div>
+                  {% endif %}
                 {% endfor %}
               </div>
             {% else %}
@@ -243,6 +296,6 @@
         <ol id="progress-steps" class="progress-steps"></ol>
       </div>
     </div>
-    <script src="{{ url_for('static', path='/app.js') }}"></script>
+    <script src="{{ url_for('static', path='/app.js') }}?v={{ asset_version('app.js') }}"></script>
   </body>
 </html>

@@ -22,10 +22,21 @@
       return;
     }
     var label = card.querySelector("[data-file-name]");
-    var file = input.files && input.files[0];
-    card.classList.toggle("has-file", !!file);
+    var files = input.files;
+    var count = files ? files.length : 0;
+    card.classList.toggle("has-file", count > 0);
     if (label) {
-      label.textContent = file ? file.name + " (" + formatBytes(file.size) + ")" : "";
+      if (count === 0) {
+        label.textContent = "";
+      } else if (count === 1) {
+        label.textContent = files[0].name + " (" + formatBytes(files[0].size) + ")";
+      } else {
+        var total = 0;
+        for (var i = 0; i < count; i += 1) {
+          total += files[i].size;
+        }
+        label.textContent = count + " arquivos (" + formatBytes(total) + ")";
+      }
     }
   }
 
@@ -504,6 +515,10 @@
       toggleTheme();
       return;
     }
+    if (event.target && event.target.closest && event.target.closest("[data-advanced-toggle]")) {
+      applyAdvancedMode(!document.body.classList.contains("show-advanced"));
+      return;
+    }
     var chip = event.target && event.target.closest ? event.target.closest("[data-status-filter]") : null;
     if (chip) {
       document.querySelectorAll("[data-status-filter]").forEach(function (item) {
@@ -521,8 +536,308 @@
     }
   });
 
+  function applyAdvancedMode(on) {
+    document.body.classList.toggle("show-advanced", on);
+    var btn = document.querySelector("[data-advanced-toggle]");
+    if (btn) {
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      btn.textContent = on ? "Modo simples" : "Modo avançado";
+    }
+    try {
+      localStorage.setItem("qwst-advanced", on ? "1" : "0");
+    } catch (error) {}
+  }
+
+  function initAdvancedMode() {
+    var stored = "0";
+    try {
+      stored = localStorage.getItem("qwst-advanced") || "0";
+    } catch (error) {}
+    applyAdvancedMode(stored === "1");
+  }
+
+  var CHART_FALLBACK = ["#1f7a5c", "#cc5a2a", "#2c6a94", "#96610a", "#175d46", "#b4402e"];
+
+  function chartNum(value) {
+    if (typeof value === "number") {
+      return value;
+    }
+    if (value === null || value === undefined) {
+      return NaN;
+    }
+    var text = String(value).trim().replace(/%/g, "").replace(/\s/g, "");
+    if (!text) {
+      return NaN;
+    }
+    if (/,\d+$/.test(text) && text.indexOf(".") !== -1) {
+      text = text.replace(/\./g, "").replace(",", ".");
+    } else {
+      text = text.replace(/,/g, ".");
+    }
+    return parseFloat(text);
+  }
+
+  function esc(value) {
+    return String(value === null || value === undefined ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  function chartLegend(names, colors) {
+    return '<div class="viz-legend">' + names.map(function (name, i) {
+      return '<span class="viz-key"><i style="background:' + colors[i] + '"></i>' + esc(name) + "</span>";
+    }).join("") + "</div>";
+  }
+
+  function buildChartSvg(payload) {
+    var kind = payload.kind || "";
+    var headers = payload.headers || [];
+    var rows = payload.rows || [];
+    if (!kind || !rows.length) {
+      return "";
+    }
+    var cats = rows.slice(0, 14).map(function (r) { return r[0]; });
+    var names = headers.slice(1);
+    var S = names.length;
+    var C = cats.length;
+    if (S < 1 || C < 1) {
+      return "";
+    }
+    var vals = [];
+    var s;
+    var c;
+    for (s = 0; s < S; s += 1) {
+      vals[s] = [];
+      for (c = 0; c < C; c += 1) {
+        var n = chartNum(rows[c][s + 1]);
+        vals[s][c] = isNaN(n) ? 0 : n;
+      }
+    }
+    var colors = [];
+    for (s = 0; s < S; s += 1) {
+      var xml = (payload.colors || [])[s];
+      colors[s] = xml && xml.length ? xml : CHART_FALLBACK[s % CHART_FALLBACK.length];
+    }
+    var legend = S > 1 ? chartLegend(names, colors) : "";
+    var W = 680;
+    var H = 250;
+    var svg;
+    if (kind === "pie") {
+      svg = pieSvg(cats, vals[0], W, H);
+      return legend + svg;
+    }
+    if (kind === "line" || kind === "area") {
+      svg = lineSvg(kind, cats, vals, colors, W, H);
+      return legend + svg;
+    }
+    svg = barSvg(kind, cats, vals, colors, W, H);
+    return legend + svg;
+  }
+
+  function niceMax(value) {
+    if (value <= 0) {
+      return 1;
+    }
+    var pow = Math.pow(10, Math.floor(Math.log10(value)));
+    var n = value / pow;
+    var step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+    return step * pow;
+  }
+
+  function catLabels(cats, x0, plotW, y, horizontal) {
+    return cats.map(function (cat, i) {
+      var text = String(cat === null || cat === undefined ? "" : cat);
+      if (text.length > 16) {
+        text = text.slice(0, 15) + "…";
+      }
+      var cx = x0 + (plotW / cats.length) * (i + 0.5);
+      return '<text x="' + cx.toFixed(1) + '" y="' + y + '" text-anchor="middle" class="chart-cat">' + esc(text) + "</text>";
+    }).join("");
+  }
+
+  function barSvg(kind, cats, vals, colors, W, H) {
+    var horizontal = kind.indexOf("bar") === 0;
+    var stacked = kind.indexOf("stacked") !== -1;
+    var S = vals.length;
+    var C = cats.length;
+    var padL = horizontal ? 4 : 6;
+    var padR = 6;
+    var padT = 8;
+    var padB = horizontal ? 8 : 40;
+    var plotW = W - padL - padR;
+    var plotH = H - padT - padB;
+    var maxV;
+    if (stacked) {
+      maxV = 0;
+      for (var ci = 0; ci < C; ci += 1) {
+        var sum = 0;
+        for (var si = 0; si < S; si += 1) { sum += Math.max(0, vals[si][ci]); }
+        maxV = Math.max(maxV, sum);
+      }
+    } else {
+      maxV = 0;
+      for (var s2 = 0; s2 < S; s2 += 1) {
+        for (var c2 = 0; c2 < C; c2 += 1) { maxV = Math.max(maxV, Math.abs(vals[s2][c2])); }
+      }
+    }
+    maxV = niceMax(maxV);
+    var parts = [];
+    if (!horizontal) {
+      var groupW = plotW / C;
+      var baseY = padT + plotH;
+      parts.push('<line x1="' + padL + '" y1="' + baseY + '" x2="' + (padL + plotW) + '" y2="' + baseY + '" class="chart-axis"/>');
+      for (var g = 0; g < C; g += 1) {
+        var gx = padL + groupW * g;
+        if (stacked) {
+          var acc = 0;
+          for (var st = 0; st < S; st += 1) {
+            var v = Math.max(0, vals[st][g]);
+            var h = (v / maxV) * plotH;
+            var yTop = baseY - (acc + v) / maxV * plotH;
+            var bw = groupW * 0.6;
+            parts.push('<rect x="' + (gx + groupW * 0.2).toFixed(1) + '" y="' + yTop.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + h.toFixed(1) + '" fill="' + colors[st] + '"/>');
+            acc += v;
+          }
+        } else {
+          var bwEach = (groupW * 0.72) / S;
+          for (var sc = 0; sc < S; sc += 1) {
+            var vv = Math.abs(vals[sc][g]);
+            var hh = (vv / maxV) * plotH;
+            var bx = gx + groupW * 0.14 + bwEach * sc;
+            parts.push('<rect x="' + bx.toFixed(1) + '" y="' + (baseY - hh).toFixed(1) + '" width="' + (bwEach * 0.86).toFixed(1) + '" height="' + hh.toFixed(1) + '" fill="' + colors[sc] + '"/>');
+          }
+        }
+      }
+      parts.push(catLabels(cats, padL, plotW, H - 22, false));
+    } else {
+      var groupH = plotH / C;
+      var baseX = padL;
+      parts.push('<line x1="' + baseX + '" y1="' + padT + '" x2="' + baseX + '" y2="' + (padT + plotH) + '" class="chart-axis"/>');
+      for (var gr = 0; gr < C; gr += 1) {
+        var gy = padT + groupH * gr;
+        var bhEach = (groupH * 0.72) / (stacked ? 1 : S);
+        if (stacked) {
+          var accx = 0;
+          for (var stk = 0; stk < S; stk += 1) {
+            var vs = Math.max(0, vals[stk][gr]);
+            var ws = (vs / maxV) * plotW;
+            parts.push('<rect x="' + (baseX + accx / maxV * plotW).toFixed(1) + '" y="' + (gy + groupH * 0.14).toFixed(1) + '" width="' + ws.toFixed(1) + '" height="' + (groupH * 0.72).toFixed(1) + '" fill="' + colors[stk] + '"/>');
+            accx += vs;
+          }
+        } else {
+          for (var scb = 0; scb < S; scb += 1) {
+            var vb = Math.abs(vals[scb][gr]);
+            var wb = (vb / maxV) * plotW;
+            var by = gy + groupH * 0.14 + bhEach * scb;
+            parts.push('<rect x="' + baseX + '" y="' + by.toFixed(1) + '" width="' + wb.toFixed(1) + '" height="' + (bhEach * 0.86).toFixed(1) + '" fill="' + colors[scb] + '"/>');
+          }
+        }
+      }
+    }
+    return '<svg class="chart-svg" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMidYMid meet" role="img">' + parts.join("") + "</svg>";
+  }
+
+  function lineSvg(kind, cats, vals, colors, W, H) {
+    var S = vals.length;
+    var C = cats.length;
+    var padL = 6;
+    var padR = 6;
+    var padT = 8;
+    var padB = 40;
+    var plotW = W - padL - padR;
+    var plotH = H - padT - padB;
+    var maxV = 0;
+    for (var s = 0; s < S; s += 1) {
+      for (var c = 0; c < C; c += 1) { maxV = Math.max(maxV, Math.abs(vals[s][c])); }
+    }
+    maxV = niceMax(maxV);
+    var baseY = padT + plotH;
+    var stepX = C > 1 ? plotW / (C - 1) : plotW;
+    var parts = ['<line x1="' + padL + '" y1="' + baseY + '" x2="' + (padL + plotW) + '" y2="' + baseY + '" class="chart-axis"/>'];
+    for (var si = 0; si < S; si += 1) {
+      var pts = [];
+      for (var ci = 0; ci < C; ci += 1) {
+        var x = padL + (C > 1 ? stepX * ci : plotW / 2);
+        var y = baseY - (Math.abs(vals[si][ci]) / maxV) * plotH;
+        pts.push(x.toFixed(1) + "," + y.toFixed(1));
+      }
+      if (kind === "area") {
+        parts.push('<polygon points="' + padL + "," + baseY + " " + pts.join(" ") + " " + (padL + plotW) + "," + baseY + '" fill="' + colors[si] + '" fill-opacity="0.18"/>');
+      }
+      parts.push('<polyline points="' + pts.join(" ") + '" fill="none" stroke="' + colors[si] + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>');
+      for (var pi = 0; pi < pts.length; pi += 1) {
+        var xy = pts[pi].split(",");
+        parts.push('<circle cx="' + xy[0] + '" cy="' + xy[1] + '" r="2.6" fill="' + colors[si] + '"/>');
+      }
+    }
+    parts.push(catLabels(cats, padL, plotW, H - 22, false));
+    return '<svg class="chart-svg" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMidYMid meet" role="img">' + parts.join("") + "</svg>";
+  }
+
+  function pieSvg(cats, series, W, H) {
+    var total = 0;
+    series.forEach(function (v) { total += Math.max(0, v); });
+    if (total <= 0) {
+      return "";
+    }
+    var cx = H / 2;
+    var cy = H / 2;
+    var r = H / 2 - 12;
+    var angle = -Math.PI / 2;
+    var parts = [];
+    var legend = [];
+    for (var i = 0; i < cats.length; i += 1) {
+      var v = Math.max(0, series[i]);
+      if (v <= 0) { continue; }
+      var frac = v / total;
+      var end = angle + frac * Math.PI * 2;
+      var color = CHART_FALLBACK[i % CHART_FALLBACK.length];
+      var large = frac > 0.5 ? 1 : 0;
+      var x1 = cx + r * Math.cos(angle);
+      var y1 = cy + r * Math.sin(angle);
+      var x2 = cx + r * Math.cos(end);
+      var y2 = cy + r * Math.sin(end);
+      parts.push('<path d="M' + cx + " " + cy + " L" + x1.toFixed(1) + " " + y1.toFixed(1) + " A" + r + " " + r + " 0 " + large + " 1 " + x2.toFixed(1) + " " + y2.toFixed(1) + ' Z" fill="' + color + '"/>');
+      var label = String(cats[i] === null || cats[i] === undefined ? "" : cats[i]);
+      if (label.length > 18) { label = label.slice(0, 17) + "…"; }
+      legend.push('<span class="viz-key"><i style="background:' + color + '"></i>' + esc(label) + "</span>");
+      angle = end;
+    }
+    var svg = '<svg class="chart-svg" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMidYMid meet" role="img"><g>' + parts.join("") + "</g></svg>";
+    return '<div class="viz-legend">' + legend.join("") + "</div>" + svg;
+  }
+
+  function renderCharts() {
+    document.querySelectorAll("[data-chart]").forEach(function (chart) {
+      if (chart.getAttribute("data-chart-done") === "1") {
+        return;
+      }
+      var dataEl = chart.querySelector("[data-chart-data]");
+      var canvas = chart.querySelector("[data-chart-canvas]");
+      if (!dataEl || !canvas) {
+        return;
+      }
+      var payload;
+      try {
+        payload = JSON.parse(dataEl.textContent || "{}");
+      } catch (error) {
+        return;
+      }
+      var markup = buildChartSvg(payload);
+      if (!markup) {
+        chart.hidden = true;
+        return;
+      }
+      canvas.innerHTML = markup;
+      chart.setAttribute("data-chart-done", "1");
+    });
+  }
+
   syncMappingTemplateOptions();
   applyPreviewFilters();
   startPreviewPolling();
   bindDropzones();
+  initAdvancedMode();
+  renderCharts();
 })();

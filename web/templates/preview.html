@@ -13,7 +13,7 @@
         document.documentElement.setAttribute("data-theme", theme);
       })();
     </script>
-    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ asset_version('style.css') }}">
   </head>
   <body>
     <main
@@ -25,12 +25,13 @@
       <header class="product-header preview-header">
         <div>
           <p class="eyebrow">{{ squad }} / {{ project_name }}</p>
-          <h1>Preview das atualizações</h1>
+          <h1>Confira antes de baixar</h1>
         </div>
         <div class="header-actions">
           <button type="button" class="theme-toggle" data-theme-toggle title="Alternar tema claro/escuro" aria-label="Alternar tema">◐</button>
+          <button type="button" class="ghost-button" data-advanced-toggle aria-pressed="false" title="Mostrar detalhes técnicos">Modo avançado</button>
           <a class="ghost-button" href="/" title="Voltar para a central">Início</a>
-          <a class="ghost-button" href="/jobs/{{ job_id }}/debug-log" target="_blank" rel="noreferrer">Log debug</a>
+          <a class="ghost-button advanced-only" href="/jobs/{{ job_id }}/debug-log" target="_blank" rel="noreferrer">Log debug</a>
           {% if preview_processing.active %}
             <button class="button" type="button" disabled>Preparando preview</button>
           {% elif async_generation %}
@@ -48,7 +49,7 @@
         <div class="notice warn">{{ error }}</div>
       {% endif %}
 
-      <section class="process-timeline" aria-label="Andamento do processamento">
+      <section class="process-timeline advanced-only" aria-label="Andamento do processamento">
         {% for step in process_steps %}
           <article class="process-step {{ step.state }}">
             <span>{{ loop.index }}</span>
@@ -66,9 +67,9 @@
             <p class="eyebrow">Resumo</p>
             <div class="review-metrics">
               <div><strong>{{ review_summary.slides }}</strong><span>slides</span></div>
-              <div><strong>{{ review_summary.targets }}</strong><span>targets</span></div>
-              <div><strong>{{ review_summary.mapped }}</strong><span>mapeados</span></div>
-              <div class="{% if review_summary.unmapped %}metric-warn{% endif %}"><strong>{{ review_summary.unmapped }}</strong><span>pendentes</span></div>
+              <div><strong>{{ review_summary.targets }}</strong><span>gráficos</span></div>
+              <div><strong>{{ review_summary.mapped }}</strong><span>prontos</span></div>
+              <div class="{% if review_summary.unmapped %}metric-warn{% endif %}"><strong>{{ review_summary.unmapped }}</strong><span>pra revisar</span></div>
             </div>
           </section>
 
@@ -76,13 +77,13 @@
             <p class="eyebrow">Filtrar</p>
             <label>
               <span>Buscar</span>
-              <input type="search" placeholder="Slide, target, datasource..." data-preview-search>
+              <input type="search" placeholder="Buscar gráfico, slide ou planilha" data-preview-search>
             </label>
             <div class="filter-group" data-preview-status>
               <button type="button" class="filter-chip active" data-status-filter="all">Todos</button>
-              <button type="button" class="filter-chip" data-status-filter="unmapped">Pendentes</button>
-              <button type="button" class="filter-chip" data-status-filter="manual">Manual</button>
-              <button type="button" class="filter-chip" data-status-filter="ai">IA</button>
+              <button type="button" class="filter-chip" data-status-filter="unmapped">Pra revisar</button>
+              <button type="button" class="filter-chip" data-status-filter="manual">Ajustados</button>
+              <button type="button" class="filter-chip" data-status-filter="ai">Sugeridos IA</button>
             </div>
             <div class="bulk-actions">
               <button type="button" class="ghost-button" data-open-all>Expandir</button>
@@ -115,10 +116,41 @@
         </aside>
 
         <section class="review-main">
-          <div class="status-grid">
+          {% set _ready = review_summary.mapped %}
+          {% set _total = review_summary.targets %}
+          {% set _pending = review_summary.unmapped %}
+          {% set _pct = ((100 * _ready / _total) | round(0, 'floor') | int) if _total else 0 %}
+          <section class="review-gate {% if _pending %}has-pending{% else %}all-ready{% endif %}">
+            <div class="gate-progress">
+              <div class="gate-head">
+                <strong>{{ _ready }} de {{ _total }} prontos</strong>
+                {% if _pending %}
+                  <span class="gate-pending">{{ _pending }} pra revisar</span>
+                {% else %}
+                  <span class="gate-ok">tudo pronto</span>
+                {% endif %}
+              </div>
+              <div class="gate-bar"><i style="width: {{ _pct }}%"></i></div>
+              <p class="gate-hint">
+                {% if _pending %}
+                  Revise os gráficos em amarelo — o resto já está conectado. Dá pra baixar assim mesmo, mas os pendentes ficam sem atualizar.
+                {% else %}
+                  Todos os gráficos foram conectados. Confira as prévias e baixe.
+                {% endif %}
+              </p>
+            </div>
+            {% if not preview_processing.active %}
+              {% if async_generation %}
+                <button type="button" class="button gate-download" data-async-download data-generate-url="/jobs/{{ job_id }}/generate">Baixar PowerPoint</button>
+              {% else %}
+                <a class="button gate-download" href="/jobs/{{ job_id }}/download" data-progress-message="Gerando PowerPoint atualizado...">Baixar PowerPoint</a>
+              {% endif %}
+            {% endif %}
+          </section>
+          <div class="status-grid advanced-only">
             <section class="mapping-stage {{ mapping_status.state }}">
               <div>
-                <strong>Mapeamento salvo</strong>
+                <strong>Memória do squad</strong>
                 <span>{{ mapping_status.message }}</span>
               </div>
               {% if mapping_candidates %}
@@ -137,7 +169,7 @@
 
             <section class="ai-stage {{ ai_status.state }}">
               <div>
-                <strong>IA por target</strong>
+                <strong>Sugestões da IA</strong>
                 <span>{{ ai_status.message }}</span>
               </div>
             </section>
@@ -153,7 +185,7 @@
           {% endif %}
 
           {% if ai_log_entries %}
-            <details class="audit-log">
+            <details class="audit-log advanced-only">
               <summary>Auditoria de uso da IA</summary>
               {% for entry in ai_log_entries %}
                 <article>
@@ -238,7 +270,7 @@
                 <div class="slide-workspace">
                   <div class="slide-tools">
                     <div class="slide-datasources">
-                      <strong>XLSX deste slide</strong>
+                      <strong>Planilhas deste slide</strong>
                       {% if datasource_info.files %}
                         {% for file in datasource_info.files %}
                           <span>{{ file }}</span>
@@ -251,19 +283,19 @@
                       {% endfor %}
                     </div>
                     {% if current_slide_state.understanding %}
-                      <details class="ai-understanding">
+                      <details class="ai-understanding advanced-only">
                         <summary>Entendimento IA do slide</summary>
                         <pre>{{ current_slide_state.understanding }}</pre>
                       </details>
                     {% endif %}
                     {% if current_slide_state.auto_review_skip_reason %}
-                      <div class="info-list compact-warning">
+                      <div class="info-list compact-warning advanced-only">
                         <strong>IA seletiva</strong>
                         <p>{{ current_slide_state.auto_review_skip_reason }}</p>
                       </div>
                     {% endif %}
                     {% if current_slide_state.ai_input_stats %}
-                      <div class="info-list compact-warning">
+                      <div class="info-list compact-warning advanced-only">
                         <strong>Entrada IA</strong>
                         <p>
                           XLSX {{ current_slide_state.ai_input_stats.xlsx_dump_mode }}
@@ -282,7 +314,7 @@
                       </div>
                     {% endif %}
                     {% if ai_available %}
-                      <form class="context-form" action="/jobs/{{ job_id }}/slides/{{ slide }}/review-ai?slide={{ slide }}" method="post" data-progress-message="Reprocessando este slide com IA...">
+                      <form class="context-form advanced-only" action="/jobs/{{ job_id }}/slides/{{ slide }}/review-ai?slide={{ slide }}" method="post" data-progress-message="Reprocessando este slide com IA...">
                         <label>
                           <span>Contexto para este slide</span>
                           <textarea name="manual_context" rows="3" placeholder="Ex.: use as colunas Pré pago para o gráfico Pré Pago...">{{ current_slide_state.manual_context or "" }}</textarea>
@@ -306,15 +338,15 @@
                     <details class="target-card {% if not item.has_plan %}unmapped{% endif %}" data-target-card data-status="{{ item.status }}" data-search="{{ item.search_text }}">
                       <summary class="target-summary">
                         <div class="target-title">
-                          <span class="target-kind">{{ item.object_type }}</span>
-                          <strong>{{ item.target }}</strong>
-                          <small>{{ item.visual_label }} · shape {{ item.shape_name }}</small>
+                          <span class="target-kind">{% if item.object_type == 'chart' %}gráfico{% elif item.object_type == 'table' %}tabela{% elif item.object_type == 'text' %}texto{% elif item.object_type == 'shape' %}forma{% else %}{{ item.object_type }}{% endif %}</span>
+                          <strong>{{ item.visual_label or item.target }}</strong>
+                          <small class="advanced-only">{{ item.target }} · shape {{ item.shape_name }}</small>
                         </div>
                         <div class="target-datasource">
                           {% if item.datasource %}
                             <span>{{ item.datasource }}</span>
                           {% else %}
-                            <span>Sem datasource automático</span>
+                            <span class="datasource-missing">Planilha não encontrada</span>
                           {% endif %}
                           <small>{{ item.action }}</small>
                         </div>
@@ -329,18 +361,63 @@
                       </summary>
 
                       <div class="target-detail">
+                        {% if item.headers and item.rows %}
+                          <div class="target-preview">
+                            <p class="target-viz-label">Prévia — dados que vão pro slide</p>
+                            {% if item.chart_shape %}
+                              <div class="target-chart" data-chart>
+                                <div class="target-chart-canvas" data-chart-canvas></div>
+                                <script type="application/json" data-chart-data>{{ {"kind": item.chart_shape.kind, "colors": item.chart_shape.colors, "headers": item.headers, "rows": item.rows} | tojson }}</script>
+                              </div>
+                            {% endif %}
+                            <div class="table-wrap small target-preview-table">
+                              <table>
+                                <thead>
+                                  <tr>
+                                    {% for header in item.headers %}
+                                      <th>{{ header }}</th>
+                                    {% endfor %}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {% for row in item.rows %}
+                                    <tr>
+                                      {% for value in row %}
+                                        <td>{{ value }}</td>
+                                      {% endfor %}
+                                    </tr>
+                                  {% endfor %}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        {% endif %}
+                        {% if not item.has_plan and datasource_info.files %}
+                          <div class="pick-source">
+                            <strong>Qual planilha é este {% if item.object_type == 'table' %}quadro{% else %}gráfico{% endif %}?</strong>
+                            <div class="pick-source-options">
+                              {% for file in datasource_info.files %}
+                                <form action="/jobs/{{ job_id }}/targets/{{ item.target }}/override?slide={{ slide }}" method="post" data-progress-message="Conectando a planilha a este gráfico...">
+                                  <input type="hidden" name="existing_source" value="{{ file }}">
+                                  <button type="submit" class="pick-chip">{{ file }}</button>
+                                </form>
+                              {% endfor %}
+                            </div>
+                            <small>Clique na planilha certa. Não está na lista? Use "Trocar a planilha" mais abaixo.</small>
+                          </div>
+                        {% endif %}
                         {% if item.manual_file %}
                           <p class="reason"><strong>Correção manual:</strong> {{ item.manual_file }}</p>
                           {% if item.manual_range %}
                             <p class="reason"><strong>Range manual:</strong> {{ item.manual_range }}</p>
                           {% endif %}
                         {% endif %}
-                        <p class="reason">{{ item.reason }}</p>
+                        <p class="reason advanced-only">{{ item.reason }}</p>
                         {% if item.nearby_text %}
-                          <p class="context">Contexto no slide: {{ item.nearby_text }}</p>
+                          <p class="context advanced-only">Contexto no slide: {{ item.nearby_text }}</p>
                         {% endif %}
                         {% if ai_available %}
-                          <form class="target-ai-form" action="/jobs/{{ job_id }}/targets/{{ item.target }}/review-ai?slide={{ slide }}" method="post" data-progress-message="Revisando somente este target com IA...">
+                          <form class="target-ai-form advanced-only" action="/jobs/{{ job_id }}/targets/{{ item.target }}/review-ai?slide={{ slide }}" method="post" data-progress-message="Revisando somente este target com IA...">
                             <label>
                               <span>Contexto para este target</span>
                               <input name="manual_context" placeholder="Ex.: este target usa Pós Total">
@@ -350,7 +427,7 @@
                         {% endif %}
 
                         {% if item.slide_ai %}
-                          <div class="ai-box">
+                          <div class="ai-box advanced-only">
                             <strong>Decisão IA do target: {{ item.slide_ai.target_name }} / {{ item.slide_ai.confidence }}</strong>
                             <p>{{ item.slide_ai.extraction_explanation }}</p>
                             {% if item.slide_ai.source_file %}
@@ -392,7 +469,7 @@
                         {% endif %}
 
                         {% if item.ai %}
-                          <div class="ai-box">
+                          <div class="ai-box advanced-only">
                             <strong>Diagnostico IA: {{ item.ai.status }} / {{ item.ai.confidence }}%</strong>
                             <p>{{ item.ai.reason }}</p>
                             {% if item.ai.row_mapping %}
@@ -440,7 +517,7 @@
                           </div>
                         {% endif %}
 
-                        <div class="diagnostic-grid">
+                        <div class="diagnostic-grid advanced-only">
                           {% if item.ppt_contract and item.ppt_contract.rows %}
                             <details class="diagnostic">
                               <summary>Contrato do PPT</summary>
@@ -503,49 +580,26 @@
                           {% endif %}
                         </div>
 
-                        {% if item.headers %}
-                          <details class="diagnostic final-matrix">
-                            <summary>Matriz final que será gravada</summary>
-                            <div class="table-wrap">
-                              <table>
-                                <thead>
-                                  <tr>
-                                    {% for header in item.headers %}
-                                      <th>{{ header }}</th>
-                                    {% endfor %}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {% for row in item.rows %}
-                                    <tr>
-                                      {% for value in row %}
-                                        <td>{{ value }}</td>
-                                      {% endfor %}
-                                    </tr>
-                                  {% endfor %}
-                                </tbody>
-                              </table>
-                            </div>
-                          </details>
-                        {% endif %}
-
-                        <form class="inline-form" action="/jobs/{{ job_id }}/targets/{{ item.target }}/override?slide={{ slide }}" method="post" enctype="multipart/form-data" data-progress-message="Aplicando XLSX e recalculando somente este target...">
-                          <label>
-                            <span>Trocar XLSX deste target</span>
-                            <input name="datasource" type="file" accept=".xlsx" required>
-                          </label>
-                          <label>
-                            <span>Range opcional</span>
-                            <input name="cell_range" type="text" value="{{ item.manual_range }}" placeholder="D5:G12 ou Aba!D5:G12">
-                          </label>
-                          <button type="submit">Aplicar XLSX</button>
-                        </form>
-                        <div class="approval-actions target-approval">
-                          <form action="/jobs/{{ job_id }}/targets/{{ item.target }}/approve?slide={{ slide }}" method="post" data-progress-message="Aprovando target...">
-                            <button type="submit">Aprovar target</button>
+                        <details class="swap-source">
+                          <summary>Trocar a planilha deste {% if item.object_type == 'table' %}quadro{% else %}gráfico{% endif %}</summary>
+                          <form class="inline-form" action="/jobs/{{ job_id }}/targets/{{ item.target }}/override?slide={{ slide }}" method="post" enctype="multipart/form-data" data-progress-message="Aplicando a planilha e recalculando este gráfico...">
+                            <label>
+                              <span>Enviar outra planilha (.xlsx)</span>
+                              <input name="datasource" type="file" accept=".xlsx" required>
+                            </label>
+                            <label class="advanced-only">
+                              <span>Intervalo de células (opcional)</span>
+                              <input name="cell_range" type="text" value="{{ item.manual_range }}" placeholder="D5:G12 ou Aba!D5:G12">
+                            </label>
+                            <button type="submit">Aplicar planilha</button>
                           </form>
-                          <form action="/jobs/{{ job_id }}/targets/{{ item.target }}/skip?slide={{ slide }}" method="post" data-progress-message="Pulando target...">
-                            <button class="ghost-button" type="submit">Pular target</button>
+                        </details>
+                        <div class="approval-actions target-approval">
+                          <form action="/jobs/{{ job_id }}/targets/{{ item.target }}/approve?slide={{ slide }}" method="post" data-progress-message="Aprovando...">
+                            <button type="submit">Aprovar</button>
+                          </form>
+                          <form action="/jobs/{{ job_id }}/targets/{{ item.target }}/skip?slide={{ slide }}" method="post" data-progress-message="Pulando...">
+                            <button class="ghost-button" type="submit">Pular</button>
                           </form>
                           {% if item.approval.approved %}
                             <span class="mini-pill">Aprovado</span>
@@ -572,6 +626,6 @@
         <ol id="progress-steps" class="progress-steps"></ol>
       </div>
     </div>
-    <script src="{{ url_for('static', path='/app.js') }}"></script>
+    <script src="{{ url_for('static', path='/app.js') }}?v={{ asset_version('app.js') }}"></script>
   </body>
 </html>

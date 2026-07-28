@@ -13,7 +13,7 @@
         document.documentElement.setAttribute("data-theme", theme);
       })();
     </script>
-    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ asset_version('style.css') }}">
   </head>
   <body>
     <main class="shell">
@@ -26,7 +26,7 @@
       <section class="error-panel">
         <span class="error-icon">!</span>
         <div class="notice warn">{{ message }}</div>
-        <p class="muted">Verifique se o PPT é um .pptx válido e se o ZIP contém apenas arquivos .xlsx. Se o problema persistir, consulte o log de debug do job.</p>
+        <p class="muted">Confira se a apresentação é um .pptx válido e se você enviou as planilhas (.xlsx) do relatório. Ajuste os arquivos e tente de novo.</p>
         <a class="button" href="/">Voltar para a central</a>
       </section>
     </main>

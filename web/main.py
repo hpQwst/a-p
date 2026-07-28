@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import quote
 import hashlib
 import json
 import os
@@ -13,13 +14,13 @@ import re
 import shutil
 import threading
 import time
-from zipfile import ZipFile
+from zipfile import ZipFile, ZIP_DEFLATED
 import xml.etree.ElementTree as ET
 import uuid
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -72,7 +73,7 @@ from worker.processor import (
     apply_typed_outputs_to_analysis,
     parse_slide_selection,
 )
-from worker import aws_runtime
+from web import auth
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -104,6 +105,82 @@ app = FastAPI(title="QWST Auto PPT")
 app.mount("/static", StaticFiles(directory=APP_ROOT / "static"), name="static")
 templates = Jinja2Templates(directory=APP_ROOT / "templates")
 templates.env.filters["format_bytes"] = lambda value: _format_bytes(value)
+
+
+def _asset_version(name: str) -> int:
+    """Cache-busting token for a static asset (its mtime), so browsers fetch
+    fresh CSS/JS after each deploy or edit instead of serving a stale copy."""
+    try:
+        return int((APP_ROOT / "static" / name).stat().st_mtime)
+    except OSError:
+        return 0
+
+
+templates.env.globals["asset_version"] = _asset_version
+
+
+@app.middleware("http")
+async def require_team_password(request: Request, call_next):
+    """Bloqueia o app inteiro sem sessao valida, quando ha senha configurada.
+
+    Sem AUTO_PPT_TEAM_PASSWORD o app fica aberto (uso local). Em producao a
+    variavel precisa estar definida."""
+    if auth.auth_enabled() and not auth.path_is_public(request.url.path):
+        if not auth.request_is_authenticated(request.cookies):
+            if request.headers.get("accept", "").startswith("application/json"):
+                return JSONResponse({"error": "Sessao expirada. Entre de novo."}, status_code=401)
+            destination = request.url.path
+            if request.url.query:
+                destination = f"{destination}?{request.url.query}"
+            return RedirectResponse(f"/login?next={quote(destination, safe='')}", status_code=303)
+    return await call_next(request)
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_form(request: Request, next: str = "/") -> HTMLResponse:
+    if not auth.auth_enabled() or auth.request_is_authenticated(request.cookies):
+        return RedirectResponse(_safe_next(next), status_code=303)
+    return templates.TemplateResponse(request, "login.html", {"next_url": _safe_next(next), "error": ""})
+
+
+@app.post("/login", response_class=HTMLResponse)
+async def login_submit(request: Request, password: str = Form(""), next: str = Form("/")) -> Response:
+    destination = _safe_next(next)
+    if not auth.auth_enabled():
+        return RedirectResponse(destination, status_code=303)
+    if not auth.password_matches(password):
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"next_url": destination, "error": "Senha incorreta. Tente de novo."},
+            status_code=401,
+        )
+    response = RedirectResponse(destination, status_code=303)
+    response.set_cookie(
+        auth.SESSION_COOKIE,
+        auth.issue_session_token(),
+        max_age=auth.SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+    )
+    return response
+
+
+@app.post("/logout")
+async def logout() -> Response:
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(auth.SESSION_COOKIE)
+    return response
+
+
+def _safe_next(value: str) -> str:
+    """So aceita caminho interno, para ninguem usar ?next= para redirecionar
+    a vitima a um site externo depois do login."""
+    candidate = (value or "/").strip()
+    if not candidate.startswith("/") or candidate.startswith("//"):
+        return "/"
+    return candidate
 
 
 @app.middleware("http")
@@ -169,7 +246,7 @@ async def preview(
     squad: str = Form("squad1"),
     project_name: str = Form(""),
     pptx: UploadFile = File(...),
-    datasources: UploadFile = File(...),
+    datasources: list[UploadFile] = File(...),
     mapping: UploadFile | None = File(None),
     mapping_template_ref: str = Form(""),
     use_ai: str = Form(""),
@@ -181,11 +258,17 @@ async def preview(
         mapping_template = _resolve_mapping_template(project, mapping_template_ref)
         selected_slides = parse_slide_selection(slides_to_update)
         _validate_upload(pptx, ".pptx", "Envie um arquivo PPTX.")
-        _validate_upload(datasources, ".zip", "Envie um ZIP com os XLSX.")
         if mapping and mapping.filename:
             _validate_upload(mapping, ".xlsx", "A planilha de mapeamento precisa ser XLSX.")
         pptx_bytes = await _read_upload_limited(pptx, "PPTX")
-        datasource_bytes = await _read_upload_limited(datasources, "ZIP de datasources")
+        datasource_payloads: list[tuple[str, bytes]] = []
+        for upload in datasources:
+            if not upload or not (upload.filename or "").strip():
+                continue
+            datasource_payloads.append(
+                ((upload.filename or ""), await _read_upload_limited(upload, "Planilha"))
+            )
+        datasource_bytes, datasources_display = _coalesce_datasources_to_zip(datasource_payloads)
         mapping_bytes = await _read_upload_limited(mapping, "XLSX de mapeamento") if mapping and mapping.filename else b""
         validate_pptx_bytes(pptx_bytes)
         validate_datasource_zip_bytes(datasource_bytes)
@@ -214,7 +297,7 @@ async def preview(
             "project": {"squad": project.squad, "slug": project.slug, "name": project.name},
             "files": {
                 "pptx": {"name": pptx.filename or "modelo.pptx", "bytes": len(pptx_bytes)},
-                "datasources": {"name": datasources.filename or "datasources.zip", "bytes": len(datasource_bytes)},
+                "datasources": {"name": datasources_display, "bytes": len(datasource_bytes)},
                 "mapping": {
                     "name": mapping.filename if mapping and mapping.filename else "",
                     "bytes": len(mapping_bytes),
@@ -242,7 +325,7 @@ async def preview(
             },
             "files": {
                 "pptx": pptx.filename or "modelo.pptx",
-                "datasources": datasources.filename or "datasources.zip",
+                "datasources": datasources_display,
                 "mapping": mapping.filename if mapping and mapping.filename else "",
             },
             "slides": {
@@ -284,16 +367,12 @@ async def resume_project_preview(request: Request, squad: str, slug: str) -> HTM
 
 @app.get("/jobs/{job_id}/preview", response_class=HTMLResponse)
 async def job_preview(request: Request, job_id: str, slide: int | None = None) -> HTMLResponse:
-    if aws_runtime.uses_fargate_workers():
-        aws_runtime.hydrate_job(job_id, _job_dir(job_id))
     return _render_preview(request, job_id, selected_preview_slide=slide, allow_ai=False)
 
 
 @app.get("/jobs/{job_id}/processing-status")
 async def job_processing_status(job_id: str) -> JSONResponse:
     job_dir = _job_dir(job_id)
-    if aws_runtime.uses_fargate_workers():
-        aws_runtime.refresh_job_file(job_id, job_dir, "preview_processing.json")
     state = _load_preview_processing_state(job_dir)
     if not state:
         payload = {
@@ -511,7 +590,8 @@ async def override_target_datasource(
     request: Request,
     job_id: str,
     target_id: str,
-    datasource: UploadFile = File(...),
+    datasource: UploadFile | None = File(None),
+    existing_source: str = Form(""),
     cell_range: str = Form(""),
 ) -> HTMLResponse:
     try:
@@ -522,14 +602,20 @@ async def override_target_datasource(
         target_id = _canonical_target_id(analysis.targets, target_id)
         _validate_target_id(target_id)
         _validate_cell_range(cell_range)
-        _validate_upload(datasource, ".xlsx", "Envie um XLSX para substituir o datasource deste target.")
-        data = await _read_upload_limited(datasource, "XLSX")
+        if existing_source.strip():
+            filename, data = _read_existing_datasource(job_dir, existing_source.strip())
+        else:
+            if datasource is None or not (datasource.filename or "").strip():
+                raise ValueError("Escolha uma planilha existente ou envie um novo XLSX.")
+            _validate_upload(datasource, ".xlsx", "Envie um XLSX para substituir a planilha deste gráfico.")
+            filename = datasource.filename or f"{target_id}.xlsx"
+            data = await _read_upload_limited(datasource, "XLSX")
         validate_xlsx_bytes(data)
         target_dir = job_dir / "overrides" / target_id
         target_dir.mkdir(parents=True, exist_ok=True)
         for existing in target_dir.glob("*.xlsx"):
             existing.unlink()
-        filename = safe_filename(datasource.filename or f"{target_id}.xlsx")
+        filename = safe_filename(filename or f"{target_id}.xlsx")
         (target_dir / filename).write_bytes(data)
         range_path = target_dir / "range.txt"
         if cell_range.strip():
@@ -563,13 +649,7 @@ async def override_target_datasource(
 @app.get("/jobs/{job_id}/download")
 async def download(job_id: str) -> Response:
     job_dir = _job_dir(job_id)
-    if aws_runtime.uses_fargate_workers():
-        aws_runtime.hydrate_job(job_id, job_dir)
     generated = _generated_ppt_path(job_dir)
-    if not generated.exists() and aws_runtime.uses_fargate_workers():
-        return JSONResponse(
-            {"error": "A geracao precisa ser iniciada pelo endpoint /generate."}, status_code=409
-        )
     if not generated.exists():
         await run_in_threadpool(_generate_job_output, job_dir)
     return FileResponse(
@@ -582,8 +662,6 @@ async def download(job_id: str) -> Response:
 @app.post("/jobs/{job_id}/generate")
 async def start_generation(job_id: str) -> JSONResponse:
     job_dir = _job_dir(job_id)
-    if aws_runtime.uses_fargate_workers():
-        aws_runtime.hydrate_job(job_id, job_dir)
     if _generated_ppt_path(job_dir).exists():
         return JSONResponse({"status": "complete", "download_url": f"/jobs/{job_id}/download"})
     state = _load_generation_state(job_dir)
@@ -591,23 +669,16 @@ async def start_generation(job_id: str) -> JSONResponse:
         return JSONResponse({"status": state.get("status", "running"), "status_url": f"/jobs/{job_id}/generation-status"})
 
     _init_generation_state(job_dir)
-    if aws_runtime.uses_fargate_workers():
-        aws_runtime.upload_job(job_dir)
-        task_arn = aws_runtime.launch_fargate_job(job_id, "generate", _generation_launch_token(job_dir))
-        _log_job_debug_event(job_dir, "generation_worker_fargate_submitted", {"task_arn": task_arn})
-    else:
-        with GENERATION_RUNNING_LOCK:
-            if job_id not in GENERATION_RUNNING:
-                GENERATION_RUNNING.add(job_id)
-                PREVIEW_EXECUTOR.submit(_generate_job_worker, job_dir)
+    with GENERATION_RUNNING_LOCK:
+        if job_id not in GENERATION_RUNNING:
+            GENERATION_RUNNING.add(job_id)
+            PREVIEW_EXECUTOR.submit(_generate_job_worker, job_dir)
     return JSONResponse({"status": "queued", "status_url": f"/jobs/{job_id}/generation-status"}, status_code=202)
 
 
 @app.get("/jobs/{job_id}/generation-status")
 async def generation_status(job_id: str) -> JSONResponse:
     job_dir = _job_dir(job_id)
-    if aws_runtime.uses_fargate_workers():
-        aws_runtime.refresh_job_file(job_id, job_dir, "generation_processing.json")
     state = _load_generation_state(job_dir)
     return JSONResponse(
         {
@@ -683,8 +754,6 @@ def _save_generation_state(job_dir: Path, state: dict) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
-    if aws_runtime.uses_fargate_workers():
-        aws_runtime.upload_job_file(job_dir, "generation_processing.json")
 
 
 def _init_generation_state(job_dir: Path) -> None:
@@ -692,11 +761,6 @@ def _init_generation_state(job_dir: Path) -> None:
         job_dir,
         {"status": "queued", "active": True, "message": "Aguardando geracao do PPT.", "created_at": _now_iso()},
     )
-
-
-def _generation_launch_token(job_dir: Path) -> str:
-    state = _load_generation_state(job_dir)
-    return str(state.get("created_at") or _now_iso())
 
 
 def _generate_job_worker(job_dir: Path) -> None:
@@ -800,11 +864,6 @@ def _init_preview_processing_state(job_dir: Path) -> None:
 
 
 def _start_preview_processing(job_dir: Path) -> None:
-    if aws_runtime.uses_fargate_workers():
-        aws_runtime.upload_job(job_dir)
-        task_arn = aws_runtime.launch_fargate_job(job_dir.name, "preview", _preview_launch_token(job_dir))
-        _log_job_debug_event(job_dir, "preview_worker_fargate_submitted", {"task_arn": task_arn})
-        return
     job_id = job_dir.name
     with PREVIEW_RUNNING_LOCK:
         if job_id in PREVIEW_RUNNING:
@@ -967,19 +1026,12 @@ def _load_preview_processing_state(job_dir: Path) -> dict:
         return {}
 
 
-def _preview_launch_token(job_dir: Path) -> str:
-    state = _load_preview_processing_state(job_dir)
-    return str(state.get("created_at") or _now_iso())
-
-
 def _save_preview_processing_state(job_dir: Path, state: dict) -> None:
     state["updated_at"] = _now_iso()
     path = _preview_processing_path(job_dir)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
-    if aws_runtime.uses_fargate_workers():
-        aws_runtime.upload_job_file(job_dir, "preview_processing.json")
 
 
 def _update_preview_processing_state(
@@ -1125,7 +1177,7 @@ def _processing_preview_context(
         "ai_status": ai_status,
         "ai_available": ai_configured(PROJECT_ROOT),
         "ai_enabled": bool(metadata.get("use_ai")),
-        "async_generation": aws_runtime.uses_fargate_workers(),
+        "async_generation": _async_generation_enabled(),
         "analysis_warnings": [],
         "slide_selection_label": _slide_selection_label(_preview_scope_slides(metadata)),
         "notice": notice,
@@ -1297,7 +1349,7 @@ def _preview_context_from_analysis(
         "ai_status": ai_status,
         "ai_available": ai_configured(PROJECT_ROOT),
         "ai_enabled": False,
-        "async_generation": aws_runtime.uses_fargate_workers(),
+        "async_generation": _async_generation_enabled(),
         "analysis_warnings": analysis.warnings,
         "slide_selection_label": _slide_selection_label(selected_slides),
         "notice": notice,
@@ -2177,6 +2229,18 @@ def _slide_datasource_summary(job_dir: Path, slide_numbers: list[int]) -> dict[i
     return output
 
 
+def _chart_shape_for_target(target) -> dict | None:
+    """Tipo + cores reais do chart (do XML já extraído) para a prévia fiel no
+    navegador. None quando não é chart ou o tipo não é suportado (só tabela)."""
+    if getattr(target, "object_type", "") != "chart":
+        return None
+    kind = getattr(target, "chart_kind", "") or ""
+    if not kind:
+        return None
+    colors = list(getattr(target, "chart_series_colors", []) or [])
+    return {"kind": kind, "colors": colors}
+
+
 def _target_ai_payload(target) -> dict:
     return {
         "target_id": target.target_id,
@@ -2589,6 +2653,7 @@ def _cards_by_slide(
                 "nearby_text": target.nearby_text,
                 "has_plan": item is not None,
                 "datasource": datasource,
+                "chart_shape": _chart_shape_for_target(target),
                 "action": item.action if item else "aguardando_datasource",
                 "reason": item.reason if item else "Nenhum datasource compativel foi escolhido automaticamente.",
                 "confidence": item.confidence if item else None,
@@ -3511,15 +3576,21 @@ def _large_deck_confirmation_message(ppt_summary: dict, selected_slides: list[in
     )
 
 
+def _async_generation_enabled() -> bool:
+    """Quando ligado, o botao de download dispara POST /generate e o navegador
+    acompanha por polling, em vez de gerar o PPT dentro da propria requisicao.
+
+    Fica desligado por padrao porque o caminho sincrono e o que esta em uso hoje.
+    Vale ligar se algum deck grande estourar o tempo limite da requisicao."""
+    return os.getenv("AUTO_PPT_ASYNC_GENERATION", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _job_dir(job_id: str, create: bool = False) -> Path:
     if not re.fullmatch(r"[a-f0-9]{32}", job_id):
         raise HTTPException(status_code=404, detail="Job nao encontrado.")
     path = RUNTIME_ROOT / job_id
     if create:
         path.mkdir(parents=True, exist_ok=True)
-    elif not path.exists() and aws_runtime.uses_fargate_workers():
-        path.mkdir(parents=True, exist_ok=True)
-        aws_runtime.hydrate_job(job_id, path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Job nao encontrado.")
     return path
@@ -3537,6 +3608,53 @@ def _validate_cell_range(cell_range: str) -> None:
     ref = text.split("!", 1)[1] if "!" in text else text
     if not re.fullmatch(r"[A-Za-z]{1,4}\d{1,7}(:[A-Za-z]{1,4}\d{1,7})?", ref):
         raise ValueError("Range invalido. Use algo como D5:G12 ou Planilha1!D5:G12.")
+
+
+def _read_existing_datasource(job_dir: Path, entry_name: str) -> tuple[str, bytes]:
+    """Pull one XLSX already uploaded (inside datasources.zip) by name, so the user
+    can reassign a chart to a known planilha without uploading it again."""
+    zip_path = job_dir / "datasources.zip"
+    if not zip_path.exists():
+        raise ValueError("Não encontrei as planilhas deste projeto.")
+    target = entry_name.replace("\\", "/").strip()
+    with ZipFile(zip_path) as archive:
+        names = [n for n in archive.namelist() if not n.endswith("/")]
+        match = next((n for n in names if n == target), None)
+        if match is None:
+            match = next((n for n in names if n.rsplit("/", 1)[-1] == target.rsplit("/", 1)[-1]), None)
+        if match is None:
+            raise ValueError(f"Planilha '{entry_name}' não está entre as enviadas.")
+        return match.rsplit("/", 1)[-1], archive.read(match)
+
+
+def _coalesce_datasources_to_zip(payloads: list[tuple[str, bytes]]) -> tuple[bytes, str]:
+    """Accept either a single .zip or several loose .xlsx files and always return
+    (zip_bytes, human_label). Lets the user drop planilhas directly, no zipping."""
+    if not payloads:
+        raise ValueError("Envie as planilhas .xlsx (ou um .zip com elas).")
+    zips = [(name, data) for name, data in payloads if name.lower().endswith(".zip")]
+    xlsx = [(name, data) for name, data in payloads if name.lower().endswith(".xlsx")]
+    if zips and not xlsx:
+        if len(zips) > 1:
+            raise ValueError("Envie um único .zip, ou várias planilhas .xlsx soltas.")
+        return zips[0][1], zips[0][0] or "datasources.zip"
+    if not xlsx:
+        raise ValueError("Formato não suportado. Envie planilhas .xlsx ou um .zip com elas.")
+    buffer = BytesIO()
+    seen: set[str] = set()
+    with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+        for name, data in xlsx:
+            base = safe_filename(name or "planilha.xlsx") or "planilha.xlsx"
+            final = base
+            counter = 1
+            while final in seen:
+                stem = base[:-5] if base.lower().endswith(".xlsx") else base
+                final = f"{stem}_{counter}.xlsx"
+                counter += 1
+            seen.add(final)
+            archive.writestr(final, data)
+    label = xlsx[0][0] if len(xlsx) == 1 else f"{len(xlsx)} planilhas"
+    return buffer.getvalue(), label
 
 
 def _validate_upload(upload: UploadFile, extension: str, message: str) -> None:

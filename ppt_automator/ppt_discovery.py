@@ -75,6 +75,8 @@ class PptTarget:
     expected_series: list[str] = field(default_factory=list)
     expected_values: list[list[Any]] = field(default_factory=list)
     value_format: str = ""
+    chart_kind: str = ""
+    chart_series_colors: list[str] = field(default_factory=list)
     table_cells: list[list[str]] = field(default_factory=list)
     text: str = ""
     target_key: str = ""
@@ -242,6 +244,8 @@ def _chart_target(
     expected_values: list[list[Any]] = []
     orientation = ""
     value_format = ""
+    chart_kind = ""
+    chart_series_colors: list[str] = []
     if chart_path in zf.namelist():
         structure = _read_chart_structure(zf, chart_path, workbook_path)
         sheet_name = structure["sheet_name"]
@@ -250,6 +254,8 @@ def _chart_target(
         expected_values = structure["values"]
         orientation = structure["orientation"]
         value_format = structure["value_format"]
+        chart_kind = structure.get("chart_kind", "")
+        chart_series_colors = structure.get("series_colors", [])
 
     return PptTarget(
         slide_index=slide_index,
@@ -273,6 +279,8 @@ def _chart_target(
         expected_series=expected_series,
         expected_values=expected_values,
         value_format=value_format,
+        chart_kind=chart_kind,
+        chart_series_colors=chart_series_colors,
     )
 
 
@@ -325,6 +333,7 @@ def _read_chart_structure(zf: ZipFile, chart_path: str, workbook_path: str) -> d
         values = _transpose_series_values(values_by_series, len(categories))
     else:
         values = values_by_series
+    kind, series_colors = _chart_kind_and_colors(chart_root, series_elements)
     return {
         "sheet_name": sheet_name or (workbook.worksheets[0].title if workbook else ""),
         "categories": categories,
@@ -332,7 +341,48 @@ def _read_chart_structure(zf: ZipFile, chart_path: str, workbook_path: str) -> d
         "values": values,
         "orientation": orientation,
         "value_format": _chart_value_format(chart_root, series_elements),
+        "chart_kind": kind,
+        "series_colors": series_colors,
     }
+
+
+def _chart_kind_and_colors(
+    chart_root: ET.Element, series_elements: list[ET.Element]
+) -> tuple[str, list[str]]:
+    """Tipo do gráfico e cores de série lidos do XML já extraído (sem custo extra,
+    sem Office). Serve para desenhar uma prévia fiel ao formato real do slide.
+    Retorna kind em {column, column-stacked, bar, bar-stacked, line, area, pie}
+    ou "" quando o tipo não é suportado (aí a UI cai só na tabela)."""
+    plot_area = chart_root.find(".//c:plotArea", NS)
+    kind = ""
+    if plot_area is not None:
+        for child in plot_area:
+            tag = child.tag.rsplit("}", 1)[-1]
+            if tag == "barChart":
+                direction = child.find("./c:barDir", NS)
+                grouping = child.find("./c:grouping", NS)
+                is_bar = direction is not None and direction.attrib.get("val") == "bar"
+                stacked = grouping is not None and grouping.attrib.get("val") in {"stacked", "percentStacked"}
+                base = "bar" if is_bar else "column"
+                kind = f"{base}-stacked" if stacked else base
+                break
+            if tag == "lineChart":
+                kind = "line"
+                break
+            if tag == "areaChart":
+                kind = "area"
+                break
+            if tag in {"pieChart", "doughnutChart"}:
+                kind = "pie"
+                break
+    colors: list[str] = []
+    for ser in series_elements:
+        node = ser.find("./c:spPr//a:solidFill/a:srgbClr", NS)
+        value = node.attrib.get("val") if node is not None else None
+        colors.append("#" + value if value and len(value) == 6 else "")
+    if not any(colors):
+        colors = []
+    return kind, colors
 
 
 def _chart_value_format(chart_root: ET.Element, series_elements: list[ET.Element]) -> str:

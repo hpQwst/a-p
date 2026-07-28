@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Entrar - QWST Auto PPT</title>
+    <script>
+      (function () {
+        var theme = localStorage.getItem("qwst-theme");
+        if (!theme) {
+          theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ asset_version('style.css') }}">
+  </head>
+  <body>
+    <main class="login-shell">
+      <section class="workspace-card login-card">
+        <p class="eyebrow">QWST Auto PPT</p>
+        <h1>Entrar</h1>
+        <p class="login-hint">Use a senha compartilhada da equipe para abrir a ferramenta.</p>
+
+        {% if error %}
+          <div class="notice warn">{{ error }}</div>
+        {% endif %}
+
+        <form method="post" action="/login">
+          <input type="hidden" name="next" value="{{ next_url }}">
+          <label>
+            <span>Senha da equipe</span>
+            <input name="password" type="password" autocomplete="current-password" autofocus required>
+          </label>
+          <button type="submit">Entrar</button>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>

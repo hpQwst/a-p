@@ -138,7 +138,7 @@ class AndreWebFlowTests(unittest.TestCase):
 
             slide_three = client.get(f"/jobs/{job_id}/preview?slide=3")
             self.assertEqual(slide_three.status_code, 200)
-            self.assertIn("Sem datasource", slide_three.text)
+            self.assertIn("Planilha não encontrada", slide_three.text)
             self.assertIn("7792738590", slide_three.text)
 
             with ZipFile(DATASOURCES) as zf:

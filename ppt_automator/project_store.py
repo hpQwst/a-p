@@ -515,7 +515,16 @@ def save_project_bytes(project: ProjectRef, parts: list[str], filename: str, dat
         return str(path)
     if backend == "s3":
         key = _s3_project_prefix(project.squad, project.slug, *parts, filename)
-        _s3_client().put_object(Bucket=_s3_bucket(required=True), Key=key, Body=data)
+        request = {
+            "Bucket": _s3_bucket(required=True),
+            "Key": key,
+            "Body": data,
+        }
+        if parts and parts[0] == "runs":
+            # Cada run tem chaves unicas e, sem tag, ficaria para sempre no
+            # bucket versionado. O lifecycle da stack expira apenas esta classe.
+            request["Tagging"] = "retention=run"
+        _s3_client().put_object(**request)
         return f"s3://{_s3_bucket(required=True)}/{key}"
     raise ValueError(f"Backend de storage nao suportado: {backend}")
 

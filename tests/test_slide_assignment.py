@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from ppt_automator.ppt_discovery import PptTarget
 from ppt_automator.xlsx_parser import ParsedXlsxTable
-from ppt_automator.table_normalizer import build_transform_plans, _hungarian
+from ppt_automator import table_normalizer
+from ppt_automator.table_normalizer import (
+    _hungarian,
+    build_source_match_index,
+    build_transform_plans,
+)
 
 
 def _target(shape: str, categories: list[str]) -> PptTarget:
@@ -47,6 +53,12 @@ class SlideAssignmentTests(unittest.TestCase):
         # otimo: (0->1, 1->0) custo 0.9+0.2=1.1  vs (0->0,1->1)=0.1+0.8=0.9 -> escolhe 0.9
         self.assertEqual(assignment, [0, 1])
 
+    def test_hungarian_handles_many_more_sources_without_square_padding(self) -> None:
+        self.assertEqual(_hungarian([[0.4, 0.1, 0.2, 0.8]]), [1])
+
+    def test_hungarian_marks_excess_targets_as_unassigned(self) -> None:
+        self.assertEqual(_hungarian([[0.1], [0.2]]), [0, -1])
+
     def test_two_targets_never_share_the_same_datasource(self) -> None:
         targets = [
             _target("chartA", ["Norte", "Sul", "Leste"]),
@@ -73,6 +85,49 @@ class SlideAssignmentTests(unittest.TestCase):
         plans = build_transform_plans(targets, sources)
         self.assertEqual(len(plans), 1)
         self.assertEqual(plans[0].datasource.file_name, "datasources/tabA_slide3.xlsx")
+
+    def test_prepared_text_score_is_identical_to_original_score(self) -> None:
+        cases = [
+            ("Norte", "nórte"),
+            ("Uso próprio", "auto consumo"),
+            ("Até 25%", "ATE 25"),
+            ("Comparativo 2026 canal", "canal 2026"),
+            ("", "canal"),
+        ]
+        for left, right in cases:
+            with self.subTest(left=left, right=right):
+                self.assertEqual(
+                    table_normalizer._soft_feature_score(
+                        table_normalizer._text_match_features(left),
+                        table_normalizer._text_match_features(right),
+                    ),
+                    table_normalizer._soft_text_score(left, right),
+                )
+
+    def test_source_features_can_be_reused_across_plan_calls(self) -> None:
+        sources = [
+            _source("datasources/tabA.xlsx", ["Norte", "Sul"]),
+            _source("datasources/tabB.xlsx", ["Cristal", "Bronze"]),
+        ]
+        index = build_source_match_index(sources)
+        with patch.object(
+            table_normalizer,
+            "_source_match_features",
+            wraps=table_normalizer._source_match_features,
+        ) as feature_builder:
+            first = build_transform_plans(
+                [_target("chartA", ["Norte", "Sul"])],
+                sources,
+                source_match_index=index,
+            )
+            second = build_transform_plans(
+                [_target("chartB", ["Cristal", "Bronze"])],
+                sources,
+                source_match_index=index,
+            )
+        feature_builder.assert_not_called()
+        self.assertEqual([plan.datasource.file_name for plan in first], ["datasources/tabA.xlsx"])
+        self.assertEqual([plan.datasource.file_name for plan in second], ["datasources/tabB.xlsx"])
 
 
 if __name__ == "__main__":

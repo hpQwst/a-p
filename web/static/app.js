@@ -55,7 +55,7 @@
   }
 
   function updateCombinedUploadSize() {
-    var form = document.querySelector("[data-combined-upload-warning-mb]");
+    var form = document.querySelector("[data-upload-size-form]");
     var summary = document.querySelector("[data-upload-size-summary]");
     if (!form || !summary) {
       return;
@@ -66,13 +66,9 @@
         total += file.size || 0;
       });
     });
-    var thresholdMb = parseInt(form.getAttribute("data-combined-upload-warning-mb") || "250", 10);
-    var threshold = thresholdMb * 1024 * 1024;
-    summary.classList.toggle("warn", total > threshold);
+    summary.classList.remove("warn");
     if (!total) {
       summary.textContent = "Selecione os arquivos para ver o tamanho combinado.";
-    } else if (total > threshold) {
-      summary.textContent = "Arquivos: " + formatBytes(total) + ". Caso grande: o processamento pode levar alguns minutos. O tamanho é só uma estimativa; a ferramenta também verifica slides e objetos.";
     } else {
       summary.textContent = "Tamanho combinado: " + formatBytes(total) + ".";
     }

@@ -12,7 +12,12 @@ from ppt_automator.ppt_discovery import PptTarget
 from ppt_automator.preview_model import PreviewTarget, build_preview
 from ppt_automator.table_normalizer import TransformPlan, normalize_to_target
 from ppt_automator.typed_matrix import normalize_typed_edit_data, numeric_value
-from ppt_automator.xlsx_parser import ParsedXlsxTable, parse_xlsx_table
+from ppt_automator.xlsx_parser import (
+    ParsedXlsxTable,
+    parse_xlsx_table,
+    source_sheet_of,
+    zip_path_of,
+)
 
 
 ManualSourcePayload = tuple[str, bytes] | tuple[str, bytes, str]
@@ -442,20 +447,23 @@ def _analysis_warnings(
             + ". O sistema usa estrutura e contexto como desempate, mas vale revisar o preview."
         )
 
-    # Planilhas com mais de uma aba: so a primeira e lida, o resto some sem aviso.
-    multi_sheet = [
-        f"{_basename(source.file_name)} (lida: {source.sheet_name}; ignoradas: "
-        + ", ".join(name for name in source.sheet_names if name != source.sheet_name)
-        + ")"
-        for source in sources
-        if len(source.sheet_names) > 1
-    ]
-    if multi_sheet:
+    # Cada aba ja entra como fonte propria; o aviso agora e so informativo, para
+    # o usuario entender por que aparecem mais fontes do que arquivos enviados.
+    workbooks_with_sheets: dict[str, int] = {}
+    for source in sources:
+        sheet = source_sheet_of(source.file_name)
+        if sheet:
+            path = zip_path_of(source.file_name)
+            workbooks_with_sheets[path] = workbooks_with_sheets.get(path, 0) + 1
+    if workbooks_with_sheets:
+        detail = "; ".join(
+            f"{_basename(path)} ({count} abas)"
+            for path, count in sorted(workbooks_with_sheets.items(), key=lambda item: -item[1])[:6]
+        )
         warnings.append(
-            "Estas planilhas tem mais de uma aba e so a primeira foi lida: "
-            + "; ".join(multi_sheet[:8])
-            + ". Se os dados certos estao em outra aba, use Trocar a planilha e informe o intervalo "
-            "no formato Aba!A1:D10."
+            "Planilhas com varias abas foram abertas aba por aba, cada uma como uma fonte: "
+            + detail
+            + ". Se alguma aba nao devia ser usada, ajuste em Trocar a planilha."
         )
 
     # Varias tabelas na mesma aba viram um retangulo so: numero errado em silencio.

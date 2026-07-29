@@ -31,8 +31,8 @@ class ParsedXlsxTable:
     used_range: tuple[int, int, int, int] | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     preview_rows: list[list[Any]] = field(default_factory=list)
-    # Abas existentes no arquivo. So a primeira e lida quando nao ha range com
-    # nome de aba, entao mais de uma aqui significa conteudo ignorado em silencio.
+    # Abas existentes no arquivo. No ZIP com varias abas, cada ParsedXlsxTable
+    # representa uma delas; a lista completa sustenta avisos e selecao manual.
     sheet_names: list[str] = field(default_factory=list)
     # Blocos retangulares separados encontrados na aba lida. Mais de um significa
     # que varias tabelas foram somadas num retangulo so, gerando numero errado.
@@ -43,23 +43,113 @@ class ParsedXlsxTable:
         return self.source_id
 
 
+SHEET_SEPARATOR = "#"
+
+
+def zip_path_of(file_name: str) -> str:
+    """Caminho do arquivo dentro do ZIP, sem o sufixo de aba."""
+    return str(file_name or "").split(SHEET_SEPARATOR, 1)[0]
+
+
+def source_sheet_of(file_name: str) -> str:
+    """Aba embutida no identificador da fonte, vazio quando nao ha."""
+    parts = str(file_name or "").split(SHEET_SEPARATOR, 1)
+    return parts[1] if len(parts) == 2 else ""
+
+
+def workbook_sheet_names(workbook_bytes: bytes) -> list[str]:
+    workbook = openpyxl.load_workbook(
+        BytesIO(_openpyxl_readable_copy(workbook_bytes)), data_only=True, read_only=True
+    )
+    try:
+        return list(workbook.sheetnames)
+    finally:
+        workbook.close()
+
+
 def parse_datasource_zip(
     datasources_zip: InputFile,
     formula_mode: str = "auto",
     include_names: set[str] | None = None,
 ) -> list[ParsedXlsxTable]:
+    """Cada ABA vira uma fonte independente.
+
+    Planilha de relatorio real costuma ser um workbook unico com dezenas de abas
+    alimentando dezenas de graficos (um caso medido tinha 178 abas para 639
+    objetos). Ler so a primeira aba fazia esses decks nao casarem com nada.
+
+    Workbook de uma aba so mantem o identificador antigo (o caminho no ZIP),
+    para nao invalidar mapeamentos ja aprendidos. Com varias abas, o
+    identificador vira 'arquivo.xlsx#Aba'.
+    """
     output: list[ParsedXlsxTable] = []
     with ZipFile(BytesIO(read_bytes(datasources_zip))) as zf:
         for name in zf.namelist():
-            if name.lower().endswith(".xlsx") and (include_names is None or name in include_names):
-                output.append(
-                    parse_xlsx_table(
-                        zf.read(name),
-                        file_name=name,
-                        formula_mode=formula_mode,
-                    )
-                )
+            if not name.lower().endswith(".xlsx"):
+                continue
+            if include_names is not None and zip_path_of(name) not in include_names:
+                continue
+            raw = zf.read(name)
+            try:
+                sheets = workbook_sheet_names(raw)
+            except Exception:
+                sheets = []
+            if len(sheets) <= 1:
+                output.append(parse_xlsx_table(raw, file_name=name, formula_mode=formula_mode))
+                continue
+            # Preparar o workbook (sanitizar, avaliar formulas, abrir) custa o
+            # mesmo para uma aba ou para todas. Fazer isso por aba multiplicaria
+            # o custo pelo numero de abas - com 178 abas, minutos em vez de
+            # segundos. Prepara uma vez e percorre as abas.
+            try:
+                readable_bytes = _openpyxl_readable_copy(raw)
+                calculated_bytes = prepare_workbook_values(readable_bytes, formula_mode=formula_mode)
+                data_wb = openpyxl.load_workbook(BytesIO(calculated_bytes), data_only=True, read_only=True)
+                formula_wb = openpyxl.load_workbook(BytesIO(readable_bytes), data_only=False, read_only=True)
+            except Exception:
+                output.append(parse_xlsx_table(raw, file_name=name, formula_mode=formula_mode))
+                continue
+            try:
+                for sheet in sheets:
+                    try:
+                        output.append(
+                            _parse_worksheet(
+                                data_wb[sheet],
+                                formula_wb[sheet] if sheet in formula_wb.sheetnames else data_wb[sheet],
+                                file_name=f"{name}{SHEET_SEPARATOR}{sheet}",
+                                sheet_names=sheets,
+                            )
+                        )
+                    except Exception:
+                        # Uma aba ilegivel (protegida, corrompida) nao pode
+                        # derrubar a leitura das outras 177.
+                        continue
+            finally:
+                data_wb.close()
+                formula_wb.close()
     return output
+
+
+def _parse_worksheet(data_ws, formula_ws, file_name: str, sheet_names: list[str]) -> ParsedXlsxTable:
+    """Monta a tabela de UMA aba ja aberta, sem reabrir o workbook."""
+    raw_rows = [list(row) for row in data_ws.iter_rows(values_only=True)]
+    formula_all_rows = [list(row) for row in formula_ws.iter_rows(values_only=True)]
+    trimmed_rows, used_range = _trim_table(raw_rows)
+    formula_rows = _slice_rows(formula_all_rows, used_range)
+    metadata = _extract_metadata(trimmed_rows)
+    parsed = _parse_rectangular_table(
+        trimmed_rows,
+        formula_rows,
+        file_name=file_name,
+        sheet_name=data_ws.title,
+        used_range=used_range,
+        metadata=metadata,
+    )
+    return replace(
+        parsed,
+        sheet_names=list(sheet_names),
+        table_blocks=count_table_blocks(trimmed_rows),
+    )
 
 
 def parse_xlsx_table(
@@ -67,13 +157,16 @@ def parse_xlsx_table(
     file_name: str = "",
     formula_mode: str = "auto",
     cell_range: str = "",
+    sheet: str = "",
 ) -> ParsedXlsxTable:
     original_bytes = read_bytes(workbook_file)
     readable_bytes = _openpyxl_readable_copy(original_bytes)
     calculated_bytes = prepare_workbook_values(readable_bytes, formula_mode=formula_mode)
     data_wb = openpyxl.load_workbook(BytesIO(calculated_bytes), data_only=True, read_only=True)
     formula_wb = openpyxl.load_workbook(BytesIO(readable_bytes), data_only=False, read_only=True)
-    data_ws, range_ref = _select_worksheet(data_wb, cell_range)
+    # Aba explicita ganha do que estiver no cell_range: quem passou o nome sabe
+    # de qual aba precisa.
+    data_ws, range_ref = _select_worksheet(data_wb, cell_range, sheet=sheet)
     formula_ws = formula_wb[data_ws.title] if data_ws.title in formula_wb.sheetnames else formula_wb.worksheets[0]
     if range_ref:
         trimmed_rows, used_range = _rows_from_range(data_ws, range_ref)
@@ -162,8 +255,9 @@ def _remove_pivot_content_types(xml_bytes: bytes) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
-def _select_worksheet(workbook: Any, cell_range: str) -> tuple[Any, str]:
+def _select_worksheet(workbook: Any, cell_range: str, sheet: str = "") -> tuple[Any, str]:
     sheet_name, range_ref = _split_range_ref(cell_range)
+    sheet_name = sheet or sheet_name
     if sheet_name:
         if sheet_name not in workbook.sheetnames:
             raise ValueError(f"Aba '{sheet_name}' nao encontrada no XLSX.")

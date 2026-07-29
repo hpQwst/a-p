@@ -54,10 +54,59 @@ class SourceMatchCandidate:
     strong_id_match: bool = False
 
 
+@dataclass(frozen=True)
+class _TextMatchFeatures:
+    normalized: str
+    tokens: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _SourceMatchFeatures:
+    obj_ids: frozenset[str]
+    slide_hint: int | None
+    filename: _TextMatchFeatures
+    filename_context: _TextMatchFeatures
+    semantic_contexts: tuple[_TextMatchFeatures, ...]
+    categories: tuple[_TextMatchFeatures, ...]
+    series: tuple[_TextMatchFeatures, ...]
+
+
+@dataclass(frozen=True)
+class _TargetMatchFeatures:
+    keys: frozenset[str]
+    filename_context: _TextMatchFeatures
+    nearby_text: _TextMatchFeatures
+    semantic_context: _TextMatchFeatures
+    categories: tuple[_TextMatchFeatures, ...]
+    series: tuple[_TextMatchFeatures, ...]
+    comparison_series_required: bool
+    table_cell_count: int
+
+
+@dataclass(frozen=True)
+class SourceMatchIndex:
+    """Features imutaveis das fontes, calculadas uma vez por analise."""
+
+    by_identity: dict[int, _SourceMatchFeatures]
+
+    def features_for(self, source: ParsedXlsxTable) -> _SourceMatchFeatures:
+        return self.by_identity.get(id(source)) or _source_match_features(source)
+
+
+def build_source_match_index(sources: Iterable[ParsedXlsxTable]) -> SourceMatchIndex:
+    return SourceMatchIndex(
+        by_identity={
+            id(source): _source_match_features(source)
+            for source in sources
+        }
+    )
+
+
 def build_transform_plans(
     targets: Iterable[PptTarget],
     sources: Iterable[ParsedXlsxTable],
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    source_match_index: SourceMatchIndex | None = None,
 ) -> list[TransformPlan]:
     """Match deterministico por SLIDE resolvido como atribuicao global 1:1.
 
@@ -68,6 +117,7 @@ def build_transform_plans(
     melhor candidato: um vencedor folgado vira alta confianca e dispensa a IA.
     """
     source_list = list(sources)
+    match_index = source_match_index or build_source_match_index(source_list)
     eligible = [target for target in targets if target.object_type in {"chart", "table"}]
     plans: list[TransformPlan] = []
     by_slide: dict[int, list[PptTarget]] = {}
@@ -81,6 +131,7 @@ def build_transform_plans(
                 slide_number,
                 by_slide[slide_number],
                 source_list,
+                source_match_index=match_index,
                 progress_callback=progress_callback,
                 completed_offset=completed,
                 total_targets=total,
@@ -95,11 +146,16 @@ def _assign_slide_plans(
     slide_targets: list[PptTarget],
     all_sources: list[ParsedXlsxTable],
     *,
+    source_match_index: SourceMatchIndex,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     completed_offset: int = 0,
     total_targets: int = 0,
 ) -> list[TransformPlan]:
-    candidate_sources = _sources_for_slide(slide_number, all_sources)
+    candidate_sources = _sources_for_slide(
+        slide_number,
+        all_sources,
+        source_match_index=source_match_index,
+    )
     if not candidate_sources:
         return []
 
@@ -108,7 +164,14 @@ def _assign_slide_plans(
     strong_matrix: list[list[bool]] = []
     reason_matrix: list[list[str]] = []
     for target_index, target in enumerate(slide_targets):
-        candidates = {c.source.file_name: c for c in source_match_candidates(target, candidate_sources)}
+        candidates = {
+            c.source.file_name: c
+            for c in source_match_candidates(
+                target,
+                candidate_sources,
+                source_match_index=source_match_index,
+            )
+        }
         row_scores, row_strong, row_reason = [], [], []
         for source in candidate_sources:
             cand = candidates.get(source.file_name)
@@ -172,11 +235,17 @@ def _notify_progress(
         pass
 
 
-def _sources_for_slide(slide_number: int, sources: list[ParsedXlsxTable]) -> list[ParsedXlsxTable]:
+def _sources_for_slide(
+    slide_number: int,
+    sources: list[ParsedXlsxTable],
+    *,
+    source_match_index: SourceMatchIndex | None = None,
+) -> list[ParsedXlsxTable]:
     """Blocking por slide: usa o token 'slideN' do nome do arquivo para restringir
     candidatos. Datasources sem indicacao de slide continuam elegiveis para todos."""
-    hinted_here = [s for s in sources if _source_slide_hint(s) == slide_number]
-    no_hint = [s for s in sources if _source_slide_hint(s) is None]
+    index = source_match_index or build_source_match_index(sources)
+    hinted_here = [s for s in sources if index.features_for(s).slide_hint == slide_number]
+    no_hint = [s for s in sources if index.features_for(s).slide_hint is None]
     scoped = hinted_here + no_hint
     return scoped or list(sources)
 
@@ -208,41 +277,50 @@ def _calibrated_confidence(score: float, second_best: float, strong: bool) -> fl
 
 def _hungarian(cost: list[list[float]]) -> list[int]:
     """Atribuicao 1:1 de custo minimo (Kuhn-Munkres, O(n^3)). Retorna, para cada
-    linha, a coluna atribuida (ou -1). Matriz e retangular; padding e neutro-caro."""
+    linha, a coluna atribuida (ou -1).
+
+    O algoritmo classico abaixo ja aceita n <= m. Antes a matriz era sempre
+    preenchida ate max(n, m) x max(n, m): um slide com 1 objeto e 178 fontes
+    fazia trabalho cubico para 178 linhas artificiais. So adicionamos colunas
+    neutro-caras quando ha mais alvos do que fontes.
+    """
     n = len(cost)
     if n == 0:
         return []
-    m = len(cost[0]) if cost[0] else 0
-    if m == 0:
+    original_m = len(cost[0]) if cost[0] else 0
+    if original_m == 0:
         return [-1] * n
-    size = max(n, m)
     pad = 10.0
-    C = [[cost[i][j] if i < n and j < m else pad for j in range(size)] for i in range(size)]
+    if n > original_m:
+        matrix = [row + [pad] * (n - original_m) for row in cost]
+    else:
+        matrix = cost
+    m = len(matrix[0])
     INF = float("inf")
-    u = [0.0] * (size + 1)
-    v = [0.0] * (size + 1)
-    p = [0] * (size + 1)
-    way = [0] * (size + 1)
-    for i in range(1, size + 1):
+    u = [0.0] * (n + 1)
+    v = [0.0] * (m + 1)
+    p = [0] * (m + 1)
+    way = [0] * (m + 1)
+    for i in range(1, n + 1):
         p[0] = i
         j0 = 0
-        minv = [INF] * (size + 1)
-        used = [False] * (size + 1)
+        minv = [INF] * (m + 1)
+        used = [False] * (m + 1)
         while True:
             used[j0] = True
             i0 = p[j0]
             delta = INF
             j1 = -1
-            for j in range(1, size + 1):
+            for j in range(1, m + 1):
                 if not used[j]:
-                    cur = C[i0 - 1][j - 1] - u[i0] - v[j]
+                    cur = matrix[i0 - 1][j - 1] - u[i0] - v[j]
                     if cur < minv[j]:
                         minv[j] = cur
                         way[j] = j0
                     if minv[j] < delta:
                         delta = minv[j]
                         j1 = j
-            for j in range(size + 1):
+            for j in range(m + 1):
                 if used[j]:
                     u[p[j]] += delta
                     v[j] -= delta
@@ -258,10 +336,10 @@ def _hungarian(cost: list[list[float]]) -> list[int]:
             if j0 == 0:
                 break
     ans = [-1] * n
-    for j in range(1, size + 1):
+    for j in range(1, m + 1):
         row = p[j] - 1
         col = j - 1
-        if 0 <= row < n and 0 <= col < m:
+        if 0 <= row < n and 0 <= col < original_m:
             ans[row] = col
     return ans
 
@@ -418,14 +496,18 @@ def source_match_candidates(
     target: PptTarget,
     sources: list[ParsedXlsxTable],
     limit: int | None = None,
+    source_match_index: SourceMatchIndex | None = None,
 ) -> list[SourceMatchCandidate]:
+    index = source_match_index or build_source_match_index(sources)
+    target_features = _target_match_features(target)
     scored: list[SourceMatchCandidate] = []
     for source in sources:
+        source_features = index.features_for(source)
         score = 0.0
         reasons = []
         strong_id_match = False
-        target_keys = {target.target_id, target.shape_name}
-        if _source_obj_ids(source) & {str(key) for key in target_keys if key}:
+        target_keys = target_features.keys
+        if source_features.obj_ids & target_keys:
             # Sinal deterministico mais forte: o XLSX carrega "obj<numero_do_shape>"
             # (em table_title/context_text), que casa exatamente com o shape do PPT.
             # Isso resolve o match sem IA para todo datasource devidamente marcado.
@@ -440,32 +522,32 @@ def source_match_candidates(
             score += 0.2
             reasons.append("metadado do XLSX bate com o target")
             strong_id_match = True
-        filename_score = _filename_context_score(target, source)
+        filename_score = _filename_context_score_prepared(target_features, source_features)
         if filename_score >= 0.55:
             score += 0.18 * filename_score
             reasons.append(f"nome do arquivo/contexto {filename_score:.0%}")
-        semantic_context_score = _semantic_context_score(target, source)
+        semantic_context_score = _semantic_context_score_prepared(target_features, source_features)
         if semantic_context_score >= 0.55:
             reasons.append(f"contexto semantico {semantic_context_score:.0%}")
         if target.object_type == "chart":
             cat_score = max(
-                _coverage_score(target.expected_categories, source.categories),
-                _coverage_score(target.expected_categories, source.series),
+                _coverage_feature_score(target_features.categories, source_features.categories),
+                _coverage_feature_score(target_features.categories, source_features.series),
             )
             series_score = max(
-                _coverage_score([s for s in target.expected_series if s], source.series),
-                _coverage_score([s for s in target.expected_series if s], source.categories),
+                _coverage_feature_score(target_features.series, source_features.series),
+                _coverage_feature_score(target_features.series, source_features.categories),
             )
             if min(cat_score, series_score) >= 0.45:
                 score += 0.35 * cat_score + 0.3 * series_score
             else:
                 score += 0.18 * cat_score + 0.16 * series_score
-            if not strong_id_match and _requires_comparison_series(target.expected_series) and series_score < 0.8:
+            if not strong_id_match and target_features.comparison_series_required and series_score < 0.8:
                 score -= 0.25
                 reasons.append("series de comparativo incompletas")
             reasons.append(f"categorias {cat_score:.0%}, series {series_score:.0%}")
         if target.object_type == "table" and target.table_cells:
-            cell_count = max((len(row) for row in target.table_cells), default=0)
+            cell_count = target_features.table_cell_count
             if cell_count and len(source.categories) == cell_count:
                 score += 0.18
                 reasons.append("quantidade de colunas/celulas compativel")
@@ -503,53 +585,147 @@ def _source_axes(source: ParsedXlsxTable) -> tuple[list[str], list[str]]:
     return list(source.categories), list(source.series)
 
 
-def _filename_context_score(target: PptTarget, source: ParsedXlsxTable) -> float:
-    filename = Path(source.file_name).stem
-    if not filename or len(_norm(filename)) <= 2:
-        return 0.0
-    target_texts = [
-        target.target_id,
-        target.shape_name,
-        target.nearby_text,
-        *target.expected_categories,
-        *target.expected_series,
-        *[cell for row in target.table_cells[:4] for cell in row[:8]],
-    ]
-    metadata_text = " ".join(str(value) for value in source.metadata.values())
-    source_texts = [
-        filename,
-        metadata_text,
-        *source.categories,
-        *source.series,
-    ]
-    target_context = " ".join(str(value) for value in target_texts if _norm(value))
-    source_context = " ".join(str(value) for value in source_texts if _norm(value))
-    return max(
-        _soft_text_score(filename, target_context),
-        _soft_text_score(filename, target.nearby_text),
-        _soft_text_score(target.nearby_text, source_context),
+def _text_match_features(value: Any) -> _TextMatchFeatures:
+    normalized = _norm(value)
+    return _TextMatchFeatures(
+        normalized=normalized,
+        tokens=frozenset(normalized.split()) if normalized else frozenset(),
     )
 
 
-def _semantic_context_score(target: PptTarget, source: ParsedXlsxTable) -> float:
-    metadata = source.metadata or {}
+def _joined_context(values: Iterable[Any]) -> str:
+    return " ".join(str(value) for value in values if _norm(value))
+
+
+def _source_match_features(source: ParsedXlsxTable) -> _SourceMatchFeatures:
+    filename = Path(source.file_name).stem
+    metadata_text = " ".join(str(value) for value in source.metadata.values())
+    source_context = _joined_context(
+        [
+            filename,
+            metadata_text,
+            *source.categories,
+            *source.series,
+        ]
+    )
     source_values = [
-        str(metadata.get(key) or "")
+        str(source.metadata.get(key) or "")
         for key in ("table_title", "row_group_label", "context_text", "variable", "ppt_tag")
     ]
-    target_context = " ".join(
-        str(value)
-        for value in [
+    return _SourceMatchFeatures(
+        obj_ids=frozenset(_source_obj_ids(source)),
+        slide_hint=_source_slide_hint(source),
+        filename=_text_match_features(filename),
+        filename_context=_text_match_features(source_context),
+        semantic_contexts=tuple(_text_match_features(value) for value in _context_variants(source_values)),
+        categories=tuple(_text_match_features(value) for value in source.categories),
+        series=tuple(_text_match_features(value) for value in source.series),
+    )
+
+
+def _target_match_features(target: PptTarget) -> _TargetMatchFeatures:
+    table_cells = [cell for row in target.table_cells[:4] for cell in row[:8]]
+    filename_context = _joined_context(
+        [
+            target.target_id,
+            target.shape_name,
+            target.nearby_text,
+            *target.expected_categories,
+            *target.expected_series,
+            *table_cells,
+        ]
+    )
+    semantic_context = _joined_context(
+        [
             target.nearby_text,
             target.slide_text,
             *target.expected_categories,
             *target.expected_series,
-            *[cell for row in target.table_cells[:4] for cell in row[:8]],
+            *table_cells,
         ]
-        if _norm(value)
     )
-    source_variants = _context_variants(source_values)
-    return max((_soft_text_score(target_context, value) for value in source_variants), default=0.0)
+    return _TargetMatchFeatures(
+        keys=frozenset(
+            str(key)
+            for key in {target.target_id, target.shape_name}
+            if key
+        ),
+        filename_context=_text_match_features(filename_context),
+        nearby_text=_text_match_features(target.nearby_text),
+        semantic_context=_text_match_features(semantic_context),
+        categories=tuple(_text_match_features(value) for value in target.expected_categories),
+        series=tuple(_text_match_features(value) for value in target.expected_series if value),
+        comparison_series_required=_requires_comparison_series(target.expected_series),
+        table_cell_count=max((len(row) for row in target.table_cells), default=0),
+    )
+
+
+def _soft_feature_score(left: _TextMatchFeatures, right: _TextMatchFeatures) -> float:
+    left_norm = left.normalized
+    right_norm = right.normalized
+    if not left_norm or not right_norm:
+        return 0.0
+    domain_score = _domain_text_score(left_norm, right_norm)
+    if domain_score:
+        return domain_score
+    if left_norm == right_norm:
+        return 1.0
+    if left_norm in right_norm or right_norm in left_norm:
+        return 0.9
+    if left.tokens and right.tokens:
+        return len(left.tokens & right.tokens) / max(len(left.tokens), len(right.tokens))
+    return 0.0
+
+
+def _coverage_feature_score(
+    targets: tuple[_TextMatchFeatures, ...],
+    choices: tuple[_TextMatchFeatures, ...],
+) -> float:
+    required = [value for value in targets if value.normalized]
+    if not required:
+        return 0.0
+    return sum(
+        1
+        for value in required
+        if max((_soft_feature_score(value, choice) for choice in choices), default=0.0) >= 0.68
+    ) / len(required)
+
+
+def _filename_context_score_prepared(
+    target: _TargetMatchFeatures,
+    source: _SourceMatchFeatures,
+) -> float:
+    if not source.filename.normalized or len(source.filename.normalized) <= 2:
+        return 0.0
+    return max(
+        _soft_feature_score(source.filename, target.filename_context),
+        _soft_feature_score(source.filename, target.nearby_text),
+        _soft_feature_score(target.nearby_text, source.filename_context),
+    )
+
+
+def _semantic_context_score_prepared(
+    target: _TargetMatchFeatures,
+    source: _SourceMatchFeatures,
+) -> float:
+    return max(
+        (_soft_feature_score(target.semantic_context, value) for value in source.semantic_contexts),
+        default=0.0,
+    )
+
+
+def _filename_context_score(target: PptTarget, source: ParsedXlsxTable) -> float:
+    return _filename_context_score_prepared(
+        _target_match_features(target),
+        _source_match_features(source),
+    )
+
+
+def _semantic_context_score(target: PptTarget, source: ParsedXlsxTable) -> float:
+    return _semantic_context_score_prepared(
+        _target_match_features(target),
+        _source_match_features(source),
+    )
 
 
 def _context_variants(values: list[str]) -> list[str]:

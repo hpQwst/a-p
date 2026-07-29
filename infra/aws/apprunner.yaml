@@ -42,6 +42,10 @@ Parameters:
     Type: String
     Default: hugo.rocha@qwst.co
     Description: E-mails separados por virgula que nascem como admin.
+  AlarmEmail:
+    Type: String
+    Default: hugo.rocha@qwst.co
+    Description: E-mail que recebe alertas de respostas 5xx do App Runner.
 
 Conditions:
   HasEntra: !Not [!Equals [!Ref EntraClientSecretArn, ""]]
@@ -57,6 +61,22 @@ Resources:
       BucketName: !Ref BucketName
       VersioningConfiguration:
         Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: trim-old-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          - Id: expire-generated-runs
+            Status: Enabled
+            TagFilters:
+              - Key: retention
+                Value: run
+            ExpirationInDays: 180
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -106,6 +126,7 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:PutObject
+                  - s3:PutObjectTagging
                   - s3:DeleteObject
                 Resource: !Sub "arn:aws:s3:::${BucketName}/*"
               - Effect: Allow
@@ -195,6 +216,42 @@ Resources:
         - Key: Name
           Value: !Ref AppName
 
+  ErrorAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AppName}-errors"
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlarmEmail
+      Tags:
+        - Key: Name
+          Value: !Ref AppName
+
+  FiveXxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AppName}-5xx"
+      AlarmDescription: Alerta quando o App Runner devolve ao menos uma resposta 5xx em cinco minutos.
+      Namespace: AWS/AppRunner
+      MetricName: 5xxStatusResponses
+      Dimensions:
+        - Name: ServiceName
+          Value: !Ref AppName
+        - Name: ServiceID
+          Value: !GetAtt Service.ServiceId
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref ErrorAlarmTopic
+      Tags:
+        - Key: Name
+          Value: !Ref AppName
+
 Outputs:
   ServiceUrl:
     Description: Endereco para a equipe abrir no navegador.
@@ -205,3 +262,6 @@ Outputs:
   BucketName:
     Description: Bucket com o estado compartilhado.
     Value: !Ref BucketName
+  ErrorAlarmTopicArn:
+    Description: Topico SNS do alarme de respostas 5xx.
+    Value: !Ref ErrorAlarmTopic

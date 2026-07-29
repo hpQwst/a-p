@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from ppt_automator import project_store
 
@@ -88,6 +89,66 @@ class AtomicWriteTests(unittest.TestCase):
             sorted(item["target"] for item in corrections),
             sorted(f"T{index:03d}" for index in range(12)),
         )
+
+
+class S3RetentionTaggingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.project = project_store.ProjectRef(
+            project_id="squad4|projeto",
+            squad="squad4",
+            slug="projeto",
+            name="Projeto",
+            description="",
+            created_at="2026-07-29T00:00:00Z",
+            updated_at="2026-07-29T00:00:00Z",
+            backend="s3",
+        )
+
+    def test_run_artifacts_receive_retention_tag(self) -> None:
+        client = MagicMock()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AUTO_PPT_STORAGE_BACKEND": "s3",
+                    "AUTO_PPT_S3_BUCKET": "squad4e5-state",
+                    "AUTO_PPT_S3_PREFIX": "auto-ppt",
+                },
+                clear=False,
+            ),
+            patch.object(project_store, "_s3_client", return_value=client),
+        ):
+            project_store.save_project_bytes(
+                self.project,
+                ["runs", "run-1"],
+                "resultado.pptx",
+                b"ppt",
+            )
+
+        self.assertEqual(client.put_object.call_args.kwargs["Tagging"], "retention=run")
+
+    def test_checkpoint_is_not_marked_for_expiration(self) -> None:
+        client = MagicMock()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AUTO_PPT_STORAGE_BACKEND": "s3",
+                    "AUTO_PPT_S3_BUCKET": "squad4e5-state",
+                    "AUTO_PPT_S3_PREFIX": "auto-ppt",
+                },
+                clear=False,
+            ),
+            patch.object(project_store, "_s3_client", return_value=client),
+        ):
+            project_store.save_project_bytes(
+                self.project,
+                ["checkpoint"],
+                "input.pptx",
+                b"ppt",
+            )
+
+        self.assertNotIn("Tagging", client.put_object.call_args.kwargs)
 
 
 if __name__ == "__main__":

@@ -163,7 +163,9 @@ async def require_team_password(request: Request, call_next):
                 if path_squad and path_squad != user.squad:
                     return _access_denied(request, "Este projeto pertence a outro squad.")
                 job_squad = _job_squad_from_runtime_path(path)
-                if job_squad and job_squad != user.squad:
+                if job_squad is not None and not job_squad:
+                    return _access_denied(request, "Nao foi possivel validar o squad deste job.")
+                if job_squad is not None and job_squad != user.squad:
                     return _access_denied(request, "Este job pertence a outro squad.")
     return await call_next(request)
 
@@ -188,18 +190,24 @@ def _squad_from_path(path: str) -> str:
     return match.group(1) if match else ""
 
 
-def _job_squad_from_runtime_path(path: str) -> str:
+def _job_squad_from_runtime_path(path: str) -> str | None:
     match = re.match(r"^/jobs/([a-f0-9]{32})(?:/|$)", path)
     if not match:
-        return ""
-    metadata_path = RUNTIME_ROOT / match.group(1) / "metadata.json"
+        return None
+    job_dir = RUNTIME_ROOT / match.group(1)
+    if not job_dir.exists():
+        return None
+    metadata_path = job_dir / "metadata.json"
     if not metadata_path.exists():
         return ""
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return ""
-    return str((metadata.get("project") or {}).get("squad") or "")
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("project"), dict):
+        return ""
+    squad = str(metadata["project"].get("squad") or "")
+    return squad if squad in SQUADS else ""
 
 
 def _login_page(request: Request, destination: str, error: str = "", status_code: int = 200) -> HTMLResponse:
@@ -440,7 +448,6 @@ async def index(request: Request, squad: str = "") -> HTMLResponse:
             "mapping_templates_by_squad": _mapping_templates_by_squad(visible_squads),
             "ai_available": ai_configured(PROJECT_ROOT),
             "large_deck_slide_threshold": _large_deck_slide_threshold(),
-            "combined_upload_warning_mb": _combined_upload_warning_mb(),
         },
     )
 
@@ -1175,12 +1182,7 @@ def _record_generation_progress(job_dir: Path, payload: dict) -> None:
     completed = max(int(payload.get("completed") or 0), 0)
     total = max(int(payload.get("total") or 0), 0)
     phase = str(payload.get("phase") or "targets")
-    if phase == "complete":
-        percent = 100
-    else:
-        # Empacotar o ZIP final e uma unidade real adicional. Assim a barra nao
-        # anuncia 100% enquanto o arquivo ainda esta sendo fechado.
-        percent = round(100 * completed / max(total + 1, 1))
+    percent = _object_progress_percent(completed, total, phase)
     state = _load_generation_state(job_dir)
     state.update(
         {
@@ -1446,7 +1448,7 @@ def _record_preview_progress(job_dir: Path, payload: dict) -> None:
     completed = max(int(payload.get("completed") or 0), 0)
     total = max(int(payload.get("total") or 0), 0)
     phase = str(payload.get("phase") or "analysis")
-    percent = 100 if phase == "complete" else round(100 * completed / max(total, 1))
+    percent = _object_progress_percent(completed, total, phase)
     state["progress"] = {
         "completed": completed,
         "total": total,
@@ -1458,6 +1460,17 @@ def _record_preview_progress(job_dir: Path, payload: dict) -> None:
     }
     state["message"] = state["progress"]["message"]
     _save_preview_processing_state(job_dir, state)
+
+
+def _object_progress_percent(completed: int, total: int, phase: str) -> int:
+    """100% significa job pronto, tanto no preview quanto na geracao.
+
+    A unidade final representa o trabalho posterior aos objetos (revisao e
+    persistencia no preview; empacotamento na geracao).
+    """
+    if phase == "complete":
+        return 100
+    return min(max(round(100 * max(completed, 0) / max(max(total, 0) + 1, 1)), 0), 100)
 
 
 def _update_preview_processing_state(
@@ -4209,15 +4222,11 @@ async def _read_upload_limited(upload: UploadFile, label: str) -> bytes:
 
 
 def _max_upload_bytes() -> int:
-    return max(_env_int("AUTO_PPT_MAX_UPLOAD_MB", 250), 1) * 1024 * 1024
+    return max(_env_int("AUTO_PPT_MAX_UPLOAD_MB", 350), 1) * 1024 * 1024
 
 
 def _max_request_bytes() -> int:
     return max(_env_int("AUTO_PPT_MAX_REQUEST_MB", 600), 1) * 1024 * 1024
-
-
-def _combined_upload_warning_mb() -> int:
-    return max(_env_int("AUTO_PPT_WARN_COMBINED_MB", 250), 1)
 
 
 def _save_job_metadata(job_dir: Path, payload: dict) -> None:

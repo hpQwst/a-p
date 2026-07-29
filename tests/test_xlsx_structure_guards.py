@@ -77,11 +77,25 @@ class AnalysisWarningTests(unittest.TestCase):
 
         return parse_datasource_zip(buffer.getvalue())
 
-    def test_warns_about_ignored_sheets(self) -> None:
+    def test_every_sheet_becomes_its_own_source(self) -> None:
+        """Antes so a primeira aba era lida e as outras viravam aviso. Um
+        workbook de relatorio real tem dezenas de abas alimentando dezenas de
+        graficos, entao cada aba precisa virar uma fonte."""
         sources = self._sources({"a.xlsx": _workbook_bytes({"Base": SIMPLE, "Extra": SIMPLE})})
+        self.assertEqual(len(sources), 2)
+        self.assertEqual(
+            sorted(source.file_name for source in sources),
+            ["a.xlsx#Base", "a.xlsx#Extra"],
+        )
+        self.assertEqual(sorted(source.sheet_name for source in sources), ["Base", "Extra"])
         text = " ".join(_analysis_warnings([], sources, []))
-        self.assertIn("mais de uma aba", text)
-        self.assertIn("Extra", text)
+        self.assertIn("aba por aba", text)
+
+    def test_single_sheet_workbook_keeps_the_plain_name(self) -> None:
+        """Sem sufixo quando ha uma aba so: mapeamentos ja aprendidos casam a
+        fonte pelo nome do arquivo e nao podem ser invalidados."""
+        sources = self._sources({"a.xlsx": _workbook_bytes({"Base": SIMPLE})})
+        self.assertEqual([source.file_name for source in sources], ["a.xlsx"])
 
     def test_warns_about_two_tables_in_one_sheet(self) -> None:
         rows = SIMPLE + [[None, None]] + [["Canal", "2025"], ["Loja", 5]]

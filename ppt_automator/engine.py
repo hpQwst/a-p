@@ -15,9 +15,9 @@ from .ppt_target_renamer import rename_targets_in_slide_xml
 from .ppt_table_writer import update_table_slide_xml
 from .preview_model import PreviewTarget, build_preview
 from .slide_datasources import collect_datasource_entries, entries_for_slide
-from .table_normalizer import TransformPlan, build_transform_plans
+from .table_normalizer import TransformPlan, build_source_match_index, build_transform_plans
 from .typed_matrix import typed_matrix_to_rows
-from .xlsx_parser import ParsedXlsxTable, parse_datasource_zip
+from .xlsx_parser import ParsedXlsxTable, parse_datasource_zip, zip_path_of
 
 
 
@@ -218,32 +218,54 @@ def _build_slide_aware_plans(
     if not any(entry.slide_number for entry in entries):
         return build_transform_plans(targets, sources, progress_callback=progress_callback)
     entry_by_name = {entry.zip_path: entry for entry in entries}
+    source_match_index = build_source_match_index(sources)
     plans: list[TransformPlan] = []
     eligible_targets = [target for target in targets if target.object_type in {"chart", "table"}]
-    completed = 0
+
+    # Resolve um SLIDE por vez, com todos os alvos dele de uma vez. Resolver alvo
+    # a alvo desperdicava trabalho (as features de cada fonte eram recalculadas
+    # para cada alvo) e ainda desmontava a atribuicao 1:1 do slide, que e o
+    # proprio ponto do algoritmo. Com um deck de 639 objetos e uma planilha de
+    # 178 abas a diferenca deixa de ser detalhe.
+    by_slide: dict[int, list[PptTarget]] = {}
     for target in eligible_targets:
-        if target.object_type not in {"chart", "table"}:
-            continue
-        selected_entries, _warnings = entries_for_slide(entries, target.slide_number)
+        by_slide.setdefault(target.slide_number, []).append(target)
+
+    # O escopo de fontes depende so do slide, entao e calculado uma vez por slide.
+    sources_by_slide: dict[int, list[ParsedXlsxTable]] = {}
+    for slide_number in by_slide:
+        selected_entries, _warnings = entries_for_slide(entries, slide_number)
         selected_names = {entry.zip_path for entry in selected_entries}
-        relevant_sources = [source for source in sources if source.file_name in selected_names]
+        # A fonte pode ser "arquivo.xlsx#Aba"; o escopo por slide e por ARQUIVO.
+        relevant_sources = [source for source in sources if zip_path_of(source.file_name) in selected_names]
         if not relevant_sources:
             relevant_sources = [
                 source
                 for source in sources
-                if entry_by_name.get(source.file_name) is None or entry_by_name[source.file_name].is_general
+                if entry_by_name.get(zip_path_of(source.file_name)) is None
+                or entry_by_name[zip_path_of(source.file_name)].is_general
             ]
         if not relevant_sources:
             relevant_sources = sources
-        plans.extend(build_transform_plans([target], relevant_sources))
-        completed += 1
+        sources_by_slide[slide_number] = relevant_sources
+
+    completed = 0
+    for slide_number in sorted(by_slide):
+        slide_targets = by_slide[slide_number]
+        plans.extend(
+            build_transform_plans(
+                slide_targets,
+                sources_by_slide[slide_number],
+                source_match_index=source_match_index,
+            )
+        )
+        completed += len(slide_targets)
         _emit_progress(
             progress_callback,
             phase="matching",
             completed=completed,
             total=len(eligible_targets),
-            slide=target.slide_number,
-            target_id=target.target_id,
+            slide=slide_number,
             message=f"Objeto {completed} de {len(eligible_targets)} analisado.",
         )
     return plans

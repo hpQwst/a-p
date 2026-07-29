@@ -104,6 +104,39 @@ class UserIsolationWebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"], "Este job pertence a outro squad.")
 
+    def test_existing_job_without_readable_squad_is_denied(self) -> None:
+        user = project_store.ensure_user("squad1-unknown-job@qwst.co")
+        project_store.update_user(user.email, squad="squad1")
+        for job_id, metadata in [
+            ("c" * 32, None),
+            ("d" * 32, "{json quebrado"),
+            ("e" * 32, json.dumps({"project": {"squad": "squad9"}})),
+            ("1" * 32, json.dumps({"project": "squad1"})),
+        ]:
+            with self.subTest(job_id=job_id):
+                job_dir = main.RUNTIME_ROOT / job_id
+                job_dir.mkdir()
+                if metadata is not None:
+                    (job_dir / "metadata.json").write_text(metadata, encoding="utf-8")
+                response = self.client_for(user.email).get(
+                    f"/jobs/{job_id}/generation-status",
+                    headers={"Accept": "application/json"},
+                )
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(
+                    response.json()["error"],
+                    "Nao foi possivel validar o squad deste job.",
+                )
+
+    def test_unknown_job_path_is_left_for_the_route_to_report_not_found(self) -> None:
+        user = project_store.ensure_user("squad1-missing-job@qwst.co")
+        project_store.update_user(user.email, squad="squad1")
+        response = self.client_for(user.email).get(
+            f"/jobs/{'f' * 32}/generation-status",
+            headers={"Accept": "application/json"},
+        )
+        self.assertNotEqual(response.status_code, 403)
+
     def test_admin_selects_a_view_and_can_manage_users(self) -> None:
         project_store.create_project("squad1", "Projeto um")
         project_store.create_project("squad2", "Projeto dois")
@@ -188,6 +221,11 @@ class UserIsolationWebTests(unittest.TestCase):
 
 
 class ProgressCallbackTests(unittest.TestCase):
+    def test_preview_and_generation_use_the_same_completion_scale(self) -> None:
+        self.assertEqual(main._object_progress_percent(1, 1, "matching"), 50)
+        self.assertEqual(main._object_progress_percent(1, 1, "targets"), 50)
+        self.assertEqual(main._object_progress_percent(1, 1, "complete"), 100)
+
     def test_preview_matching_reports_each_object(self) -> None:
         source = parse_xlsx_table(_workbook_bytes(), file_name="dados.xlsx")
         targets = [

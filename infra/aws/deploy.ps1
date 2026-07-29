@@ -24,6 +24,7 @@ param(
     [string]$EntraClientSecret = "",
     [string]$EntraRedirectUri = "",
     [string]$BootstrapAdminEmails = "hugo.rocha@qwst.co",
+    [string]$AlarmEmail = "hugo.rocha@qwst.co",
     [switch]$SkipBuild
 )
 
@@ -179,6 +180,7 @@ Write-Host "[5/5] Publicando a aplicacao..." -ForegroundColor Cyan
         "EntraRedirectUri=$EntraRedirectUri" `
         "EntraClientSecretArn=$EntraSecretArn" `
         "BootstrapAdminEmails=$BootstrapAdminEmails" `
+        "AlarmEmail=$AlarmEmail" `
         "BucketName=$AppName-$AccountId" | Out-Null
 
 $ServiceUrl = & $AwsCli cloudformation describe-stacks --stack-name "$AppName-stack" --profile default --region $Region `

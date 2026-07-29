@@ -130,22 +130,37 @@ Benchmarks locais com cópias, sem alterar os originais:
 
 | Caso | Slides | Arquivos | Pico observado |
 | --- | ---: | ---: | ---: |
-| TIM | 89 | 203,4 MB + 0,8 MB | 334,4 MB |
+| TIM (análise, 178 abas) | 89 | 203,4 MB + 0,8 MB | 352,1 MiB |
 | Natura CB | 40 | 26,7 MB + 4,6 MB | 487,6 MB |
-| Natura CB | 118 | 80,6 MB + 4,6 MB | 636,7 MB |
+| Natura CB (geração, 4 abas) | 118 | 80,6 MB + 4,6 MB | 681,9 MiB |
 
 Resultado: 2 GB continuam adequados; não aumentar memória. A interface mostra
-um aviso suave quando o upload combinado passa de
-`AUTO_PPT_WARN_COMBINED_MB` (padrão 250 MB), mas não bloqueia o usuário. O
-tamanho compactado prevê mal o pico de RAM.
+o tamanho combinado apenas como informação, sem fingir que ele prevê o pico de
+RAM. O limite individual padrão subiu para 350 MB
+(`AUTO_PPT_MAX_UPLOAD_MB`), sem mudança de custo de infraestrutura.
 
 Para repetir uma medição:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\measure_memory_case.py `
+.\.venv\Scripts\python.exe -m scripts.measure_memory_case `
   --pptx "caminho\modelo.pptx" `
   --xlsx "caminho\dados.xlsx"
 ```
+
+## Matching em planilhas com várias abas
+
+Cada aba do XLSX é uma fonte independente. No caso TIM real são 639 objetos
+contra 178 abas. O `cProfile` mediu 11,6 s para apenas um objeto antes da
+otimização; a projeção para o deck completo era de 23 a 48 minutos.
+
+As características normalizadas de cada aba agora são calculadas uma vez por
+análise, e o Hungarian trabalha na matriz retangular real, sem criar 178 linhas
+artificiais para um slide com um único objeto. Resultado medido:
+
+- TIM completo: 66,5–69,7 s, 148 matches e 352,1 MiB de pico;
+- Natura CB 118 slides: 53,3 s, com a mesma assinatura dos 3 matches anteriores;
+- geração Natura CB: 61,5 s e 681,9 MiB de pico;
+- nenhum candidato é cortado e a atribuição 1:1 continua ativa.
 
 ## Custos
 
@@ -161,6 +176,14 @@ A ativação da tag `Name` como cost allocation tag exige a conta pagadora. Se a
 conta vinculada receber `AccessDenied`, o administrador de Billing deve ativar
 essa tag; o orçamento já pode existir, mas o filtro só passa a contabilizar
 custos depois da ativação.
+
+O deploy também cria:
+
+- alarme `squad4e5-auto-ppt-5xx`, que envia e-mail quando houver ao menos uma
+  resposta 5xx em cinco minutos (a assinatura SNS precisa ser confirmada);
+- lifecycle S3 de 180 dias apenas para artefatos de `runs`, 30 dias para versões
+  antigas e 7 dias para uploads multipart incompletos. O checkpoint atual do
+  projeto não expira.
 
 App Runner cobra memória provisionada continuamente e CPU durante requisições.
 Para pausar sem destruir estado:

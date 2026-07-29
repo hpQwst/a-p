@@ -407,7 +407,7 @@
 
                       <div class="target-detail">
                         {% set before = item.ppt_contract or {} %}
-                        {% if (before.headers or before.rows) or (item.headers and item.rows) %}
+                        {% if (before.headers or before.rows) or item.rows %}
                           <div class="target-preview-grid">
                             {% if before.headers or before.rows %}
                               <section class="target-preview before">
@@ -436,18 +436,20 @@
                                 </div>
                               </section>
                             {% endif %}
-                            {% if item.headers and item.rows %}
+                            {% if item.rows %}
                               <section class="target-preview after">
                                 <p class="target-viz-label">Depois — dados que serão gravados</p>
                                 <div class="table-wrap small target-preview-table">
                                   <table>
-                                    <thead>
-                                      <tr>
-                                        {% for header in item.headers %}
-                                          <th>{{ header }}</th>
-                                        {% endfor %}
-                                      </tr>
-                                    </thead>
+                                    {% if item.headers %}
+                                      <thead>
+                                        <tr>
+                                          {% for header in item.headers %}
+                                            <th>{{ header }}</th>
+                                          {% endfor %}
+                                        </tr>
+                                      </thead>
+                                    {% endif %}
                                     <tbody>
                                       {% for row in item.rows %}
                                         <tr>
@@ -692,6 +694,14 @@
                               <span>Intervalo de células (opcional)</span>
                               <input name="cell_range" type="text" value="{{ item.manual_range }}" placeholder="D5:G12 ou Aba!D5:G12">
                               <small class="field-hint">Use quando a planilha tem várias abas ou mais de uma tabela. Ex.: <code>Base!A1:D10</code>.</small>
+                            </label>
+                            <label>
+                              <span>Como tratar o intervalo</span>
+                              <select name="range_mode">
+                                <option value="dynamic" {% if item.manual_range_mode != 'exact' %}selected{% endif %}>Automático: acompanhar novos meses e linhas</option>
+                                <option value="exact" {% if item.manual_range_mode == 'exact' %}selected{% endif %}>Exato: nunca sair do intervalo digitado</option>
+                              </select>
+                              <small class="field-hint">O automático respeita Tabelas do Excel e padrões de mês/ano para não puxar colunas auxiliares ao lado.</small>
                             </label>
                             <button type="submit">Aplicar planilha</button>
                           </form>

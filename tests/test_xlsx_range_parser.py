@@ -5,6 +5,7 @@ from io import BytesIO
 import unittest
 
 import openpyxl
+from openpyxl.worksheet.table import Table
 
 from ppt_automator.xlsx_parser import parse_xlsx_table
 
@@ -38,6 +39,75 @@ class XlsxRangeParserTests(unittest.TestCase):
         self.assertEqual(parsed.categories, ["Jan/26", "Fev/26"])
         self.assertEqual(parsed.series, ["Total"])
         self.assertEqual(parsed.values, [[10, 20]])
+
+    def test_dynamic_range_grows_months_and_rows_but_stops_before_auxiliary_column(self) -> None:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Dados"
+        ws.append(["Atributo", "Jan/26", "Fev/26", "Mar/26", "Auxiliar"])
+        ws.append(["NPS", 40, 41, 42, "=SUM(B2:D2)"])
+        ws.append(["CSAT", 80, 81, 82, "=SUM(B3:D3)"])
+        ws.append(["Conversao", 10, 11, 12, "=SUM(B4:D4)"])
+
+        data = BytesIO()
+        wb.save(data)
+        wb.close()
+
+        parsed = parse_xlsx_table(
+            data.getvalue(),
+            file_name="mensal.xlsx",
+            cell_range="Dados!A1:C3",
+            range_mode="dynamic",
+        )
+
+        self.assertEqual(parsed.used_range, (1, 1, 4, 4))
+        self.assertEqual(parsed.categories, ["Jan/26", "Fev/26", "Mar/26"])
+        self.assertEqual(parsed.series, ["NPS", "CSAT", "Conversao"])
+        self.assertEqual(parsed.values[-1], [10, 11, 12])
+
+    def test_exact_range_does_not_grow(self) -> None:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Atributo", "Jan/26", "Fev/26", "Mar/26"])
+        ws.append(["NPS", 40, 41, 42])
+        ws.append(["CSAT", 80, 81, 82])
+
+        data = BytesIO()
+        wb.save(data)
+        wb.close()
+
+        parsed = parse_xlsx_table(
+            data.getvalue(),
+            file_name="mensal.xlsx",
+            cell_range="A1:C2",
+            range_mode="exact",
+        )
+
+        self.assertEqual(parsed.used_range, (1, 1, 2, 3))
+        self.assertEqual(parsed.categories, ["Jan/26", "Fev/26"])
+        self.assertEqual(parsed.series, ["NPS"])
+
+    def test_dynamic_range_uses_excel_table_boundary_and_ignores_side_data(self) -> None:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Atributo", "Valor", "Meta", "Auxiliar"])
+        ws.append(["NPS", 40, 45, 999])
+        ws.append(["CSAT", 80, 85, 999])
+        ws.add_table(Table(displayName="TabelaReal", ref="A1:C3"))
+
+        data = BytesIO()
+        wb.save(data)
+        wb.close()
+
+        parsed = parse_xlsx_table(
+            data.getvalue(),
+            file_name="estruturada.xlsx",
+            cell_range="A1:B2",
+            range_mode="dynamic",
+        )
+
+        self.assertEqual(parsed.used_range, (1, 1, 3, 3))
+        self.assertNotIn("Auxiliar", [str(value) for row in parsed.preview_rows for value in row])
 
     def test_excel_date_period_labels_keep_month_year_text(self) -> None:
         wb = openpyxl.Workbook()

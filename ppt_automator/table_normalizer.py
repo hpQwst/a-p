@@ -36,6 +36,8 @@ class TransformPlan:
     number_format: str = ""
     series_format_overrides: dict[str, str] = field(default_factory=dict)
     typed_edit_data: dict[str, Any] = field(default_factory=dict)
+    table_matrix: list[list[Any]] = field(default_factory=list)
+    table_header_rows: int = 0
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -424,13 +426,19 @@ def _normalize_table(
     if source.orientation == "key_value_rows":
         return _normalize_key_value_table(target, source, confidence, match_reason)
 
-    categories = list(source.categories)
     if source.orientation == "categories_rows_series_columns":
-        values = source.values[:1]
-        series = source.series[: len(values[0])] if values else source.series
+        headers = list(source.series)
+        row_labels = list(source.categories)
     else:
-        values = [source.values[0]] if source.values else [[]]
-        series = source.series[:1] or ["Valor"]
+        headers = list(source.categories)
+        row_labels = list(source.series)
+    values = [list(row) for row in source.values]
+    table_matrix, table_header_rows = _adaptive_table_matrix(
+        target,
+        headers=headers,
+        row_labels=row_labels,
+        values=values,
+    )
     number_format = "thousands_pt_br" if _looks_like_thousands(values) else ""
     return TransformPlan(
         target=target,
@@ -438,12 +446,14 @@ def _normalize_table(
         action="fill_table_cells",
         orientation_xlsx=source.orientation,
         orientation_ppt="table_cells",
-        categories=categories,
-        series=series,
+        categories=headers,
+        series=row_labels,
         values=values,
         confidence=confidence,
         reason=match_reason or "Tabela PowerPoint compativel com a matriz do XLSX.",
         number_format=number_format,
+        table_matrix=table_matrix,
+        table_header_rows=table_header_rows,
     )
 
 
@@ -489,7 +499,83 @@ def _normalize_key_value_table(
         confidence=confidence,
         reason=match_reason or "Tabela PowerPoint preenchida por linhas chave-valor do XLSX.",
         number_format=number_format,
+        table_matrix=[list(row) for row in values],
+        table_header_rows=0,
     )
+
+
+def _adaptive_table_matrix(
+    target: PptTarget,
+    headers: list[str],
+    row_labels: list[str],
+    values: list[list[Any]],
+) -> tuple[list[list[Any]], int]:
+    """Monta a grade completa respeitando a estrutura atual e o XLSX.
+
+    O PowerPoint decide se existe uma linha de cabecalho/coluna de rotulos. O
+    XLSX decide a ordem e os nomes. Se surgirem varias linhas de atributos, uma
+    coluna de rotulos e criada para que os nomes novos nao sejam descartados.
+    """
+
+    target_cells = [list(row) for row in (target.table_cells or [])]
+    has_header = _target_has_header_row(target_cells, headers)
+    data_width = max((len(row) for row in values), default=len(headers))
+    has_labels = _target_has_label_column(
+        target_cells,
+        row_labels,
+        data_width=data_width,
+        has_header=has_header,
+    )
+    if len(row_labels) > 1:
+        has_labels = True
+
+    matrix: list[list[Any]] = []
+    if has_header:
+        matrix.append(([None] if has_labels else []) + list(headers))
+    for index, row in enumerate(values):
+        output_row = list(row)
+        if has_labels:
+            label = row_labels[index] if index < len(row_labels) else f"Linha {index + 1}"
+            output_row.insert(0, label)
+        matrix.append(output_row)
+    return matrix, 1 if has_header else 0
+
+
+def _target_has_header_row(target_cells: list[list[Any]], headers: list[str]) -> bool:
+    if not target_cells or not headers:
+        return False
+    first_row = [_norm(value) for value in target_cells[0] if _norm(value)]
+    normalized_headers = {_norm(value) for value in headers if _norm(value)}
+    if first_row and normalized_headers:
+        matches = sum(1 for value in first_row if value in normalized_headers)
+        comparable = min(len(first_row), len(normalized_headers))
+        if matches >= max(1, (comparable + 1) // 2):
+            return True
+    if len(target_cells) < 2:
+        return False
+    later_values = [
+        value
+        for row in target_cells[1:]
+        for value in row
+        if value is not None and str(value).strip() != ""
+    ]
+    return bool(first_row) and not later_values
+
+
+def _target_has_label_column(
+    target_cells: list[list[Any]],
+    row_labels: list[str],
+    data_width: int,
+    has_header: bool,
+) -> bool:
+    if not target_cells:
+        return False
+    if max((len(row) for row in target_cells), default=0) == data_width + 1:
+        return True
+    data_rows = target_cells[1:] if has_header else target_cells
+    first_column = [_norm(row[0]) for row in data_rows if row and _norm(row[0])]
+    normalized_labels = {_norm(value) for value in row_labels if _norm(value)}
+    return bool(first_column) and any(value in normalized_labels for value in first_column)
 
 
 def _source_has_readable_data(source: ParsedXlsxTable) -> bool:

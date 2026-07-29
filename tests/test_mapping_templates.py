@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from zipfile import ZIP_DEFLATED, ZipFile
 import os
 import unittest
+
+import openpyxl
 
 from ppt_automator.project_store import (
     create_project,
@@ -108,6 +112,47 @@ class MappingTemplateTests(unittest.TestCase):
         self.assertEqual(updated.plans[0].datasource.file_name, "datasources/right.xlsx")
         self.assertEqual(updated.plans[0].values, [[2]])
         self.assertIn("Mapeamento salvo", updated.plans[0].reason)
+
+    def test_saved_mapping_reapplies_dynamic_range_to_new_workbook(self) -> None:
+        target = _target("111")
+        source = _source("datasources/right.xlsx", 1)
+        analysis = AnalysisResult(
+            plans=[],
+            preview=[],
+            targets=[target],
+            sources=[source],
+            target_count=1,
+            source_count=1,
+            warnings=[],
+        )
+
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "Sheet1"
+        sheet.append(["Serie", "Jan/26", "Fev/26", "Mar/26", "Auxiliar"])
+        sheet.append(["Serie", 1, 2, 3, 999])
+        workbook_stream = BytesIO()
+        workbook.save(workbook_stream)
+        workbook.close()
+        zip_stream = BytesIO()
+        with ZipFile(zip_stream, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("datasources/right.xlsx", workbook_stream.getvalue())
+
+        updated = apply_saved_source_matches_to_analysis(
+            analysis,
+            {
+                "111": {
+                    "datasource": "right.xlsx",
+                    "cell_range": "A1:C2",
+                    "range_mode": "dynamic",
+                }
+            },
+            zip_stream.getvalue(),
+        )
+
+        self.assertEqual(updated.plans[0].datasource.used_range, (1, 1, 2, 4))
+        self.assertEqual(updated.plans[0].datasource.categories, ["Jan/26", "Fev/26", "Mar/26"])
+        self.assertNotIn("Auxiliar", updated.plans[0].datasource.categories)
 
 
 if __name__ == "__main__":

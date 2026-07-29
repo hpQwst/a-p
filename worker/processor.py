@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, replace
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable
+from zipfile import ZipFile
 import re
 
 from ppt_automator import analyze_update_package, generate_updated_pptx
@@ -20,7 +22,7 @@ from ppt_automator.xlsx_parser import (
 )
 
 
-ManualSourcePayload = tuple[str, bytes] | tuple[str, bytes, str]
+ManualSourcePayload = tuple[str, bytes] | tuple[str, bytes, str] | tuple[str, bytes, str, str]
 ManualSourceMap = dict[str, ManualSourcePayload]
 SavedSourceMatchMap = dict[str, dict[str, Any] | str]
 
@@ -221,6 +223,7 @@ def apply_ai_source_matches_to_analysis(
 def apply_saved_source_matches_to_analysis(
     analysis: AnalysisResult,
     saved_matches: SavedSourceMatchMap,
+    datasource_zip_bytes: bytes | None = None,
 ) -> AnalysisResult:
     if not saved_matches:
         return analysis
@@ -231,14 +234,30 @@ def apply_saved_source_matches_to_analysis(
     targets_by_id = {target.target_id: target for target in analysis.targets}
     sources_by_name = _sources_by_match_name(analysis.sources)
     plans_by_id = {plan.target_id: plan for plan in analysis.plans}
+    ranged_source_cache: dict[tuple[str, str, str], ParsedXlsxTable] = {}
 
     for target_id, match in normalized_matches.items():
         target = targets_by_id.get(target_id)
         source = sources_by_name.get(_source_match_key(match.get("datasource")))
         if target is None or source is None:
             continue
+        cell_range = str(match.get("cell_range") or "").strip()
+        range_mode = str(match.get("range_mode") or "exact").strip().lower()
+        if cell_range and datasource_zip_bytes:
+            cache_key = (source.file_name, cell_range, range_mode)
+            if cache_key not in ranged_source_cache:
+                ranged_source_cache[cache_key] = _source_from_saved_range(
+                    source,
+                    datasource_zip_bytes,
+                    cell_range,
+                    range_mode,
+                )
+            source = ranged_source_cache[cache_key]
         confidence = float(match.get("confidence") or 1.0)
         reason = str(match.get("reason") or "Mapeamento salvo aplicado para este target.")
+        if cell_range:
+            mode_text = "dinamico" if range_mode == "dynamic" else "exato"
+            reason = f"{reason} Intervalo {cell_range} ({mode_text})."
         plans_by_id[target_id] = normalize_to_target(
             target,
             source,
@@ -304,7 +323,7 @@ def _apply_manual_sources(
     source_output = list(sources)
 
     for target_id, payload in manual_sources.items():
-        filename, data, cell_range = _manual_payload(payload)
+        filename, data, cell_range, range_mode = _manual_payload(payload)
         target = targets_by_id.get(target_id)
         if target is None:
             continue
@@ -313,9 +332,15 @@ def _apply_manual_sources(
             file_name=f"upload_manual/{target_id}_{filename}",
             formula_mode="auto",
             cell_range=cell_range,
+            range_mode=range_mode,
         )
         source_output.append(source)
-        range_text = f" usando o range {cell_range}" if cell_range else ""
+        range_text = (
+            f" usando o range {cell_range} "
+            f"({'dinamico' if range_mode == 'dynamic' else 'exato'})"
+            if cell_range
+            else ""
+        )
         plans_by_id[target_id] = normalize_to_target(
             target,
             source,
@@ -330,12 +355,18 @@ def _apply_manual_sources(
     return [plans_by_id[target_id] for target_id in ordered_ids], source_output
 
 
-def _manual_payload(payload: ManualSourcePayload) -> tuple[str, bytes, str]:
+def _manual_payload(payload: ManualSourcePayload) -> tuple[str, bytes, str, str]:
     if len(payload) == 2:
         filename, data = payload
-        return filename, data, ""
-    filename, data, cell_range = payload
-    return filename, data, str(cell_range or "").strip()
+        return filename, data, "", "exact"
+    if len(payload) == 3:
+        filename, data, cell_range = payload
+        return filename, data, str(cell_range or "").strip(), "exact"
+    filename, data, cell_range, range_mode = payload
+    normalized_mode = str(range_mode or "exact").strip().lower()
+    if normalized_mode not in {"dynamic", "exact"}:
+        normalized_mode = "exact"
+    return filename, data, str(cell_range or "").strip(), normalized_mode
 
 
 def _normalize_ai_matches(
@@ -384,18 +415,60 @@ def _normalize_saved_matches(saved_matches: SavedSourceMatchMap) -> dict[str, di
             datasource = str(match.get("datasource") or match.get("file_name") or "").strip()
             confidence = match.get("confidence", 1.0)
             reason = str(match.get("reason") or "Mapeamento salvo aplicado para este target.")
+            cell_range = str(match.get("cell_range") or "").strip()
+            range_mode = str(match.get("range_mode") or "exact").strip().lower()
         else:
             datasource = str(match or "").strip()
             confidence = 1.0
             reason = "Mapeamento salvo aplicado para este target."
+            cell_range = ""
+            range_mode = "exact"
         if not datasource:
             continue
         output[clean_target_id] = {
             "datasource": datasource,
             "confidence": confidence,
             "reason": reason,
+            "cell_range": cell_range,
+            "range_mode": range_mode if range_mode in {"dynamic", "exact"} else "exact",
         }
     return output
+
+
+def _source_from_saved_range(
+    source: ParsedXlsxTable,
+    datasource_zip_bytes: bytes,
+    cell_range: str,
+    range_mode: str,
+) -> ParsedXlsxTable:
+    workbook_bytes = _workbook_bytes_from_zip(datasource_zip_bytes, zip_path_of(source.file_name))
+    if workbook_bytes is None:
+        return source
+    return parse_xlsx_table(
+        workbook_bytes,
+        file_name=source.file_name,
+        formula_mode="auto",
+        cell_range=cell_range,
+        range_mode=range_mode,
+        sheet=source.sheet_name,
+    )
+
+
+def _workbook_bytes_from_zip(datasource_zip_bytes: bytes, source_path: str) -> bytes | None:
+    normalized_path = str(source_path or "").replace("\\", "/").lower()
+    with ZipFile(BytesIO(datasource_zip_bytes)) as archive:
+        names = [name for name in archive.namelist() if name.lower().endswith(".xlsx")]
+        exact = next(
+            (name for name in names if name.replace("\\", "/").lower() == normalized_path),
+            None,
+        )
+        if exact:
+            return archive.read(exact)
+        basename = Path(normalized_path).name
+        candidates = [name for name in names if Path(name.replace("\\", "/").lower()).name == basename]
+        if len(candidates) == 1:
+            return archive.read(candidates[0])
+    return None
 
 
 def _sources_by_match_name(sources: list[ParsedXlsxTable]) -> dict[str, ParsedXlsxTable]:

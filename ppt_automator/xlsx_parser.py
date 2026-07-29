@@ -160,18 +160,28 @@ def parse_xlsx_table(
     file_name: str = "",
     formula_mode: str = "auto",
     cell_range: str = "",
+    range_mode: str = "exact",
     sheet: str = "",
 ) -> ParsedXlsxTable:
     original_bytes = read_bytes(workbook_file)
     readable_bytes = _openpyxl_readable_copy(original_bytes)
     calculated_bytes = prepare_workbook_values(readable_bytes, formula_mode=formula_mode)
-    data_wb = openpyxl.load_workbook(BytesIO(calculated_bytes), data_only=True, read_only=True)
+    normalized_range_mode = _normalized_range_mode(range_mode)
+    data_wb = openpyxl.load_workbook(
+        BytesIO(calculated_bytes),
+        data_only=True,
+        # O modo normal continua enxuto. O dinamico abre a estrutura completa
+        # para enxergar referencias de Tabelas do Excel (ListObjects).
+        read_only=normalized_range_mode != "dynamic",
+    )
     formula_wb = openpyxl.load_workbook(BytesIO(readable_bytes), data_only=False, read_only=True)
     # Aba explicita ganha do que estiver no cell_range: quem passou o nome sabe
     # de qual aba precisa.
     data_ws, range_ref = _select_worksheet(data_wb, cell_range, sheet=sheet)
     formula_ws = formula_wb[data_ws.title] if data_ws.title in formula_wb.sheetnames else formula_wb.worksheets[0]
     if range_ref:
+        if normalized_range_mode == "dynamic":
+            range_ref = _expand_range_to_current_region(data_ws, range_ref)
         trimmed_rows, used_range = _rows_from_range(data_ws, range_ref)
         formula_rows, _formula_used_range = _rows_from_range(formula_ws, range_ref)
         format_rows = _format_rows(data_ws, used_range)
@@ -285,6 +295,204 @@ def _split_range_ref(cell_range: str) -> tuple[str, str]:
     except Exception as exc:
         raise ValueError("Range invalido. Use algo como D5:G12 ou Planilha1!D5:G12.") from exc
     return sheet_name, range_ref
+
+
+def _normalized_range_mode(range_mode: str) -> str:
+    normalized = str(range_mode or "exact").strip().lower()
+    if normalized not in {"exact", "dynamic"}:
+        raise ValueError("Modo de intervalo invalido. Use 'dynamic' ou 'exact'.")
+    return normalized
+
+
+def _expand_range_to_current_region(worksheet: Any, range_ref: str) -> str:
+    """Expande um range-semente para baixo e para a direita.
+
+    O topo e a esquerda continuam sendo a ancora escolhida pelo usuario. O
+    limite inferior acompanha novas linhas contiguas. Para a direita, a expansao
+    automatica e conservadora: uma Tabela do Excel manda no limite; sem ela,
+    somente cabecalhos de periodo (mes/ano) continuam a serie. Isso evita puxar
+    colunas auxiliares colocadas ao lado da tabela real.
+    """
+
+    min_col, min_row, max_col, max_row = range_boundaries(range_ref)
+    excel_table_range = _excel_table_range_containing_seed(
+        worksheet,
+        min_col=min_col,
+        min_row=min_row,
+        max_col=max_col,
+        max_row=max_row,
+    )
+    if excel_table_range:
+        (
+            _table_min_col,
+            _table_min_row,
+            table_max_col,
+            table_max_row,
+        ) = range_boundaries(excel_table_range)
+        max_col = max(max_col, table_max_col)
+        max_row = max(max_row, table_max_row)
+        # A ancora escolhida continua prevalecendo; uma tabela maior nunca puxa
+        # celulas acima ou a esquerda do range informado.
+        return _range_ref(min_col, min_row, max_col, max_row)
+
+    worksheet_max_row = max(max_row, int(getattr(worksheet, "max_row", max_row) or max_row))
+    worksheet_max_col = max(max_col, int(getattr(worksheet, "max_column", max_col) or max_col))
+    period_columns = _seed_has_period_columns(
+        worksheet,
+        min_col=min_col,
+        min_row=min_row,
+        max_col=max_col,
+    )
+    label_column = _seed_has_label_column(
+        worksheet,
+        min_col=min_col,
+        min_row=min_row,
+        max_row=max_row,
+    )
+
+    changed = True
+    while changed:
+        changed = False
+        if (
+            period_columns
+            and max_col < worksheet_max_col
+            and _looks_like_period(worksheet.cell(row=min_row, column=max_col + 1).value)
+            and _column_has_value(
+                worksheet,
+                column=max_col + 1,
+                min_row=min_row,
+                max_row=max_row,
+            )
+        ):
+            max_col += 1
+            changed = True
+        if (
+            max_row < worksheet_max_row
+            and _row_belongs_to_table(
+                worksheet,
+                row=max_row + 1,
+                min_col=min_col,
+                max_col=max_col,
+                label_column=label_column,
+            )
+        ):
+            max_row += 1
+            changed = True
+
+    return _range_ref(min_col, min_row, max_col, max_row)
+
+
+def _range_ref(min_col: int, min_row: int, max_col: int, max_row: int) -> str:
+    from openpyxl.utils.cell import get_column_letter
+
+    return (
+        f"{get_column_letter(min_col)}{min_row}:"
+        f"{get_column_letter(max_col)}{max_row}"
+    )
+
+
+def _excel_table_range_containing_seed(
+    worksheet: Any,
+    min_col: int,
+    min_row: int,
+    max_col: int,
+    max_row: int,
+) -> str:
+    tables = getattr(worksheet, "tables", None)
+    if not tables:
+        return ""
+    try:
+        table_items = list(tables.values())
+    except (AttributeError, TypeError):
+        table_items = []
+    for table in table_items:
+        ref = str(getattr(table, "ref", "") or "")
+        if not ref:
+            continue
+        table_min_col, table_min_row, table_max_col, table_max_row = range_boundaries(ref)
+        intersects = not (
+            max_col < table_min_col
+            or min_col > table_max_col
+            or max_row < table_min_row
+            or min_row > table_max_row
+        )
+        if intersects:
+            return ref
+    return ""
+
+
+def _seed_has_period_columns(
+    worksheet: Any,
+    min_col: int,
+    min_row: int,
+    max_col: int,
+) -> bool:
+    headers = [
+        worksheet.cell(row=min_row, column=column).value
+        for column in range(min_col, max_col + 1)
+    ]
+    return any(_looks_like_period(value) for value in headers)
+
+
+def _seed_has_label_column(
+    worksheet: Any,
+    min_col: int,
+    min_row: int,
+    max_row: int,
+) -> bool:
+    values = [
+        worksheet.cell(row=row, column=min_col).value
+        for row in range(min_row + 1, max_row + 1)
+    ]
+    populated = [value for value in values if _cell_has_value(value)]
+    if not populated:
+        return False
+    text_labels = [
+        value
+        for value in populated
+        if isinstance(value, str) and _to_number(value) is None
+    ]
+    return len(text_labels) / len(populated) >= 0.5
+
+
+def _row_belongs_to_table(
+    worksheet: Any,
+    row: int,
+    min_col: int,
+    max_col: int,
+    label_column: bool,
+) -> bool:
+    if label_column and not _cell_has_value(worksheet.cell(row=row, column=min_col).value):
+        return False
+    return _row_has_value(worksheet, row=row, min_col=min_col, max_col=max_col)
+
+
+def _column_has_value(
+    worksheet: Any,
+    column: int,
+    min_row: int,
+    max_row: int,
+) -> bool:
+    return any(
+        _cell_has_value(worksheet.cell(row=row, column=column).value)
+        for row in range(min_row, max_row + 1)
+    )
+
+
+def _row_has_value(
+    worksheet: Any,
+    row: int,
+    min_col: int,
+    max_col: int,
+) -> bool:
+    return any(
+        _cell_has_value(worksheet.cell(row=row, column=column).value)
+        for column in range(min_col, max_col + 1)
+    )
+
+
+def _cell_has_value(value: Any) -> bool:
+    return value is not None and (not isinstance(value, str) or bool(value.strip()))
 
 
 def _rows_from_range(worksheet: Any, range_ref: str) -> tuple[list[list[Any]], tuple[int, int, int, int]]:

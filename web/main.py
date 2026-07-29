@@ -891,6 +891,7 @@ async def override_target_datasource(
     datasource: UploadFile | None = File(None),
     existing_source: str = Form(""),
     cell_range: str = Form(""),
+    range_mode: str = Form("dynamic"),
 ) -> HTMLResponse:
     try:
         job_dir = _job_dir(job_id)
@@ -899,6 +900,7 @@ async def override_target_datasource(
         # análise já acontece uma vez, depois de salvar o override.
         _validate_target_id(target_id)
         _validate_cell_range(cell_range)
+        _validate_range_mode(range_mode)
         if existing_source.strip():
             filename, data = _read_existing_datasource(job_dir, existing_source.strip())
         else:
@@ -917,8 +919,13 @@ async def override_target_datasource(
         range_path = target_dir / "range.txt"
         if cell_range.strip():
             range_path.write_text(cell_range.strip(), encoding="utf-8")
-        elif range_path.exists():
-            range_path.unlink()
+            (target_dir / "range_mode.txt").write_text(range_mode.strip().lower(), encoding="utf-8")
+        else:
+            if range_path.exists():
+                range_path.unlink()
+            mode_path = target_dir / "range_mode.txt"
+            if mode_path.exists():
+                mode_path.unlink()
         metadata = _load_job_metadata(job_dir)
         metadata["use_ai"] = False
         metadata["ignore_mapping_candidates"] = True
@@ -933,13 +940,19 @@ async def override_target_datasource(
                 "target": target_id,
                 "planilha": filename,
                 "intervalo": cell_range.strip(),
+                "modo_intervalo": range_mode.strip().lower(),
                 "origem": "planilha ja enviada" if existing_source.strip() else "upload novo",
             },
         )
         _save_project_checkpoint(job_dir, status="in_progress")
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc))
-    range_notice = f" com range {cell_range.strip()}" if cell_range.strip() else ""
+    range_notice = (
+        f" com range {cell_range.strip()} "
+        f"({'dinamico' if range_mode.strip().lower() == 'dynamic' else 'exato'})"
+        if cell_range.strip()
+        else ""
+    )
     return _render_preview(
         request,
         job_id,
@@ -1942,6 +1955,7 @@ def _preview_context_from_analysis(
         analysis,
         _manual_source_names(job_dir),
         _manual_source_ranges(job_dir),
+        _manual_source_range_modes(job_dir),
         ai_diagnostics,
         slide_ai_state,
         apply_slide_ai_outputs=_apply_slide_ai_outputs_enabled(job_dir),
@@ -2137,8 +2151,16 @@ def _analyze_files_signature(job_dir: Path, selected_slides: list[int]) -> tuple
             chosen_stat = files[0].stat()
             range_path = target_dir / "range.txt"
             cell_range = range_path.read_text(encoding="utf-8").strip() if range_path.exists() else ""
+            range_mode = _range_mode_for_target_dir(target_dir)
             overrides_signature.append(
-                (target_dir.name, files[0].name, chosen_stat.st_mtime_ns, chosen_stat.st_size, cell_range)
+                (
+                    target_dir.name,
+                    files[0].name,
+                    chosen_stat.st_mtime_ns,
+                    chosen_stat.st_size,
+                    cell_range,
+                    range_mode,
+                )
             )
     return (
         pptx_stat.st_mtime_ns,
@@ -2609,6 +2631,7 @@ class _ManualDatasourceEntry:
     target_id: str
     manual_data: bytes
     cell_range: str = ""
+    range_mode: str = "exact"
 
 
 def _run_slide_ai_review(
@@ -2767,7 +2790,7 @@ def _manual_datasource_entries_for_targets(job_dir: Path, targets: list) -> list
         payload = manual_sources.get(target.target_id)
         if not payload:
             continue
-        filename, data, cell_range = payload
+        filename, data, cell_range, range_mode = payload
         zip_path = f"upload_manual/{target.target_id}_{filename}"
         entries.append(
             _ManualDatasourceEntry(
@@ -2778,6 +2801,7 @@ def _manual_datasource_entries_for_targets(job_dir: Path, targets: list) -> list
                 target_id=target.target_id,
                 manual_data=data,
                 cell_range=cell_range,
+                range_mode=range_mode,
             )
         )
     return entries
@@ -2842,6 +2866,7 @@ def _source_manifests_for_entries(sources: list, entries: list) -> list[dict]:
                 "sheet_name": manifest.get("sheet_name"),
                 "used_range": manifest.get("used_range"),
                 "requested_range": str(getattr(entry, "cell_range", "") or ""),
+                "range_mode": str(getattr(entry, "range_mode", "exact") or "exact"),
                 "orientation": manifest.get("orientation"),
                 "semantic_context": {
                     key: semantic.get(key)
@@ -3188,7 +3213,11 @@ def _apply_mapping_template_to_analysis(
     } & target_ids
     missing_sources = sorted(matched_entry_ids - resolved_targets)
 
-    mapped_analysis = apply_saved_source_matches_to_analysis(analysis, saved_matches)
+    mapped_analysis = apply_saved_source_matches_to_analysis(
+        analysis,
+        saved_matches,
+        (job_dir / "datasources.zip").read_bytes(),
+    )
     new_targets = sorted(target_ids - matched_entry_ids - resolved_targets)
     message = (
         f"Mapeamento '{template.get('name')}' aplicado: {len(saved_matches)} target(s) reconhecido(s)."
@@ -3285,6 +3314,7 @@ def _cards_by_slide(
     analysis: AnalysisResult,
     manual_names: dict[str, str],
     manual_ranges: dict[str, str],
+    manual_range_modes: dict[str, str],
     ai_diagnostics: dict[str, dict],
     slide_ai_state: dict | None = None,
     apply_slide_ai_outputs: bool = False,
@@ -3328,6 +3358,7 @@ def _cards_by_slide(
                 "rows": item.rows if item else [],
                 "manual_file": manual_names.get(target.target_id, ""),
                 "manual_range": manual_ranges.get(target.target_id, ""),
+                "manual_range_mode": manual_range_modes.get(target.target_id, "dynamic"),
                 "ppt_contract": _ppt_contract_for_target(target),
                 "source_detected": _source_detected_for_plan(plan) if plan else None,
                 "source_context": _source_context_for_plan(plan) if plan else {},
@@ -3978,11 +4009,12 @@ def _save_project_checkpoint(
     inputs_persisted = bool(previous.get("inputs_persisted")) or include_inputs
     manual_overrides = {}
     previous_overrides = previous.get("manual_overrides") or {}
-    for target_id, (filename, data, cell_range) in _manual_sources_for_job(job_dir).items():
+    for target_id, (filename, data, cell_range, range_mode) in _manual_sources_for_job(job_dir).items():
         digest = hashlib.sha256(data).hexdigest()
         manual_overrides[target_id] = {
             "filename": filename,
             "range": cell_range,
+            "range_mode": range_mode,
             "sha256": digest,
         }
         previous_override = previous_overrides.get(target_id) or {}
@@ -3990,7 +4022,7 @@ def _save_project_checkpoint(
             save_project_bytes(project, ["checkpoint", "overrides", target_id], filename, data)
 
     checkpoint = {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": status,
         "job_id": metadata.get("job_id"),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -4086,6 +4118,10 @@ def _restore_project_checkpoint(project) -> str:
         cell_range = str(override.get("range") or "").strip()
         if cell_range:
             (target_dir / "range.txt").write_text(cell_range, encoding="utf-8")
+            range_mode = str(override.get("range_mode") or "exact").strip().lower()
+            if range_mode not in {"dynamic", "exact"}:
+                range_mode = "exact"
+            (target_dir / "range_mode.txt").write_text(range_mode, encoding="utf-8")
 
     cache_manifest = checkpoint.get("caches") or {}
     for cache_name in ("ai_source_matches.json", "ai_diagnostics.json", "render_cache.json"):
@@ -4158,10 +4194,17 @@ def _save_project_run(job_dir: Path, output: bytes, analysis: AnalysisResult, fi
             mapping_path.read_bytes(),
         )
     manual_ranges = _manual_source_ranges(job_dir)
-    for target_id, (filename, data, _cell_range) in _manual_sources_for_job(job_dir).items():
+    manual_range_modes = _manual_source_range_modes(job_dir)
+    for target_id, (filename, data, _cell_range, _range_mode) in _manual_sources_for_job(job_dir).items():
         save_project_bytes(project, ["runs", run.run_id, "overrides", target_id], filename, data)
     if manual_ranges:
         save_project_json(project, ["runs", run.run_id, "overrides"], "manual_ranges.json", manual_ranges)
+        save_project_json(
+            project,
+            ["runs", run.run_id, "overrides"],
+            "manual_range_modes.json",
+            manual_range_modes,
+        )
     slide_state_path = job_dir / "slide_ai_state.json"
     if slide_state_path.exists():
         save_project_bytes(project, ["runs", run.run_id, "state"], "slide_ai_state.json", slide_state_path.read_bytes())
@@ -4195,9 +4238,26 @@ def _save_or_update_mapping_template(job_dir: Path, project, analysis: AnalysisR
     selected_template = _selected_mapping_template(metadata)
     existing_entries = dict((selected_template or {}).get("entries") or {})
     manual_names = _manual_source_names(job_dir)
+    manual_ranges = _manual_source_ranges(job_dir)
+    manual_range_modes = _manual_source_range_modes(job_dir)
     now = _now_iso()
     for plan in analysis.plans:
         datasource = manual_names.get(plan.target_id) or plan.datasource.file_name
+        learning_fields = mapping_entry_learning_fields(plan.target, plan.datasource)
+        previous_entry = existing_entries.get(plan.target_id) or next(
+            (
+                entry
+                for entry in existing_entries.values()
+                if str((entry or {}).get("target_fingerprint") or "")
+                == str(learning_fields.get("target_fingerprint") or "")
+            ),
+            {},
+        )
+        cell_range = manual_ranges.get(plan.target_id, str((previous_entry or {}).get("cell_range") or ""))
+        range_mode = manual_range_modes.get(
+            plan.target_id,
+            str((previous_entry or {}).get("range_mode") or "exact"),
+        )
         existing_entries[plan.target_id] = {
             "target_id": plan.target_id,
             "object_type": plan.object_type,
@@ -4211,7 +4271,9 @@ def _save_or_update_mapping_template(job_dir: Path, project, analysis: AnalysisR
             "confidence": round(plan.confidence, 4),
             "reason": plan.reason,
             "updated_at": now,
-            **mapping_entry_learning_fields(plan.target, plan.datasource),
+            "cell_range": cell_range,
+            "range_mode": range_mode,
+            **learning_fields,
         }
     if not existing_entries:
         return
@@ -4245,11 +4307,18 @@ def _save_or_update_mapping_template(job_dir: Path, project, analysis: AnalysisR
     _save_job_metadata(job_dir, metadata)
 
 
-def _manual_sources_for_job(job_dir: Path) -> dict[str, tuple[str, bytes, str]]:
+def _manual_sources_for_job(job_dir: Path) -> dict[str, tuple[str, bytes, str, str]]:
+    return {
+        target_id: (path.name, path.read_bytes(), cell_range, range_mode)
+        for target_id, (path, cell_range, range_mode) in _manual_override_entries(job_dir).items()
+    }
+
+
+def _manual_override_entries(job_dir: Path) -> dict[str, tuple[Path, str, str]]:
     overrides_root = job_dir / "overrides"
     if not overrides_root.exists():
         return {}
-    output: dict[str, tuple[str, bytes, str]] = {}
+    output: dict[str, tuple[Path, str, str]] = {}
     for target_dir in overrides_root.iterdir():
         if not target_dir.is_dir():
             continue
@@ -4257,20 +4326,43 @@ def _manual_sources_for_job(job_dir: Path) -> dict[str, tuple[str, bytes, str]]:
         if files:
             range_path = target_dir / "range.txt"
             cell_range = range_path.read_text(encoding="utf-8").strip() if range_path.exists() else ""
-            output[target_dir.name] = (files[0].name, files[0].read_bytes(), cell_range)
+            output[target_dir.name] = (
+                files[0],
+                cell_range,
+                _range_mode_for_target_dir(target_dir),
+            )
     return output
 
 
 def _manual_source_names(job_dir: Path) -> dict[str, str]:
-    return {target_id: filename for target_id, (filename, _data, _range) in _manual_sources_for_job(job_dir).items()}
+    return {
+        target_id: path.name
+        for target_id, (path, _range, _range_mode) in _manual_override_entries(job_dir).items()
+    }
 
 
 def _manual_source_ranges(job_dir: Path) -> dict[str, str]:
     return {
         target_id: cell_range
-        for target_id, (_filename, _data, cell_range) in _manual_sources_for_job(job_dir).items()
+        for target_id, (_path, cell_range, _range_mode) in _manual_override_entries(job_dir).items()
         if cell_range
     }
+
+
+def _manual_source_range_modes(job_dir: Path) -> dict[str, str]:
+    return {
+        target_id: range_mode
+        for target_id, (_path, cell_range, range_mode) in _manual_override_entries(job_dir).items()
+        if cell_range
+    }
+
+
+def _range_mode_for_target_dir(target_dir: Path) -> str:
+    mode_path = target_dir / "range_mode.txt"
+    if not mode_path.exists():
+        return "exact"
+    range_mode = mode_path.read_text(encoding="utf-8").strip().lower()
+    return range_mode if range_mode in {"dynamic", "exact"} else "exact"
 
 
 def _selected_slides_for_job(job_dir: Path) -> list[int]:
@@ -4375,6 +4467,11 @@ def _validate_cell_range(cell_range: str) -> None:
     ref = text.split("!", 1)[1] if "!" in text else text
     if not re.fullmatch(r"[A-Za-z]{1,4}\d{1,7}(:[A-Za-z]{1,4}\d{1,7})?", ref):
         raise ValueError("Range invalido. Use algo como D5:G12 ou Planilha1!D5:G12.")
+
+
+def _validate_range_mode(range_mode: str) -> None:
+    if str(range_mode or "").strip().lower() not in {"dynamic", "exact"}:
+        raise ValueError("Modo de intervalo invalido.")
 
 
 def _read_existing_datasource(job_dir: Path, entry_name: str) -> tuple[str, bytes]:

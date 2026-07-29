@@ -72,6 +72,14 @@ def _matrix_for_preview(plan: TransformPlan) -> tuple[list[str], list[list[Any]]
             ]
             for i, row in enumerate(plan.values)
         ]
+    if plan.object_type == "table" and plan.table_matrix:
+        formatted = [
+            [_display_table_value(value, plan.number_format) for value in row]
+            for row in plan.table_matrix
+        ]
+        if plan.table_header_rows:
+            return [str(value) for value in formatted[0]], formatted[plan.table_header_rows :]
+        return [], formatted
     if plan.values:
         return plan.categories, [
             [_display_table_value(value, plan.number_format) for value in row]

@@ -62,6 +62,8 @@ def resolve_learned_matches(
             "datasource": source.file_name,
             "confidence": 1.0,
             "reason": _reason_for(entry, source),
+            "cell_range": str(entry.get("cell_range") or "").strip(),
+            "range_mode": str(entry.get("range_mode") or "exact").strip().lower(),
         }
     return resolved
 

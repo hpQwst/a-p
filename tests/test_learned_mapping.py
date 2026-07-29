@@ -89,6 +89,20 @@ class LearnedMappingTests(unittest.TestCase):
         picked = {resolved[t1.target_id]["datasource"], resolved[t2.target_id]["datasource"]}
         self.assertEqual(picked, {s1.file_name, s2.file_name})
 
+    def test_saved_dynamic_range_is_returned_with_learned_match(self) -> None:
+        target = _target("chart1", ["Jan/26", "Fev/26"], ["Total"])
+        source = _source("datasources/mensal.xlsx", ["Jan/26", "Fev/26"], ["Total"])
+        entry = {
+            **_entry(target, source),
+            "cell_range": "Base!A1:C2",
+            "range_mode": "dynamic",
+        }
+
+        resolved = resolve_learned_matches({target.target_id: entry}, [target], [source])
+
+        self.assertEqual(resolved[target.target_id]["cell_range"], "Base!A1:C2")
+        self.assertEqual(resolved[target.target_id]["range_mode"], "dynamic")
+
 
 if __name__ == "__main__":
     unittest.main()

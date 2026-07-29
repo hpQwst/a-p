@@ -17,6 +17,15 @@ def update_table_slide_xml(slide_xml: bytes, target: PptTarget, plan: TransformP
     if table is None:
         return slide_xml
 
+    if plan.table_matrix:
+        _write_matrix(
+            table,
+            frame,
+            plan.table_matrix,
+            plan.number_format,
+        )
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
     table_rows = table.findall("./a:tr", NS)
     cells_by_row = [row.findall("./a:tc", NS) for row in table_rows]
     values = plan.values
@@ -36,6 +45,117 @@ def update_table_slide_xml(slide_xml: bytes, target: PptTarget, plan: TransformP
         _write_row(flat_cells, flat_values, plan.number_format)
 
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _write_matrix(
+    table: ET.Element,
+    frame: ET.Element,
+    matrix: list[list[Any]],
+    number_format: str,
+) -> None:
+    required_rows = len(matrix)
+    required_cols = max((len(row) for row in matrix), default=0)
+    if not required_rows or not required_cols:
+        return
+    _ensure_table_dimensions(table, frame, required_rows, required_cols)
+    table_rows = table.findall("./a:tr", NS)
+    for row_index, table_row in enumerate(table_rows):
+        cells = table_row.findall("./a:tc", NS)
+        values = matrix[row_index] if row_index < required_rows else []
+        for column_index, cell in enumerate(cells):
+            value = values[column_index] if column_index < len(values) else None
+            _set_cell_text(cell, _format_value(value, number_format))
+
+
+def _ensure_table_dimensions(
+    table: ET.Element,
+    frame: ET.Element,
+    required_rows: int,
+    required_cols: int,
+) -> None:
+    table_rows = table.findall("./a:tr", NS)
+    if not table_rows:
+        return
+
+    original_row_count = len(table_rows)
+    original_row_height = sum(_positive_int(row.attrib.get("h")) for row in table_rows)
+    while len(table_rows) < required_rows:
+        new_row = copy.deepcopy(table_rows[-1])
+        for cell in new_row.findall("./a:tc", NS):
+            _set_cell_text(cell, "")
+        table.append(new_row)
+        table_rows.append(new_row)
+
+    existing_cols = max(
+        (len(row.findall("./a:tc", NS)) for row in table_rows),
+        default=0,
+    )
+    for row in table_rows:
+        cells = row.findall("./a:tc", NS)
+        if not cells:
+            continue
+        while len(cells) < required_cols:
+            new_cell = copy.deepcopy(cells[-1])
+            _set_cell_text(new_cell, "")
+            _insert_before_ext_list(row, new_cell)
+            cells.append(new_cell)
+
+    grid = table.find("./a:tblGrid", NS)
+    if grid is None:
+        grid = ET.Element(f"{{{DML_NS}}}tblGrid")
+        first_row_index = next(
+            (index for index, child in enumerate(list(table)) if child.tag == f"{{{DML_NS}}}tr"),
+            len(list(table)),
+        )
+        table.insert(first_row_index, grid)
+    grid_columns = grid.findall("./a:gridCol", NS)
+    original_grid_width = sum(_positive_int(column.attrib.get("w")) for column in grid_columns)
+    desired_grid_cols = max(existing_cols, required_cols)
+    while len(grid_columns) < desired_grid_cols:
+        new_column = (
+            copy.deepcopy(grid_columns[-1])
+            if grid_columns
+            else ET.Element(f"{{{DML_NS}}}gridCol")
+        )
+        grid.append(new_column)
+        grid_columns.append(new_column)
+
+    if required_cols > existing_cols:
+        total_width = original_grid_width or _frame_extent(frame, "cx")
+        _distribute_dimension(grid_columns[:required_cols], "w", total_width)
+    if required_rows > original_row_count:
+        total_height = original_row_height or _frame_extent(frame, "cy")
+        _distribute_dimension(table_rows[:required_rows], "h", total_height)
+
+
+def _insert_before_ext_list(parent: ET.Element, child: ET.Element) -> None:
+    ext_tag = f"{{{DML_NS}}}extLst"
+    children = list(parent)
+    ext_index = next(
+        (index for index, existing in enumerate(children) if existing.tag == ext_tag),
+        len(children),
+    )
+    parent.insert(ext_index, child)
+
+
+def _frame_extent(frame: ET.Element, attribute: str) -> int:
+    extent = frame.find("./p:xfrm/a:ext", NS)
+    return _positive_int(extent.attrib.get(attribute)) if extent is not None else 0
+
+
+def _distribute_dimension(elements: list[ET.Element], attribute: str, total: int) -> None:
+    if not elements or total <= 0:
+        return
+    base, remainder = divmod(total, len(elements))
+    for index, element in enumerate(elements):
+        element.attrib[attribute] = str(base + (1 if index < remainder else 0))
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _find_graphic_frame(root: ET.Element, shape_name: str) -> ET.Element | None:

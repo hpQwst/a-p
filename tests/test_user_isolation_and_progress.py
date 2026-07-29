@@ -243,6 +243,48 @@ class UserIsolationWebTests(unittest.TestCase):
 
         self.assertFalse(main._generated_is_current(job_dir))
 
+    def test_generated_ppt_stays_current_after_mapping_is_learned_during_publish(self) -> None:
+        job_dir = main.RUNTIME_ROOT / ("8" * 32)
+        job_dir.mkdir()
+        (job_dir / "input.pptx").write_bytes(b"ppt")
+        (job_dir / "datasources.zip").write_bytes(b"zip")
+        metadata_path = job_dir / "metadata.json"
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "slides": {"numbers": [1]},
+                    "project": {"squad": "squad1"},
+                    "mapping_template": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        source_signature = main._generation_input_signature(job_dir)
+
+        def learn_mapping(*_args) -> None:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["mapping_template"] = {
+                "squad": "squad1",
+                "slug": "mapeamento-aprendido",
+            }
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        with (
+            patch.object(main, "_save_project_run", side_effect=learn_mapping),
+            patch.object(main, "_save_project_checkpoint"),
+        ):
+            published_signature = main._publish_generated_output(
+                job_dir,
+                b"output",
+                object(),
+                "output.pptx",
+                source_signature,
+            )
+
+        self.assertNotEqual(published_signature, source_signature)
+        self.assertTrue(main._generated_is_current(job_dir))
+        self.assertEqual((job_dir / "generated.pptx").read_bytes(), b"output")
+
     def test_preview_uses_before_after_tables_and_download_cleanup(self) -> None:
         template = (main.APP_ROOT / "templates" / "preview.html").read_text(encoding="utf-8")
         javascript = (main.APP_ROOT / "static" / "app.js").read_text(encoding="utf-8")
@@ -252,6 +294,8 @@ class UserIsolationWebTests(unittest.TestCase):
         self.assertIn("Depois — dados que serão gravados", template)
         self.assertNotIn("data-chart-canvas", template)
         self.assertIn("finishAsyncDownload(asyncDownload, state.download_url)", javascript)
+        self.assertIn("O PPT foi gerado, mas o link de download nao ficou disponivel", javascript)
+        self.assertIn("statusFailures >= 3", javascript)
         self.assertNotIn("window.location.assign(state.download_url)", javascript)
         self.assertIn("--accent-foreground", stylesheet)
         self.assertNotIn(':root[data-theme="dark"] button {', stylesheet)

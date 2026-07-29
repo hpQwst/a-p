@@ -584,32 +584,49 @@
           if (!statusUrl) {
             throw new Error("Nao recebi a URL de acompanhamento.");
           }
+          var statusFailures = 0;
           var timer = window.setInterval(function () {
             updateGenerationProgress(startedAt, {});
             fetch(statusUrl, { cache: "no-store" })
-              .then(function (response) { return response.json(); })
+              .then(function (response) {
+                if (!response.ok) {
+                  throw new Error("Falha ao consultar o andamento da geracao.");
+                }
+                return response.json();
+              })
               .then(function (state) {
-                if (state.status === "complete" && state.download_url) {
+                statusFailures = 0;
+                if (state.status === "complete") {
                   window.clearInterval(timer);
-                  finishAsyncDownload(asyncDownload, state.download_url);
+                  if (state.download_url) {
+                    finishAsyncDownload(asyncDownload, state.download_url);
+                  } else {
+                    failAsyncDownload(
+                      asyncDownload,
+                      "O PPT foi gerado, mas o link de download nao ficou disponivel. Clique novamente para tentar de novo."
+                    );
+                  }
                 } else if (state.status === "error") {
                   window.clearInterval(timer);
-                  asyncDownload.disabled = false;
-                  var overlay = document.getElementById("progress-overlay");
-                  if (overlay) { overlay.hidden = true; }
-                  window.alert(state.message || "A geracao do PPT falhou.");
+                  failAsyncDownload(asyncDownload, state.message || "A geracao do PPT falhou.");
+                } else if (state.active === false) {
+                  window.clearInterval(timer);
+                  failAsyncDownload(asyncDownload, state.message || "A geracao foi interrompida.");
                 } else {
                   updateGenerationProgress(startedAt, state);
                 }
               })
-              .catch(function () {});
+              .catch(function (error) {
+                statusFailures += 1;
+                if (statusFailures >= 3) {
+                  window.clearInterval(timer);
+                  failAsyncDownload(asyncDownload, error.message || "Nao foi possivel acompanhar a geracao.");
+                }
+              });
           }, 1800);
         })
         .catch(function (error) {
-          asyncDownload.disabled = false;
-          var overlay = document.getElementById("progress-overlay");
-          if (overlay) { overlay.hidden = true; }
-          window.alert(error.message || "Nao foi possivel iniciar a geracao.");
+          failAsyncDownload(asyncDownload, error.message || "Nao foi possivel iniciar a geracao.");
         });
       return;
     }
@@ -668,6 +685,15 @@
     document.body.appendChild(link);
     link.click();
     link.remove();
+  }
+
+  function failAsyncDownload(button, message) {
+    var overlay = document.getElementById("progress-overlay");
+    if (overlay) {
+      overlay.hidden = true;
+    }
+    button.disabled = false;
+    window.alert(message);
   }
 
   function applyAdvancedMode(on) {

@@ -1062,9 +1062,11 @@ def _generated_metadata_path(job_dir: Path) -> Path:
     return job_dir / "generated.json"
 
 
-def _generation_input_signature(job_dir: Path) -> str:
+def _generation_input_signature(job_dir: Path, *, include_mapping_template: bool = True) -> str:
     """Assina somente o estado que pode alterar os bytes do PPT final."""
-    digest = hashlib.sha256(b"auto-ppt-generation-v2")
+    digest = hashlib.sha256(
+        b"auto-ppt-generation-v2-mapping-" + (b"1" if include_mapping_template else b"0")
+    )
 
     def add_bytes(label: str, data: bytes) -> None:
         digest.update(label.encode("utf-8"))
@@ -1089,10 +1091,10 @@ def _generation_input_signature(job_dir: Path) -> str:
     if metadata_path.exists():
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            relevant_metadata = {
-                key: metadata.get(key)
-                for key in ("slides", "mapping_template", "apply_slide_ai_outputs")
-            }
+            metadata_keys = ["slides", "apply_slide_ai_outputs"]
+            if include_mapping_template:
+                metadata_keys.append("mapping_template")
+            relevant_metadata = {key: metadata.get(key) for key in metadata_keys}
             add_bytes(
                 "metadata-relevant",
                 json.dumps(relevant_metadata, ensure_ascii=False, sort_keys=True).encode("utf-8"),
@@ -1245,25 +1247,59 @@ def _generate_job_output(job_dir: Path) -> None:
     except (EmbeddedWorkbookWriterUnavailable, ChartSheetUnresolvedError) as exc:
         raise RuntimeError(str(exc)) from exc
     file_name = _output_file_name(job_dir)
-    if _generation_input_signature(job_dir) != input_signature:
-        raise RuntimeError("O projeto foi alterado durante a geracao. Gere novamente para incluir as mudancas.")
-    _generated_ppt_path(job_dir).write_bytes(output)
-    _generated_metadata_path(job_dir).write_text(
-        json.dumps({"file_name": file_name, "input_signature": input_signature}, ensure_ascii=False),
-        encoding="utf-8",
+    published_signature = _publish_generated_output(
+        job_dir,
+        output,
+        analysis,
+        file_name,
+        input_signature,
     )
-    _save_project_run(job_dir, output, analysis, file_name)
-    _save_project_checkpoint(job_dir, status="completed")
     state = _load_generation_state(job_dir)
     state.update(
         {
             "status": "complete",
             "active": False,
             "message": "PPT pronto para download.",
+            "input_signature": published_signature,
             "progress": {**(state.get("progress") or {}), "percent": 100, "phase": "complete"},
         }
     )
     _save_generation_state(job_dir, state)
+
+
+def _publish_generated_output(
+    job_dir: Path,
+    output: bytes,
+    analysis: AnalysisResult,
+    file_name: str,
+    source_signature: str,
+) -> str:
+    if _generation_input_signature(job_dir) != source_signature:
+        raise RuntimeError("O projeto foi alterado durante a geracao. Gere novamente para incluir as mudancas.")
+
+    # Salvar o run treina/seleciona o mapping template usado na proxima rodada.
+    # Essa mutacao interna nao invalida o PPT que acabou de ser gerado: o template
+    # foi derivado dos mesmos planos. Alteracoes de conteudo feitas em paralelo
+    # (slides, overrides ou saidas IA) continuam invalidando a publicacao.
+    content_signature = _generation_input_signature(job_dir, include_mapping_template=False)
+    _save_project_run(job_dir, output, analysis, file_name)
+    _save_project_checkpoint(job_dir, status="completed")
+    if _generation_input_signature(job_dir, include_mapping_template=False) != content_signature:
+        raise RuntimeError("O projeto foi alterado durante a geracao. Gere novamente para incluir as mudancas.")
+
+    published_signature = _generation_input_signature(job_dir)
+    generated_path = _generated_ppt_path(job_dir)
+    generated_metadata_path = _generated_metadata_path(job_dir)
+    generated_tmp = generated_path.with_name(f"{generated_path.name}.tmp")
+    metadata_tmp = generated_metadata_path.with_name(f"{generated_metadata_path.name}.tmp")
+    generated_tmp.write_bytes(output)
+    metadata_tmp.write_text(
+        json.dumps({"file_name": file_name, "input_signature": published_signature}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    generated_tmp.replace(generated_path)
+    metadata_tmp.replace(generated_metadata_path)
+    return published_signature
 
 
 def _record_generation_progress(job_dir: Path, payload: dict) -> None:

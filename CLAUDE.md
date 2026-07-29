@@ -89,9 +89,18 @@ FastAPI app. Preview runs as a **background job**: `POST /preview` creates a job
 
 Single storage abstraction switched by `AUTO_PPT_STORAGE_BACKEND` (`local` default, or `s3` with `AUTO_PPT_S3_BUCKET`/`AUTO_PPT_S3_PREFIX`). In dev, everything lives under `workspace_data/` (git-ignored). Layout: `squads/<squad>/projects/<slug>/{templates,runs,memory,memory/manual_sources}` and `squads/<squad>/mapping_templates/<slug>/template.json`. Manual mapping corrections are appended to `memory/corrections.json` per project for audit/future learning.
 
-## Auth (`web/auth.py`)
+## Auth (`web/auth.py`, `web/entra.py`)
 
-Single shared team password in `AUTO_PPT_TEAM_PASSWORD`, enforced by the `require_team_password` middleware in `web/main.py`. The password never goes in the cookie: the session cookie holds only an expiry plus an HMAC signature, keyed off the password itself (so every instance validates the same cookie without extra shared state). `/static/*`, `/health*` and `/login` stay public. **Empty password = app fully open** — fine for local dev, never in production.
+Two modes that coexist, both enforced by the `require_team_password` middleware in `web/main.py`:
+
+- **Microsoft Entra (OIDC)** — primary when `ENTRA_TENANT_ID`/`CLIENT_ID`/`CLIENT_SECRET`/`REDIRECT_URI` are all set. Authorization Code flow via MSAL, single-tenant: `entra.exchange_code` rejects any `tid` that isn't ours, so another directory's users can't in. State and nonce ride in a signed cookie (`qwst_oidc`), not process memory, so login survives restarts.
+- **Team password** — `AUTO_PPT_TEAM_PASSWORD`, kept as a fallback so nobody is locked out if Entra misbehaves.
+
+The session cookie never carries the password or any Microsoft token — only an expiry, the signed-in email, and an HMAC over both. The signing key comes from `AUTO_PPT_SESSION_SECRET` (falling back to the team password), derived rather than stored so every instance validates the same cookie.
+
+`/static/*`, `/health*`, `/login`, `/logout` and `/auth/*` stay public. **No Entra and no password = app fully open** — fine for local dev, never in production.
+
+Gotcha: MSAL adds `openid`/`profile`/`offline_access` itself and raises `ValueError` if they're passed in, so `auth.SCOPES` only lists `email`.
 
 ## Deploy
 

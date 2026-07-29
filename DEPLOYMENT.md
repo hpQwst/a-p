@@ -101,8 +101,30 @@ Definidas pela stack — não altere à mão no console:
 | `OPENAI_API_KEY` | secret |
 | `AUTO_PPT_TEAM_PASSWORD` | secret |
 
-`AUTO_PPT_TEAM_PASSWORD` é o que protege a URL. **Se ficar vazia, o app fica
-aberto para qualquer pessoa que tenha o link.**
+`AUTO_PPT_TEAM_PASSWORD` é o que protege a URL. **Se ficar vazia e o login
+Microsoft não estiver configurado, o app fica aberto para qualquer pessoa que
+tenha o link.**
+
+## Login com a conta Microsoft (opcional)
+
+Além da senha da equipe, o app aceita login corporativo via Microsoft Entra. As
+duas formas convivem: a senha continua funcionando como reserva.
+
+Para ligar, o registro do aplicativo no Entra precisa ter como URI de redirecionamento
+exatamente `https://<url-do-app>/auth/callback`, e estas variáveis precisam chegar
+ao container:
+
+| Variável | Observação |
+| --- | --- |
+| `ENTRA_TENANT_ID` | id do diretório |
+| `ENTRA_CLIENT_ID` | id do aplicativo |
+| `ENTRA_CLIENT_SECRET` | guardar no Secrets Manager, nunca no código |
+| `ENTRA_REDIRECT_URI` | idêntico ao cadastrado, com `/auth/callback` no fim |
+| `AUTO_PPT_SESSION_SECRET` | assina o cookie de sessão |
+
+O aplicativo é single-tenant: contas de outro diretório são recusadas mesmo que a
+Microsoft autentique com sucesso. A tela de login avisa se a configuração estiver
+pela metade ou com o endereço de retorno malformado.
 
 ## Verificar
 

@@ -25,13 +25,15 @@ class TeamPasswordAuthTests(unittest.TestCase):
 
     def test_token_survives_roundtrip_but_expired_token_is_rejected(self) -> None:
         self.assertTrue(auth.session_token_valid(auth.issue_session_token()))
-        already_expired = auth.issue_session_token_for_expiry(int(time.time()) - 10)
+        already_expired = auth.session_token_for(int(time.time()) - 10)
         self.assertFalse(auth.session_token_valid(already_expired))
 
     def test_tampered_token_is_rejected(self) -> None:
-        token = auth.issue_session_token()
-        expires_raw, _, signature = token.partition(".")
-        forged = f"{int(expires_raw) + 86400}.{signature}"
+        """Estende a validade mantendo assinatura e formato: o token continua
+        com as tres partes, entao so a assinatura pode reprova-lo."""
+        expires_raw, payload, signature = auth.issue_session_token().split(".")
+        forged = f"{int(expires_raw) + 86400}.{payload}.{signature}"
+        self.assertEqual(len(forged.split(".")), 3)
         self.assertFalse(auth.session_token_valid(forged))
 
     def test_token_from_another_password_is_rejected(self) -> None:

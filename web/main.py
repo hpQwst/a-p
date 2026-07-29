@@ -8,7 +8,9 @@ from io import BytesIO
 from pathlib import Path
 from urllib.parse import quote
 import hashlib
+import hmac
 import json
+import secrets
 import os
 import re
 import shutil
@@ -73,7 +75,7 @@ from worker.processor import (
     apply_typed_outputs_to_analysis,
     parse_slide_selection,
 )
-from web import auth
+from web import auth, entra
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -121,10 +123,10 @@ templates.env.globals["asset_version"] = _asset_version
 
 @app.middleware("http")
 async def require_team_password(request: Request, call_next):
-    """Bloqueia o app inteiro sem sessao valida, quando ha senha configurada.
+    """Bloqueia o app inteiro sem sessao valida.
 
-    Sem AUTO_PPT_TEAM_PASSWORD o app fica aberto (uso local). Em producao a
-    variavel precisa estar definida."""
+    Vale para os dois modos (Microsoft Entra e senha da equipe). Sem nenhum dos
+    dois configurado o app fica aberto, o que so faz sentido localmente."""
     if auth.auth_enabled() and not auth.path_is_public(request.url.path):
         if not auth.request_is_authenticated(request.cookies):
             if request.headers.get("accept", "").startswith("application/json"):
@@ -136,11 +138,48 @@ async def require_team_password(request: Request, call_next):
     return await call_next(request)
 
 
+def _login_page(request: Request, destination: str, error: str = "", status_code: int = 200) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {
+            "next_url": destination,
+            "error": error,
+            "entra_enabled": auth.entra_enabled(),
+            "password_enabled": auth.team_password_enabled(),
+            "config_problems": auth.config_problems(),
+        },
+        status_code=status_code,
+    )
+
+
+def _start_session(request: Request, destination: str, subject: str = "") -> Response:
+    response = RedirectResponse(destination, status_code=303)
+    response.set_cookie(
+        auth.SESSION_COOKIE,
+        auth.issue_session_token(subject),
+        max_age=auth.SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=_request_is_https(request),
+    )
+    response.delete_cookie(auth.HANDSHAKE_COOKIE)
+    return response
+
+
+def _request_is_https(request: Request) -> bool:
+    """No App Runner o TLS termina antes do container. O uvicorn roda com
+    --proxy-headers, entao request.url.scheme ja reflete o X-Forwarded-Proto;
+    o cabecalho e conferido tambem por seguranca."""
+    forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return request.url.scheme == "https" or forwarded == "https"
+
+
 @app.get("/login", response_class=HTMLResponse)
-async def login_form(request: Request, next: str = "/") -> HTMLResponse:
+async def login_form(request: Request, next: str = "/", erro: str = "") -> HTMLResponse:
     if not auth.auth_enabled() or auth.request_is_authenticated(request.cookies):
         return RedirectResponse(_safe_next(next), status_code=303)
-    return templates.TemplateResponse(request, "login.html", {"next_url": _safe_next(next), "error": ""})
+    return _login_page(request, _safe_next(next), error=erro)
 
 
 @app.post("/login", response_class=HTMLResponse)
@@ -149,28 +188,78 @@ async def login_submit(request: Request, password: str = Form(""), next: str = F
     if not auth.auth_enabled():
         return RedirectResponse(destination, status_code=303)
     if not auth.password_matches(password):
-        return templates.TemplateResponse(
-            request,
-            "login.html",
-            {"next_url": destination, "error": "Senha incorreta. Tente de novo."},
-            status_code=401,
-        )
-    response = RedirectResponse(destination, status_code=303)
+        return _login_page(request, destination, error="Senha incorreta. Tente de novo.", status_code=401)
+    return _start_session(request, destination)
+
+
+@app.get("/auth/login")
+async def entra_login(request: Request, next: str = "/") -> Response:
+    """Inicia o login Microsoft. State e nonce vao num cookie assinado."""
+    destination = _safe_next(next)
+    if not auth.entra_enabled():
+        return RedirectResponse(f"/login?next={quote(destination, safe='')}", status_code=303)
+    state = secrets.token_urlsafe(24)
+    nonce = secrets.token_urlsafe(24)
+    try:
+        url = entra.authorization_url(state, nonce)
+    except entra.EntraError as exc:
+        return _login_page(request, destination, error=str(exc), status_code=500)
+    response = RedirectResponse(url, status_code=303)
     response.set_cookie(
-        auth.SESSION_COOKIE,
-        auth.issue_session_token(),
-        max_age=auth.SESSION_TTL_SECONDS,
+        auth.HANDSHAKE_COOKIE,
+        auth.issue_handshake_token(state, nonce, destination),
+        max_age=auth.HANDSHAKE_TTL_SECONDS,
         httponly=True,
         samesite="lax",
-        secure=request.url.scheme == "https",
+        secure=_request_is_https(request),
     )
     return response
 
 
+@app.get("/auth/callback")
+async def entra_callback(
+    request: Request,
+    code: str = "",
+    state: str = "",
+    error: str = "",
+    error_description: str = "",
+) -> Response:
+    if not auth.entra_enabled():
+        return RedirectResponse("/login", status_code=303)
+
+    handshake = auth.read_handshake_token(request.cookies.get(auth.HANDSHAKE_COOKIE, ""))
+    if handshake is None:
+        return _login_page(request, "/", error="O login demorou demais ou foi aberto em outra aba. Tente de novo.", status_code=400)
+    expected_state, nonce, destination = handshake
+
+    if error:
+        return _login_page(request, destination, error=f"A Microsoft recusou o login: {error_description or error}", status_code=401)
+    # Compara o state em tempo constante: e a defesa contra CSRF no retorno.
+    if not code or not state or not hmac.compare_digest(state, expected_state):
+        return _login_page(request, destination, error="Retorno de login invalido. Tente de novo.", status_code=400)
+
+    try:
+        email = await run_in_threadpool(entra.exchange_code, code, nonce)
+    except entra.EntraError as exc:
+        return _login_page(request, destination, error=str(exc), status_code=401)
+
+    return _start_session(request, destination, subject=email)
+
+
+@app.get("/auth/logout")
+async def entra_logout() -> Response:
+    return _clear_session()
+
+
 @app.post("/logout")
 async def logout() -> Response:
+    return _clear_session()
+
+
+def _clear_session() -> Response:
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie(auth.SESSION_COOKIE)
+    response.delete_cookie(auth.HANDSHAKE_COOKIE)
     return response
 
 

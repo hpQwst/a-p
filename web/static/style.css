@@ -603,6 +603,42 @@ textarea::placeholder {
   min-height: 42px;
 }
 
+.ms-button {
+  width: 100%;
+  min-height: 44px;
+  gap: 10px;
+  background: var(--surface);
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.ms-button:hover {
+  background: var(--surface-soft);
+  border-color: var(--wire);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.fallback-login {
+  margin-top: 2px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.fallback-login > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.fallback-login[open] > summary {
+  margin-bottom: 12px;
+}
+
 /* squads: visão geral com contagem */
 .squad-overview {
   display: grid;

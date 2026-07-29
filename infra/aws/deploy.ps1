@@ -19,6 +19,10 @@ param(
     [string]$Region = "us-east-1",
     [string]$TeamPassword = "",
     [string]$OpenAIKey = "",
+    [string]$EntraTenantId = "",
+    [string]$EntraClientId = "",
+    [string]$EntraClientSecret = "",
+    [string]$EntraRedirectUri = "",
     [switch]$SkipBuild
 )
 
@@ -125,6 +129,30 @@ function Set-Secret([string]$Name, [string]$Value) {
 $OpenAISecretArn = Set-Secret "$AppName/openai-api-key" $OpenAIKey
 $TeamPasswordSecretArn = Set-Secret "$AppName/team-password" $TeamPassword
 
+# Chave de assinatura do cookie. Gerada uma vez e reaproveitada: trocar a cada
+# deploy derrubaria a sessao de quem estivesse usando.
+$sessionArn = aws secretsmanager list-secrets --region $Region `
+    --filters "Key=name,Values=$AppName/session-secret" `
+    --query "SecretList[?Name=='$AppName/session-secret'].ARN | [0]" --output text
+if (-not $sessionArn -or $sessionArn -eq "None") {
+    $bytes = New-Object byte[] 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $sessionArn = Set-Secret "$AppName/session-secret" ([Convert]::ToBase64String($bytes))
+}
+$SessionSecretArn = $sessionArn.Trim()
+
+# Login Microsoft e opcional: sem o client secret, a stack sobe so com a senha.
+$EntraSecretArn = ""
+if ($EntraClientSecret) {
+    if (-not $EntraTenantId -or -not $EntraClientId -or -not $EntraRedirectUri) {
+        throw "Para o login Microsoft informe também -EntraTenantId, -EntraClientId e -EntraRedirectUri."
+    }
+    if ($EntraRedirectUri -notmatch '^https://[^/]+/auth/callback$') {
+        throw "EntraRedirectUri deve ser https://<host>/auth/callback (recebido: $EntraRedirectUri)."
+    }
+    $EntraSecretArn = Set-Secret "$AppName/entra-client-secret" $EntraClientSecret
+}
+
 # --- 5. aplicacao ---------------------------------------------------------
 Write-Host "[5/5] Publicando a aplicacao..." -ForegroundColor Cyan
 aws cloudformation deploy `
@@ -137,6 +165,11 @@ aws cloudformation deploy `
         "ImageUri=$ImageUri" `
         "OpenAISecretArn=$OpenAISecretArn" `
         "TeamPasswordSecretArn=$TeamPasswordSecretArn" `
+        "SessionSecretArn=$SessionSecretArn" `
+        "EntraTenantId=$EntraTenantId" `
+        "EntraClientId=$EntraClientId" `
+        "EntraRedirectUri=$EntraRedirectUri" `
+        "EntraClientSecretArn=$EntraSecretArn" `
         "BucketName=$AppName-$AccountId" | Out-Null
 
 $ServiceUrl = aws cloudformation describe-stacks --stack-name "$AppName-stack" --region $Region `

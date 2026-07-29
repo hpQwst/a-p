@@ -20,20 +20,50 @@
       <section class="workspace-card login-card">
         <p class="eyebrow">QWST Auto PPT</p>
         <h1>Entrar</h1>
-        <p class="login-hint">Use a senha compartilhada da equipe para abrir a ferramenta.</p>
 
         {% if error %}
           <div class="notice warn">{{ error }}</div>
         {% endif %}
+        {% for problem in config_problems %}
+          <div class="notice warn">{{ problem }}</div>
+        {% endfor %}
 
-        <form method="post" action="/login">
-          <input type="hidden" name="next" value="{{ next_url }}">
-          <label>
-            <span>Senha da equipe</span>
-            <input name="password" type="password" autocomplete="current-password" autofocus required>
-          </label>
-          <button type="submit">Entrar</button>
-        </form>
+        {% if entra_enabled %}
+          <p class="login-hint">Use sua conta corporativa da Microsoft.</p>
+          <a class="button ms-button" href="/auth/login?next={{ next_url | urlencode }}">
+            <svg viewBox="0 0 23 23" width="16" height="16" aria-hidden="true">
+              <rect x="1" y="1" width="10" height="10" fill="#f25022"/>
+              <rect x="12" y="1" width="10" height="10" fill="#7fba00"/>
+              <rect x="1" y="12" width="10" height="10" fill="#00a4ef"/>
+              <rect x="12" y="12" width="10" height="10" fill="#ffb900"/>
+            </svg>
+            Entrar com a Microsoft
+          </a>
+        {% endif %}
+
+        {% if entra_enabled and password_enabled %}
+          <details class="fallback-login">
+            <summary>Entrar com a senha da equipe</summary>
+            <form method="post" action="/login">
+              <input type="hidden" name="next" value="{{ next_url }}">
+              <label>
+                <span>Senha da equipe</span>
+                <input name="password" type="password" autocomplete="current-password" required>
+              </label>
+              <button class="secondary" type="submit">Entrar</button>
+            </form>
+          </details>
+        {% elif password_enabled %}
+          <p class="login-hint">Use a senha compartilhada da equipe.</p>
+          <form method="post" action="/login">
+            <input type="hidden" name="next" value="{{ next_url }}">
+            <label>
+              <span>Senha da equipe</span>
+              <input name="password" type="password" autocomplete="current-password" autofocus required>
+            </label>
+            <button type="submit">Entrar</button>
+          </form>
+        {% endif %}
       </section>
     </main>
   </body>

@@ -25,6 +25,26 @@ Parameters:
     Type: String
     Default: auto-ppt
     Description: Prefixo dentro do bucket.
+  SessionSecretArn:
+    Type: String
+    Description: ARN do secret que assina o cookie de sessao.
+  EntraTenantId:
+    Type: String
+    Default: ""
+    Description: Vazio desliga o login Microsoft e deixa so a senha da equipe.
+  EntraClientId:
+    Type: String
+    Default: ""
+  EntraRedirectUri:
+    Type: String
+    Default: ""
+  EntraClientSecretArn:
+    Type: String
+    Default: ""
+    Description: ARN do secret com o client secret do Entra.
+
+Conditions:
+  HasEntra: !Not [!Equals [!Ref EntraClientSecretArn, ""]]
 
 Resources:
   # Estado compartilhado. Versionamento ligado de proposito: se um mapeamento for
@@ -99,9 +119,10 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource:
-                  - !Ref OpenAISecretArn
-                  - !Ref TeamPasswordSecretArn
+                Resource: !If
+                  - HasEntra
+                  - [!Ref OpenAISecretArn, !Ref TeamPasswordSecretArn, !Ref SessionSecretArn, !Ref EntraClientSecretArn]
+                  - [!Ref OpenAISecretArn, !Ref TeamPasswordSecretArn, !Ref SessionSecretArn]
 
   # Uma instancia no maximo. O project_store grava JSON no S3 e duas instancias
   # gravando ao mesmo tempo poderiam perder uma atualizacao. Com o uso atual
@@ -137,11 +158,28 @@ Resources:
                 Value: !Ref StoragePrefix
               - Name: AUTO_PPT_RUNTIME_ROOT
                 Value: /tmp/auto-ppt-jobs
-            RuntimeEnvironmentSecrets:
-              - Name: OPENAI_API_KEY
-                Value: !Ref OpenAISecretArn
-              - Name: AUTO_PPT_TEAM_PASSWORD
-                Value: !Ref TeamPasswordSecretArn
+              - Name: ENTRA_TENANT_ID
+                Value: !Ref EntraTenantId
+              - Name: ENTRA_CLIENT_ID
+                Value: !Ref EntraClientId
+              - Name: ENTRA_REDIRECT_URI
+                Value: !Ref EntraRedirectUri
+            RuntimeEnvironmentSecrets: !If
+              - HasEntra
+              - - Name: OPENAI_API_KEY
+                  Value: !Ref OpenAISecretArn
+                - Name: AUTO_PPT_TEAM_PASSWORD
+                  Value: !Ref TeamPasswordSecretArn
+                - Name: AUTO_PPT_SESSION_SECRET
+                  Value: !Ref SessionSecretArn
+                - Name: ENTRA_CLIENT_SECRET
+                  Value: !Ref EntraClientSecretArn
+              - - Name: OPENAI_API_KEY
+                  Value: !Ref OpenAISecretArn
+                - Name: AUTO_PPT_TEAM_PASSWORD
+                  Value: !Ref TeamPasswordSecretArn
+                - Name: AUTO_PPT_SESSION_SECRET
+                  Value: !Ref SessionSecretArn
       InstanceConfiguration:
         Cpu: "1024"
         Memory: "2048"

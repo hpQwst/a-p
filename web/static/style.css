@@ -30,6 +30,7 @@
   --accent-strong: #175d46;
   --accent-soft: #dbe8de;
   --accent-line: #a7c9b3;
+  --accent-foreground: #f6f2e8;
 
   /* wire (assinatura) + sinal (alvo ativo) */
   --wire: #1f7a5c;
@@ -76,8 +77,8 @@
 
   --text: #eae4d6;
   --text-soft: #c3bdae;
-  --muted: #8b8578;
-  --faint: #6a6558;
+  --muted: #aaa294;
+  --faint: #8d8679;
 
   --line: #2c333b;
   --line-soft: #242a31;
@@ -87,6 +88,7 @@
   --accent-strong: #55d3a3;
   --accent-soft: #123027;
   --accent-line: #1f4b3c;
+  --accent-foreground: #08211a;
 
   --wire: #3fbf8f;
   --wire-soft: #163a2e;
@@ -323,7 +325,7 @@ button {
   border: 1px solid var(--accent-strong);
   border-radius: var(--radius-sm);
   background: var(--accent);
-  color: #f6f2e8;
+  color: var(--accent-foreground);
   font-family: var(--mono);
   font-size: 12px;
   font-weight: 600;
@@ -332,11 +334,6 @@ button {
   text-decoration: none;
   cursor: pointer;
   transition: background 0.15s ease, transform 0.05s ease, box-shadow 0.15s ease;
-}
-
-:root[data-theme="dark"] .button,
-:root[data-theme="dark"] button {
-  color: #08211a;
 }
 
 .button:hover,
@@ -1488,11 +1485,7 @@ textarea::placeholder {
 .filter-chip.active {
   background: var(--accent);
   border-color: var(--accent-strong);
-  color: #fff;
-}
-
-:root[data-theme="dark"] .filter-chip.active {
-  color: #08211a;
+  color: var(--accent-foreground);
 }
 
 .bulk-actions {
@@ -2475,41 +2468,35 @@ body:not(.show-advanced) .advanced-only {
   min-width: 200px;
 }
 
-/* L1 — prévia honesta: os números que vão pro slide, em tabela */
+/* L1 — comparação honesta: contrato atual do PPT e matriz final, sem simular gráfico */
+.target-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
 .target-viz,
 .target-preview {
-  margin-bottom: 14px;
   padding: 14px 16px;
   border: 1px solid var(--line-soft);
-  border-left: 3px solid var(--wire);
   border-radius: var(--radius-sm);
   background: var(--surface-soft);
+  min-width: 0;
 }
 
-.target-chart {
-  margin-bottom: 12px;
+.target-preview.before {
+  border-left: 3px solid var(--muted);
 }
 
-.target-chart-canvas .chart-svg {
-  display: block;
-  width: 100%;
-  height: auto;
-  max-height: 260px;
-}
-
-.chart-svg .chart-axis {
-  stroke: var(--line-strong);
-  stroke-width: 1;
-}
-
-.chart-svg .chart-cat {
-  fill: var(--muted);
-  font-family: var(--font);
-  font-size: 11px;
+.target-preview.after {
+  border-left: 3px solid var(--wire);
 }
 
 .target-preview-table {
   margin-top: 2px;
+  max-height: 360px;
+  overflow: auto;
 }
 
 .target-preview-table thead th {
@@ -2928,6 +2915,10 @@ body:not(.show-advanced) .advanced-only {
 }
 
 @media (max-width: 900px) {
+  .target-preview-grid {
+    grid-template-columns: 1fr;
+  }
+
   .admin-user-row {
     grid-template-columns: 1fr 1fr;
   }

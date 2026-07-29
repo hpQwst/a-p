@@ -52,11 +52,36 @@ def _model_for_operation(operation: str) -> str:
     """Permite modelo mais barato por operacao (ex.: OPENAI_MODEL_SOURCE_MATCH para o
     match enxuto, que so escolhe entre candidatos ja pontuados localmente) sem tocar
     no modelo principal usado para montar matrizes. Sempre cai em OPENAI_MODEL."""
-    default_model = os.getenv("OPENAI_MODEL", "gpt-5.5")
+    default_model = os.getenv("OPENAI_MODEL", "gpt-5.6-terra")
     if not operation:
         return default_model
     override = os.getenv(f"OPENAI_MODEL_{operation.strip().upper()}", "").strip()
-    return override or default_model
+    operation_defaults = {
+        "source_match": "gpt-5.6-luna",
+        "transform_diagnostics": "gpt-5.6-luna",
+        "slide_understanding": "gpt-5.6-terra",
+        "slide_matrix_builder": "gpt-5.6-terra",
+    }
+    return override or operation_defaults.get(operation.strip().lower(), default_model)
+
+
+def reasoning_for_operation(operation: str) -> dict[str, str]:
+    """Mantem o nivel de raciocinio explicito e ajustavel por operacao."""
+    normalized = operation.strip().lower()
+    env_name = f"OPENAI_REASONING_EFFORT_{normalized.upper()}" if normalized else "OPENAI_REASONING_EFFORT"
+    configured = os.getenv(env_name, "").strip().lower()
+    if not configured:
+        configured = os.getenv("OPENAI_REASONING_EFFORT", "").strip().lower()
+    defaults = {
+        "source_match": "none",
+        "transform_diagnostics": "none",
+        "slide_understanding": "low",
+        "slide_matrix_builder": "low",
+    }
+    effort = configured or defaults.get(normalized, "low")
+    if effort not in {"none", "low", "medium", "high", "xhigh", "max"}:
+        effort = defaults.get(normalized, "low")
+    return {"effort": effort}
 
 
 def format_ai_error(exc: Exception) -> str:
@@ -153,6 +178,7 @@ def suggest_datasource_with_ai(
     request_kwargs = {
         "model": model,
         "store": False,
+        "reasoning": reasoning_for_operation("legacy_datasource_match"),
         "input": [
             {
                 "role": "system",
@@ -272,6 +298,7 @@ def suggest_datasources_with_ai(
     request_kwargs = {
         "model": model,
         "store": False,
+        "reasoning": reasoning_for_operation("legacy_datasource_suggestions"),
         "input": [
             {
                 "role": "system",

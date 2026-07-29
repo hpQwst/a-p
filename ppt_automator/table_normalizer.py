@@ -367,6 +367,10 @@ def _normalize_chart(
     target_rows, target_cols = _target_axes(target, source)
     source_rows, source_cols = _source_axes(source)
     axis_alignment = _best_axis_alignment(target_rows, target_cols, source_rows, source_cols)
+    # O contrato do PPT decide apenas a orientacao fisica da matriz. Dentro de
+    # cada eixo, a ordem e os labels exibidos devem vir do XLSX selecionado.
+    target_rows = _target_axis_in_source_order(target_rows, axis_alignment, "row")
+    target_cols = _target_axis_in_source_order(target_cols, axis_alignment, "col")
 
     values = []
     for row_label in target_rows:
@@ -448,19 +452,20 @@ def _normalize_key_value_table(
     confidence: float,
     match_reason: str,
 ) -> TransformPlan:
-    value_map = {
-        _norm(category): (source.values[index][0] if index < len(source.values) and source.values[index] else "")
-        for index, category in enumerate(source.categories)
-    }
     if target.table_cells and all(len(row) >= 2 and _norm(row[0]) for row in target.table_cells):
-        values = []
+        template_only_rows: list[list[Any]] = []
         for row in target.table_cells:
             label = row[0]
             source_label = _best_match(label, source.categories)
-            if _soft_text_score(label, source_label) < 0.68:
-                source_label = label
-            value = value_map.get(_norm(source_label), "")
-            values.append([source_label, "" if value is None else value])
+            if _soft_text_score(label, source_label) < 0.68 and not _label_token_overlap(label, source_label):
+                template_only_rows.append([label, row[1] if len(row) > 1 else ""])
+        values = [
+            *template_only_rows,
+            *[
+                [category, "" if row_values[0] is None else row_values[0]]
+                for category, row_values in zip(source.categories, source.values)
+            ],
+        ]
         categories = ["", source.series[0] if source.series else "Valor"]
         series = [row[0] for row in values]
     else:
@@ -823,6 +828,27 @@ def _source_label_for_target_axis(alignment: dict[str, Any], axis: str, target_l
     return mapping.get(target_label) or target_label
 
 
+def _target_axis_in_source_order(
+    target_labels: list[str],
+    alignment: dict[str, Any],
+    axis: str,
+) -> list[str]:
+    mapping = alignment["row_map"] if axis == "row" else alignment["col_map"]
+    if alignment["mode"] == "same":
+        source_labels = alignment["source_rows"] if axis == "row" else alignment["source_cols"]
+    else:
+        source_labels = alignment["source_cols"] if axis == "row" else alignment["source_rows"]
+    source_positions = {_norm(label): index for index, label in enumerate(source_labels)}
+
+    def order_key(item: tuple[int, str]) -> tuple[int, int]:
+        original_index, label = item
+        mapped = mapping.get(label) or label
+        source_index = source_positions.get(_norm(mapped), len(source_positions))
+        return source_index, original_index
+
+    return [label for _index, label in sorted(enumerate(target_labels), key=order_key)]
+
+
 def _label_map(targets: list[str], choices: list[str]) -> dict[str, str]:
     output: dict[str, str] = {}
     used: set[str] = set()
@@ -864,6 +890,12 @@ def _best_match(value: str, choices: list[str]) -> str:
 
 def _best_text_score(value: str, choices: list[str]) -> float:
     return max((_soft_text_score(value, choice) for choice in choices), default=0.0)
+
+
+def _label_token_overlap(left: Any, right: Any) -> bool:
+    left_tokens = {token for token in _norm(left).split() if len(token) >= 3}
+    right_tokens = {token for token in _norm(right).split() if len(token) >= 3}
+    return bool(left_tokens & right_tokens)
 
 
 def _soft_text_score(left: Any, right: Any) -> float:

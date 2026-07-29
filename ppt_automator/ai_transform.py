@@ -6,7 +6,7 @@ from typing import Any
 import json
 import time
 
-from .ai import build_openai_client
+from .ai import build_openai_client, reasoning_for_operation
 from .ai_debug import log_ai_request, log_ai_response, log_debug_event
 from .source_manifest import xlsx_source_manifest
 from .table_normalizer import TransformPlan
@@ -126,6 +126,7 @@ def suggest_transform_diagnostics(
     request_kwargs = {
         "model": model,
         "store": False,
+        "reasoning": reasoning_for_operation("transform_diagnostics"),
         "input": [
             {
                 "role": "system",

@@ -45,6 +45,29 @@ class TableKeyValueUpdateTests(unittest.TestCase):
         self.assertNotIn("None", updated.decode("utf-8"))
         self.assertEqual(_paragraph_child_names(updated, row_index=2, cell_index=2), ["pPr", "r", "endParaRPr"])
 
+    def test_key_value_rows_keep_xlsx_order_and_names(self) -> None:
+        source = parse_xlsx_table(_reordered_key_value_workbook(), file_name="t.xlsx")
+        target = PptTarget(
+            slide_index=0,
+            slide_number=1,
+            slide_path="ppt/slides/slide1.xml",
+            shape_name="8282462966",
+            shape_id="1",
+            object_type="table",
+            left_in=0,
+            top_in=0,
+            width_in=1,
+            height_in=1,
+            table_cells=[["Base:", ""], ["Total antigo", ""], ["Natura antiga", ""], ["Avon antiga", ""]],
+        )
+
+        plan = normalize_to_target(target, source)
+
+        self.assertEqual(
+            plan.values,
+            [["Base:", ""], ["AVON oficial", 30], ["TOTAL oficial", 50], ["NATURA oficial", 20]],
+        )
+
 
 def _key_value_workbook() -> bytes:
     wb = openpyxl.Workbook()
@@ -57,6 +80,18 @@ def _key_value_workbook() -> bytes:
     ws["B3"] = 20
     ws["A4"] = "Avon"
     ws["B4"] = 30
+    data = BytesIO()
+    wb.save(data)
+    return data.getvalue()
+
+
+def _reordered_key_value_workbook() -> bytes:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["", "Valor"])
+    ws.append(["AVON oficial", 30])
+    ws.append(["TOTAL oficial", 50])
+    ws.append(["NATURA oficial", 20])
     data = BytesIO()
     wb.save(data)
     return data.getvalue()

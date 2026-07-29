@@ -18,7 +18,7 @@ def main() -> int:
     load_local_env(root)
     print(f"Repo: {root}")
     print(f"OPENAI_API_KEY: {'ok' if os.getenv('OPENAI_API_KEY') else 'ausente'}")
-    print(f"OPENAI_MODEL: {os.getenv('OPENAI_MODEL', 'gpt-5.5')}")
+    print(f"OPENAI_MODEL: {os.getenv('OPENAI_MODEL', 'gpt-5.6-terra')}")
     try:
         client, model = build_openai_client(root)
         response = client.responses.create(

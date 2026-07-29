@@ -5,7 +5,7 @@ from typing import Any
 import json
 import time
 
-from .ai import build_openai_client
+from .ai import build_openai_client, reasoning_for_operation
 from .ai_debug import log_ai_request, log_ai_response, log_debug_event
 
 
@@ -31,37 +31,26 @@ def build_slide_matrices_with_ai(payload: SlideMatrixBuildInput, root: Path | st
         "xlsx_plaintext_dumps": payload.xlsx_dumps,
         "manual_context": payload.manual_context,
         "rules": [
-            "Monte final_edit_data tipado para cada target solicitado.",
-            "Use xlsx_manifests como indice semantico principal dos arquivos; use xlsx_plaintext_dumps para conferir celulas, coordenadas e valores raw.",
-            "Use somente valores presentes no raw dos XLSX. Nunca invente valores.",
-            "Nunca arredonde valores numericos. Copie source_raw exatamente.",
-            "Use os labels, categorias, series e headers do XLSX sempre que eles forem a fonte correspondente; nao substitua por labels resumidos ou antigos do PPT.",
-            "O PPT serve para entender o papel visual e o formato esperado, mas o texto final dos rotulos deve vir do XLSX quando houver match.",
-            "Para object_type=chart, final_edit_data deve estar no formato exato do workbook do PowerPoint, nao em uma orientacao semantica livre.",
-            "Para chart com expected_orientation=series_rows_categories_columns, use headers=[blank, categorias...] e rows=[[serie, valores...], ...].",
-            "Para chart com expected_orientation=categories_rows_series_columns, use headers=[blank, series...] e rows=[[categoria, valores...], ...].",
-            "Para object_type=table, final_edit_data deve espelhar as celulas visiveis da tabela PowerPoint. Preserve labels existentes e preencha as celulas de valor correspondentes.",
-            "Para tabelas chave-valor, use a primeira coluna como chave/label e coloque o valor correspondente na segunda coluna.",
-            "Retorne edit_orientation com a orientacao usada: series_rows_categories_columns, categories_rows_series_columns ou table_cells.",
-            "Retorne visual_number_format quando a formatacao visual for importante, por exemplo 0.0 para mostrar uma casa decimal sem arredondar o workbook.",
-            "Headers, series, categorias, periodos, codigos e labels devem ser type=text e force_text=true.",
-            "Valores quantitativos devem ser type=number.",
-            "Labels como Nov/25, Dez/25, 1Q26, 01/2026, 001 e 10-15 sao texto forcado.",
-            "Inclua source_trace quando souber a celula de origem.",
+            "Escolha a fonte e monte final_edit_data para cada target solicitado usando somente valores do dump XLSX.",
+            "Preserve a ordem e os labels completos do XLSX; use o PPT apenas para a orientacao fisica e capacidade da matriz.",
+            "series_rows_categories_columns: headers=[blank,categorias...] e rows=[[serie,valores...],...].",
+            "categories_rows_series_columns: headers=[blank,series...] e rows=[[categoria,valores...],...].",
+            "table_cells: rows na mesma ordem da fonte; mantenha linhas fixas do template apenas quando nao existirem no XLSX.",
+            "Labels, periodos e codigos sao type=text; valores quantitativos sao type=number. Nao arredonde.",
+            "source_trace deve resumir o range usado, sem repetir cada celula.",
         ],
     }
     content: list[dict[str, Any]] = [{"type": "input_text", "text": json.dumps(user_payload, ensure_ascii=False)}]
     request_kwargs = {
         "model": model,
         "store": False,
+        "reasoning": reasoning_for_operation("slide_matrix_builder"),
         "input": [
             {
                 "role": "system",
                 "content": (
-                    "Voce monta matrizes finais para o Editar dados do PowerPoint. "
-                    "A saida deve ser exata, tipada e rastreavel. "
-                    "Voce nao interpreta valores por rasterizacao de planilha; usa apenas dumps textuais compactos dos XLSX. "
-                    "Quando um label do XLSX for mais completo que o label atual do PPT, use o label do XLSX na matriz final."
+                    "Monte matrizes tipadas para o Editar dados do PowerPoint a partir dos dumps XLSX. "
+                    "Nao invente valores; preserve ordem, nomes e precisao da fonte."
                 ),
             },
             {"role": "user", "content": content},
@@ -101,10 +90,8 @@ def _schema() -> dict[str, Any]:
         "properties": {
             "value": {"type": "string"},
             "type": {"type": "string", "enum": ["text", "number"]},
-            "force_text": {"type": "boolean"},
-            "source_raw": {"type": "string"},
         },
-        "required": ["value", "type", "force_text", "source_raw"],
+        "required": ["value", "type"],
     }
     return {
         "type": "object",
@@ -133,17 +120,13 @@ def _schema() -> dict[str, Any]:
                             "type": "object",
                             "additionalProperties": False,
                             "properties": {
-                                "matrix_preview": {
-                                    "type": "array",
-                                    "items": {"type": "array", "items": {"type": "string"}},
-                                },
                                 "headers": {"type": "array", "items": typed_cell},
                                 "rows": {
                                     "type": "array",
                                     "items": {"type": "array", "items": typed_cell},
                                 },
                             },
-                            "required": ["matrix_preview", "headers", "rows"],
+                            "required": ["headers", "rows"],
                         },
                         "source_trace": {
                             "type": "array",
@@ -151,13 +134,11 @@ def _schema() -> dict[str, Any]:
                                 "type": "object",
                                 "additionalProperties": False,
                                 "properties": {
-                                    "output_position": {"type": "string"},
-                                    "value": {"type": "string"},
                                     "source_file": {"type": "string"},
                                     "source_sheet": {"type": "string"},
-                                    "source_cell": {"type": "string"},
+                                    "source_range": {"type": "string"},
                                 },
-                                "required": ["output_position", "value", "source_file", "source_sheet", "source_cell"],
+                                "required": ["source_file", "source_sheet", "source_range"],
                             },
                         },
                     },

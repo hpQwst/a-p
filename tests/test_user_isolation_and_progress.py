@@ -219,6 +219,43 @@ class UserIsolationWebTests(unittest.TestCase):
         self.assertGreaterEqual(checkpoint["save_count"], 2)
         self.assertEqual(len(checkpoint["manual_overrides"]["slide-1-chart-1"]["sha256"]), 64)
 
+    def test_generated_ppt_becomes_stale_after_manual_override_changes(self) -> None:
+        job_dir = main.RUNTIME_ROOT / ("9" * 32)
+        job_dir.mkdir()
+        (job_dir / "input.pptx").write_bytes(b"ppt")
+        (job_dir / "datasources.zip").write_bytes(b"zip")
+        (job_dir / "metadata.json").write_text(
+            json.dumps({"slides": {"numbers": [1]}, "project": {"squad": "squad1"}}),
+            encoding="utf-8",
+        )
+        signature = main._generation_input_signature(job_dir)
+        (job_dir / "generated.pptx").write_bytes(b"output")
+        (job_dir / "generated.json").write_text(
+            json.dumps({"file_name": "output.pptx", "input_signature": signature}),
+            encoding="utf-8",
+        )
+
+        self.assertTrue(main._generated_is_current(job_dir))
+
+        override_dir = job_dir / "overrides" / "target"
+        override_dir.mkdir(parents=True)
+        (override_dir / "manual.xlsx").write_bytes(b"new data")
+
+        self.assertFalse(main._generated_is_current(job_dir))
+
+    def test_preview_uses_before_after_tables_and_download_cleanup(self) -> None:
+        template = (main.APP_ROOT / "templates" / "preview.html").read_text(encoding="utf-8")
+        javascript = (main.APP_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        stylesheet = (main.APP_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+        self.assertIn("Antes — estrutura atual no PowerPoint", template)
+        self.assertIn("Depois — dados que serão gravados", template)
+        self.assertNotIn("data-chart-canvas", template)
+        self.assertIn("finishAsyncDownload(asyncDownload, state.download_url)", javascript)
+        self.assertNotIn("window.location.assign(state.download_url)", javascript)
+        self.assertIn("--accent-foreground", stylesheet)
+        self.assertNotIn(':root[data-theme="dark"] button {', stylesheet)
+
 
 class ProgressCallbackTests(unittest.TestCase):
     def test_preview_and_generation_use_the_same_completion_scale(self) -> None:

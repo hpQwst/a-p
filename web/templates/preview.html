@@ -224,7 +224,18 @@
               {% for entry in ai_log_entries %}
                 <article>
                   <strong>{{ entry.operation }} / {{ entry.status }}</strong>
-                  <span>{{ entry.sent_at }} -> {{ entry.returned_at }} · {{ entry.duration_ms }} ms · {{ entry.target_count }} target(s)</span>
+                  <span>
+                    {{ entry.sent_at }} -> {{ entry.returned_at }} · {{ entry.duration_ms }} ms
+                    {% if entry.target_count is defined %} · {{ entry.target_count }} target(s){% endif %}
+                  </span>
+                  {% if entry.model_returned or entry.model_requested %}
+                    <span>
+                      modelo {{ entry.model_returned or entry.model_requested }}
+                      {% if entry.reasoning_effort %}· reasoning {{ entry.reasoning_effort }}{% endif %}
+                      {% if entry.total_tokens is defined %}· {{ entry.total_tokens }} tokens{% endif %}
+                      {% if entry.estimated_cost_usd is number %}· US$ {{ "%.6f"|format(entry.estimated_cost_usd) }} estimado{% endif %}
+                    </span>
+                  {% endif %}
                   {% if entry.returned_count is defined %}
                     <span>retorno: {{ entry.returned_count }}</span>
                   {% endif %}
@@ -318,7 +329,7 @@
                     </div>
                     {% if current_slide_state.understanding %}
                       <details class="ai-understanding advanced-only">
-                        <summary>Entendimento IA do slide</summary>
+                        <summary>Contexto enviado para a revisão</summary>
                         <pre>{{ current_slide_state.understanding }}</pre>
                       </details>
                     {% endif %}
@@ -395,35 +406,61 @@
                       </summary>
 
                       <div class="target-detail">
-                        {% if item.headers and item.rows %}
-                          <div class="target-preview">
-                            <p class="target-viz-label">Prévia — dados que vão pro slide</p>
-                            {% if item.chart_shape %}
-                              <div class="target-chart" data-chart>
-                                <div class="target-chart-canvas" data-chart-canvas></div>
-                                <script type="application/json" data-chart-data>{{ {"kind": item.chart_shape.kind, "colors": item.chart_shape.colors, "headers": item.headers, "rows": item.rows} | tojson }}</script>
-                              </div>
-                            {% endif %}
-                            <div class="table-wrap small target-preview-table">
-                              <table>
-                                <thead>
-                                  <tr>
-                                    {% for header in item.headers %}
-                                      <th>{{ header }}</th>
-                                    {% endfor %}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {% for row in item.rows %}
-                                    <tr>
-                                      {% for value in row %}
-                                        <td>{{ value }}</td>
+                        {% set before = item.ppt_contract or {} %}
+                        {% if (before.headers or before.rows) or (item.headers and item.rows) %}
+                          <div class="target-preview-grid">
+                            {% if before.headers or before.rows %}
+                              <section class="target-preview before">
+                                <p class="target-viz-label">Antes — estrutura atual no PowerPoint</p>
+                                <div class="table-wrap small target-preview-table">
+                                  <table>
+                                    {% if before.headers %}
+                                      <thead>
+                                        <tr>
+                                          {% for header in before.headers %}
+                                            <th>{{ header }}</th>
+                                          {% endfor %}
+                                        </tr>
+                                      </thead>
+                                    {% endif %}
+                                    <tbody>
+                                      {% for row in before.rows %}
+                                        <tr>
+                                          {% for value in row %}
+                                            <td>{{ value }}</td>
+                                          {% endfor %}
+                                        </tr>
                                       {% endfor %}
-                                    </tr>
-                                  {% endfor %}
-                                </tbody>
-                              </table>
-                            </div>
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </section>
+                            {% endif %}
+                            {% if item.headers and item.rows %}
+                              <section class="target-preview after">
+                                <p class="target-viz-label">Depois — dados que serão gravados</p>
+                                <div class="table-wrap small target-preview-table">
+                                  <table>
+                                    <thead>
+                                      <tr>
+                                        {% for header in item.headers %}
+                                          <th>{{ header }}</th>
+                                        {% endfor %}
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {% for row in item.rows %}
+                                        <tr>
+                                          {% for value in row %}
+                                            <td>{{ value }}</td>
+                                          {% endfor %}
+                                        </tr>
+                                      {% endfor %}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </section>
+                            {% endif %}
                           </div>
                         {% endif %}
                         {% if not item.has_plan and datasource_info.files %}

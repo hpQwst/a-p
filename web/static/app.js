@@ -577,7 +577,7 @@
         })
         .then(function (payload) {
           if (payload.download_url) {
-            window.location.assign(payload.download_url);
+            finishAsyncDownload(asyncDownload, payload.download_url);
             return;
           }
           var statusUrl = payload.status_url;
@@ -591,7 +591,7 @@
               .then(function (state) {
                 if (state.status === "complete" && state.download_url) {
                   window.clearInterval(timer);
-                  window.location.assign(state.download_url);
+                  finishAsyncDownload(asyncDownload, state.download_url);
                 } else if (state.status === "error") {
                   window.clearInterval(timer);
                   asyncDownload.disabled = false;
@@ -649,6 +649,25 @@
     setRealProgress(state && state.progress ? state.progress : null, "objetos");
     var hint = seconds > 45 ? " Decks grandes levam alguns minutos — pode deixar aberto." : "";
     target.textContent = base + " (" + elapsed + ")" + hint;
+  }
+
+  function finishAsyncDownload(button, downloadUrl) {
+    var overlay = document.getElementById("progress-overlay");
+    if (overlay) {
+      overlay.hidden = true;
+    }
+    button.disabled = false;
+    var saveStatus = document.querySelector("[data-save-status]");
+    if (saveStatus) {
+      saveStatus.textContent = "PowerPoint pronto. Download iniciado.";
+    }
+    var link = document.createElement("a");
+    link.href = downloadUrl;
+    link.download = "";
+    link.hidden = true;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
   }
 
   function applyAdvancedMode(on) {
@@ -954,5 +973,4 @@
   startPreviewPolling();
   bindDropzones();
   initAdvancedMode();
-  renderCharts();
 })();

@@ -108,7 +108,7 @@ class AndreWebFlowTests(unittest.TestCase):
             self.assertIn("Preparando preview", response.text)
             self.assertIn("Log debug", response.text)
             self.assertIn('data-preview-url="/jobs/', response.text)
-            self.assertIn("IA indisponivel", response.text)
+            self.assertIn("IA nao foi acionada", response.text)
             match = re.search(r"/jobs/([a-f0-9]+)/processing-status", response.text)
             self.assertIsNotNone(match)
             job_id = match.group(1)

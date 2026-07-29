@@ -6,7 +6,7 @@ import os
 import time
 from typing import Any
 
-from .ai import build_openai_client
+from .ai import build_openai_client, reasoning_for_operation
 from .ai_debug import log_ai_request, log_ai_response, log_debug_event
 from .ppt_discovery import PptTarget
 from .source_manifest import xlsx_source_manifest
@@ -134,6 +134,7 @@ def suggest_source_matches_with_ai(
     request_kwargs = {
         "model": model,
         "store": False,
+        "reasoning": reasoning_for_operation("source_match"),
         "input": [
             {
                 "role": "system",

@@ -86,19 +86,20 @@ Para reforcar o auto-match, um XLSX pode conter nas primeiras linhas pares como 
 
 ## IA no mapeamento e na normalizacao
 
-O app funciona sem IA, mas quando a chave esta configurada ele usa IA por padrao na etapa de preview. Para habilitar, crie um arquivo `.env` baseado em `.env.example`:
+O app funciona sem IA. Mesmo com a chave configurada, nenhuma revisão roda automaticamente por padrão: a pessoa aciona a IA no target ou slide que precisa. Para habilitar, crie um arquivo `.env` baseado em `.env.example`:
 
 ```env
 OPENAI_API_KEY=sua_chave
-OPENAI_MODEL=gpt-5.5
+OPENAI_MODEL=gpt-5.6-terra
+OPENAI_MODEL_SOURCE_MATCH=gpt-5.6-luna
+OPENAI_MODEL_SLIDE_MATRIX_BUILDER=gpt-5.6-terra
 ```
 
 A IA recebe, por target:
 
 - o contrato do PPT extraido do `Editar dados` do grafico ou da tabela PowerPoint;
-- um manifesto semantico compacto do XLSX, incluindo titulo da tabela, filtro/label lateral, categorias, series e preview;
+- um manifesto semantico compacto do XLSX, sem repetir o preview de valores;
 - um dump textual compacto das celulas uteis do XLSX, com coordenadas e valores raw;
-- a matriz final proposta pelo normalizador;
 - o contexto textual estruturado do slide e o nome/contrato OpenXML de cada target.
 
 Com isso ela diagnostica se a acao correta e alinhar, transpor ou pedir revisao. A matriz tecnica continua sendo exibida para o usuario antes do download, e a pessoa pode substituir o XLSX de um target diretamente no card do preview.
@@ -109,11 +110,11 @@ A IA por slide nao roda automaticamente no preview inicial. Isso mantem a tela r
 
 No caminho recomendado, a IA de mapeamento recebe registros JSONL por slide: objetos do PPT com colunas/linhas/titulos do `Editar dados` e datasources do mesmo slide com colunas/linhas/titulos detectados. A resposta deve escolher o datasource de cada objeto e pode sugerir uma `recipe_suggestion` estrutural pequena, por exemplo `keep`, `transpose`, `drop_and_keep` ou `drop_and_transpose`. O sistema aplica e valida a transformacao com codigo deterministico; a IA nao devolve nem grava a matriz final.
 
-Essa revisao enxuta de datasource roda automaticamente para targets sem match e para matches deterministicos abaixo de `AUTO_PPT_AI_REVIEW_CONFIDENCE_FLOOR` (padrao `0.80`), quando `OPENAI_API_KEY` estiver configurada. Para desligar essa revisao automatica e manter apenas o fluxo deterministico/manual, use `AUTO_PPT_AI_AUTO_SOURCE_REVIEW=0`. Esse mecanismo nao habilita a IA por slide nem a gravacao de matrizes finais por IA.
+Essa revisao enxuta de datasource é explícita por padrão (`AUTO_PPT_AI_AUTO_SOURCE_REVIEW=0`). O upload manual e a inclusão de slides nunca acionam IA escondida. Se o time optar por revisão automática de targets sem match ou abaixo do piso de confiança, pode habilitar `AUTO_PPT_AI_AUTO_SOURCE_REVIEW=1`.
 
 Em decks grandes, a revisao enxuta cobre todos os targets pendentes numa unica passada de preview, em lotes de `AUTO_PPT_AI_SOURCE_MATCH_BATCH_TARGETS` (padrao 10) ate o teto de `AUTO_PPT_AI_MATCH_MAX_CALLS` chamadas (padrao 12, ou seja, ate 120 targets por passada). O cache e salvo apos cada lote. A revisao por slide (texto estruturado + matriz) e limitada a `AUTO_PPT_SLIDE_AI_MAX_SLIDES_PER_RUN` slides por execucao (padrao 1), priorizando os slides com targets sem match ou de baixa confianca.
 
-Cada operacao de IA pode usar um modelo proprio via `OPENAI_MODEL_SOURCE_MATCH`, `OPENAI_MODEL_SLIDE_UNDERSTANDING`, `OPENAI_MODEL_SLIDE_MATRIX_BUILDER` e `OPENAI_MODEL_TRANSFORM_DIAGNOSTICS`, todos com fallback para `OPENAI_MODEL`. O match enxuto escolhe entre candidatos ja pontuados localmente e funciona bem em modelos mais baratos.
+Cada operação de IA usa modelo e esforço próprios. Configuração inicial: `gpt-5.6-luna` com esforço `none` para source match/diagnóstico; `gpt-5.6-terra` com esforço `low` para matriz final. A revisão de matriz faz uma chamada única: seleção da fonte e montagem deixaram de duplicar manifesto, dump e contrato em duas chamadas. O log persistente registra operação, modelo, esforço, bytes, tokens, cache, latência e custo estimado, sem gravar prompt nem resposta.
 
 Antes de subir o servidor, valide a conexao com a OpenAI pelo PowerShell:
 

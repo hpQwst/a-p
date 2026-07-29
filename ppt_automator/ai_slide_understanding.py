@@ -5,7 +5,7 @@ from typing import Any
 import json
 import time
 
-from .ai import build_openai_client
+from .ai import build_openai_client, reasoning_for_operation
 from .ai_debug import log_ai_request, log_ai_response, log_debug_event
 
 
@@ -40,6 +40,7 @@ def suggest_slide_understanding(payload: SlideUnderstandingInput, root: Path | s
     request_kwargs = {
         "model": model,
         "store": False,
+        "reasoning": reasoning_for_operation("slide_understanding"),
         "input": [
             {
                 "role": "system",

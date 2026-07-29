@@ -101,6 +101,39 @@ class TableNormalizerLabelTests(unittest.TestCase):
         self.assertEqual(plan.values[-1], [0.008, 0.010, 0.0])
         self.assertNotEqual(plan.values[-1], [1584.0, 1251.0, 333.0])
 
+    def test_chart_preserves_xlsx_order_after_matching_ppt_labels(self) -> None:
+        target = PptTarget(
+            slide_index=0,
+            slide_number=1,
+            slide_path="ppt/slides/slide1.xml",
+            shape_name="chart",
+            shape_id="1",
+            object_type="chart",
+            left_in=0,
+            top_in=0,
+            width_in=1,
+            height_in=1,
+            expected_orientation="categories_rows_series_columns",
+            expected_categories=["Primeiro", "Segundo", "Terceiro"],
+            expected_series=["Total", "Natura"],
+            expected_values=[[0, 0], [0, 0], [0, 0]],
+        )
+        source = ParsedXlsxTable(
+            source_id="",
+            file_name="reordenado.xlsx",
+            sheet_name="Sheet1",
+            orientation="categories_rows_series_columns",
+            categories=["Terceiro completo", "Primeiro completo", "Segundo completo"],
+            series=["Natura oficial", "Total oficial"],
+            values=[[31, 30], [11, 10], [21, 20]],
+        )
+
+        plan = normalize_to_target(target, source)
+
+        self.assertEqual(plan.categories, source.categories)
+        self.assertEqual(plan.series, source.series)
+        self.assertEqual(plan.values, source.values)
+
 
 if __name__ == "__main__":
     unittest.main()

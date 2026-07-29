@@ -179,6 +179,30 @@ Resources:
                 Value: !Ref StoragePrefix
               - Name: AUTO_PPT_RUNTIME_ROOT
                 Value: /tmp/auto-ppt-jobs
+              - Name: OPENAI_MODEL
+                Value: gpt-5.6-terra
+              - Name: OPENAI_MODEL_SOURCE_MATCH
+                Value: gpt-5.6-luna
+              - Name: OPENAI_MODEL_SLIDE_UNDERSTANDING
+                Value: gpt-5.6-terra
+              - Name: OPENAI_MODEL_SLIDE_MATRIX_BUILDER
+                Value: gpt-5.6-terra
+              - Name: OPENAI_MODEL_TRANSFORM_DIAGNOSTICS
+                Value: gpt-5.6-luna
+              - Name: OPENAI_REASONING_EFFORT
+                Value: low
+              - Name: OPENAI_REASONING_EFFORT_SOURCE_MATCH
+                Value: none
+              - Name: OPENAI_REASONING_EFFORT_SLIDE_UNDERSTANDING
+                Value: low
+              - Name: OPENAI_REASONING_EFFORT_SLIDE_MATRIX_BUILDER
+                Value: low
+              - Name: OPENAI_REASONING_EFFORT_TRANSFORM_DIAGNOSTICS
+                Value: none
+              - Name: AUTO_PPT_AI_AUTO_SOURCE_REVIEW
+                Value: "0"
+              - Name: AUTO_PPT_AUTO_SLIDE_AI
+                Value: "0"
               - Name: ENTRA_TENANT_ID
                 Value: !Ref EntraTenantId
               - Name: ENTRA_CLIENT_ID

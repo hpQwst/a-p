@@ -33,14 +33,20 @@ from ppt_automator.archive_safety import (
     validate_xlsx_bytes,
 )
 from ppt_automator.ai import ai_configured, format_ai_error
-from ppt_automator.ai_debug import log_debug_event, reset_ai_debug_log_path, set_ai_debug_log_path
+from ppt_automator.ai_debug import (
+    log_debug_event,
+    reset_ai_debug_log_path,
+    reset_ai_usage_log_path,
+    set_ai_debug_log_path,
+    set_ai_usage_log_path,
+)
 from ppt_automator.embedded_workbook_writer import EmbeddedWorkbookWriterUnavailable
 from ppt_automator.ppt_chart_writer import ChartSheetUnresolvedError
 from ppt_automator.ai_mapper import suggest_source_matches_with_ai
 from ppt_automator.ai_slide_matrix_builder import SlideMatrixBuildInput, build_slide_matrices_with_ai
-from ppt_automator.ai_slide_understanding import SlideUnderstandingInput, suggest_slide_understanding
 from ppt_automator.ai_transform import suggest_transform_diagnostics
 from ppt_automator.edit_data_validator import validate_typed_edit_data
+from ppt_automator.typed_matrix import normalize_typed_edit_data
 from ppt_automator.slide_datasources import collect_datasource_entries, entries_for_slide
 from ppt_automator.source_manifest import xlsx_source_manifest
 from ppt_automator.table_normalizer import source_match_candidates
@@ -743,14 +749,9 @@ async def update_job_slides(
         _save_job_metadata(job_dir, metadata)
         _clear_render_cache(job_dir)
         _save_project_checkpoint(job_dir, status="in_progress")
-        auto_notice = await run_in_threadpool(
-            _run_automatic_slide_ai_review, job_dir, slide_numbers=added_slides, force=True
-        )
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc))
     notice = f"Slides adicionados ao escopo: {', '.join(str(slide) for slide in added_slides)}."
-    if auto_notice:
-        notice += f" {auto_notice}"
     return _render_preview(request, job_id, notice=notice)
 
 
@@ -893,10 +894,9 @@ async def override_target_datasource(
 ) -> HTMLResponse:
     try:
         job_dir = _job_dir(job_id)
-        analysis, _mapping_status, _mapping_candidates, _pause = await run_in_threadpool(
-            _analysis_for_job, job_dir, apply_slide_outputs=False
-        )
-        target_id = _canonical_target_id(analysis.targets, target_id)
+        # O formulario do preview sempre envia o ID canonico. Reanalisar o deck
+        # inteiro aqui só para validar esse ID duplicava o trabalho: a nova
+        # análise já acontece uma vez, depois de salvar o override.
         _validate_target_id(target_id)
         _validate_cell_range(cell_range)
         if existing_source.strip():
@@ -936,12 +936,6 @@ async def override_target_datasource(
                 "origem": "planilha ja enviada" if existing_source.strip() else "upload novo",
             },
         )
-        ai_notice = ""
-        if ai_configured(PROJECT_ROOT):
-            try:
-                ai_notice = " " + await run_in_threadpool(_run_target_ai_review, job_dir, target_id)
-            except Exception as ai_exc:
-                ai_notice = f" IA nao conseguiu revisar este target agora: {ai_exc}"
         _save_project_checkpoint(job_dir, status="in_progress")
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc))
@@ -949,7 +943,10 @@ async def override_target_datasource(
     return _render_preview(
         request,
         job_id,
-        notice=f"Datasource {filename}{range_notice} aplicado ao target {target_id}.{ai_notice}",
+        notice=(
+            f"Datasource {filename}{range_notice} aplicado ao target {target_id}. "
+            "A correção determinística foi salva; a revisão por IA continua disponível no modo avançado."
+        ),
         allow_ai=False,
     )
 
@@ -958,8 +955,8 @@ async def override_target_datasource(
 async def download(request: Request, job_id: str) -> Response:
     job_dir = _job_dir(job_id)
     audit.remember_actor(job_dir, _actor(request))
-    generated = _generated_ppt_path(job_dir)
-    if not generated.exists():
+    if not _generated_is_current(job_dir):
+        _discard_stale_generated_output(job_dir)
         await run_in_threadpool(_generate_job_output, job_dir)
     return FileResponse(
         _generated_ppt_path(job_dir),
@@ -972,13 +969,15 @@ async def download(request: Request, job_id: str) -> Response:
 async def start_generation(request: Request, job_id: str) -> JSONResponse:
     job_dir = _job_dir(job_id)
     audit.remember_actor(job_dir, _actor(request))
-    if _generated_ppt_path(job_dir).exists():
+    input_signature = _generation_input_signature(job_dir)
+    if _generated_is_current(job_dir, input_signature=input_signature):
         return JSONResponse({"status": "complete", "download_url": f"/jobs/{job_id}/download"})
+    _discard_stale_generated_output(job_dir)
     state = _load_generation_state(job_dir)
-    if state.get("active"):
+    if state.get("active") and state.get("input_signature") == input_signature:
         return JSONResponse({"status": state.get("status", "running"), "status_url": f"/jobs/{job_id}/generation-status"})
 
-    _init_generation_state(job_dir)
+    _init_generation_state(job_dir, input_signature=input_signature)
     with GENERATION_RUNNING_LOCK:
         if job_id not in GENERATION_RUNNING:
             GENERATION_RUNNING.add(job_id)
@@ -1016,7 +1015,7 @@ async def generation_status(job_id: str) -> JSONResponse:
         {
             **state,
             "job_id": job_id,
-            "download_url": f"/jobs/{job_id}/download" if _generated_ppt_path(job_dir).exists() else "",
+            "download_url": f"/jobs/{job_id}/download" if _generated_is_current(job_dir) else "",
         }
     )
 
@@ -1061,6 +1060,87 @@ def _generated_ppt_path(job_dir: Path) -> Path:
 
 def _generated_metadata_path(job_dir: Path) -> Path:
     return job_dir / "generated.json"
+
+
+def _generation_input_signature(job_dir: Path) -> str:
+    """Assina somente o estado que pode alterar os bytes do PPT final."""
+    digest = hashlib.sha256(b"auto-ppt-generation-v2")
+
+    def add_bytes(label: str, data: bytes) -> None:
+        digest.update(label.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(data)
+        digest.update(b"\0")
+
+    # Entradas grandes sao imutaveis dentro de um job. Assinar stat evita reler
+    # decks de centenas de MB a cada consulta de status/download.
+    for name in ("input.pptx", "datasources.zip"):
+        path = job_dir / name
+        if path.exists() and path.is_file():
+            stat = path.stat()
+            add_bytes(f"{name}-stat", f"{stat.st_size}:{stat.st_mtime_ns}".encode("ascii"))
+
+    for name in ("ai_source_matches.json", "ai_diagnostics.json"):
+        path = job_dir / name
+        if path.exists() and path.is_file():
+            add_bytes(name, path.read_bytes())
+
+    metadata_path = job_dir / "metadata.json"
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            relevant_metadata = {
+                key: metadata.get(key)
+                for key in ("slides", "mapping_template", "apply_slide_ai_outputs")
+            }
+            add_bytes(
+                "metadata-relevant",
+                json.dumps(relevant_metadata, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+            )
+        except (OSError, json.JSONDecodeError):
+            add_bytes("metadata.json", metadata_path.read_bytes())
+
+    slide_state_path = job_dir / "slide_ai_state.json"
+    if slide_state_path.exists():
+        try:
+            slide_state = json.loads(slide_state_path.read_text(encoding="utf-8"))
+            target_outputs = {
+                slide: (state or {}).get("target_outputs") or {}
+                for slide, state in (slide_state.get("slides") or {}).items()
+            }
+            add_bytes(
+                "slide-ai-target-outputs",
+                json.dumps(target_outputs, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+            )
+        except (OSError, json.JSONDecodeError):
+            add_bytes("slide_ai_state.json", slide_state_path.read_bytes())
+
+    overrides_dir = job_dir / "overrides"
+    if overrides_dir.exists():
+        for path in sorted(item for item in overrides_dir.rglob("*") if item.is_file()):
+            add_bytes(path.relative_to(job_dir).as_posix(), path.read_bytes())
+    return digest.hexdigest()
+
+
+def _generated_is_current(job_dir: Path, input_signature: str | None = None) -> bool:
+    generated = _generated_ppt_path(job_dir)
+    metadata_path = _generated_metadata_path(job_dir)
+    if not generated.exists() or not metadata_path.exists():
+        return False
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    expected = input_signature or _generation_input_signature(job_dir)
+    return bool(expected) and metadata.get("input_signature") == expected
+
+
+def _discard_stale_generated_output(job_dir: Path) -> None:
+    if _generated_is_current(job_dir):
+        return
+    for path in (_generated_ppt_path(job_dir), _generated_metadata_path(job_dir)):
+        if path.exists() and path.is_file():
+            path.unlink()
 
 
 OUTPUT_NAME_SEPARATOR = "__"
@@ -1109,7 +1189,7 @@ def _save_generation_state(job_dir: Path, state: dict) -> None:
     tmp.replace(path)
 
 
-def _init_generation_state(job_dir: Path) -> None:
+def _init_generation_state(job_dir: Path, input_signature: str = "") -> None:
     _save_generation_state(
         job_dir,
         {
@@ -1117,6 +1197,7 @@ def _init_generation_state(job_dir: Path) -> None:
             "active": True,
             "message": "Aguardando geracao do PPT.",
             "created_at": _now_iso(),
+            "input_signature": input_signature or _generation_input_signature(job_dir),
             "progress": {"completed": 0, "total": 0, "percent": 0, "phase": "queued"},
         },
     )
@@ -1140,8 +1221,10 @@ def _generate_job_output(job_dir: Path) -> None:
     datasource_path = job_dir / "datasources.zip"
     if not pptx_path.exists() or not datasource_path.exists():
         raise FileNotFoundError("Job nao encontrado.")
+    input_signature = _generation_input_signature(job_dir)
     state = _load_generation_state(job_dir)
     state.update({"status": "running", "active": True, "message": "Gerando PPT atualizado."})
+    state["input_signature"] = input_signature
     _save_generation_state(job_dir, state)
     manual_sources = _manual_sources_for_job(job_dir)
     selected_slides = _selected_slides_for_job(job_dir)
@@ -1162,8 +1245,13 @@ def _generate_job_output(job_dir: Path) -> None:
     except (EmbeddedWorkbookWriterUnavailable, ChartSheetUnresolvedError) as exc:
         raise RuntimeError(str(exc)) from exc
     file_name = _output_file_name(job_dir)
+    if _generation_input_signature(job_dir) != input_signature:
+        raise RuntimeError("O projeto foi alterado durante a geracao. Gere novamente para incluir as mudancas.")
     _generated_ppt_path(job_dir).write_bytes(output)
-    _generated_metadata_path(job_dir).write_text(json.dumps({"file_name": file_name}, ensure_ascii=False), encoding="utf-8")
+    _generated_metadata_path(job_dir).write_text(
+        json.dumps({"file_name": file_name, "input_signature": input_signature}, ensure_ascii=False),
+        encoding="utf-8",
+    )
     _save_project_run(job_dir, output, analysis, file_name)
     _save_project_checkpoint(job_dir, status="completed")
     state = _load_generation_state(job_dir)
@@ -1215,11 +1303,13 @@ def _log_job_debug_event(job_dir: Path, event: str, payload: dict | None = None)
 
 
 def _call_with_job_debug(job_dir: Path, callback, *args, **kwargs):
-    token = set_ai_debug_log_path(_debug_log_path(job_dir))
+    debug_token = set_ai_debug_log_path(_debug_log_path(job_dir))
+    usage_token = set_ai_usage_log_path(job_dir / "logs" / "ai_usage.jsonl")
     try:
         return callback(*args, **kwargs)
     finally:
-        reset_ai_debug_log_path(token)
+        reset_ai_usage_log_path(usage_token)
+        reset_ai_debug_log_path(debug_token)
 
 
 def _init_preview_processing_state(job_dir: Path) -> None:
@@ -2374,14 +2464,20 @@ def _ai_payload_profile() -> dict:
 
 
 def _ai_input_stats(xlsx_prompt_texts: list[str], xlsx_manifests: list[dict], target_payloads: list[dict]) -> dict:
+    dump_bytes = sum(len(text.encode("utf-8")) for text in xlsx_prompt_texts)
+    manifest_bytes = _json_size_bytes(xlsx_manifests)
+    target_bytes = _json_size_bytes(target_payloads)
     return {
         **_ai_payload_profile(),
+        "request_count": 1,
         "xlsx_dump_count": len(xlsx_prompt_texts),
-        "xlsx_dump_bytes_utf8": sum(len(text.encode("utf-8")) for text in xlsx_prompt_texts),
+        "xlsx_dump_bytes_utf8": dump_bytes,
         "xlsx_manifest_count": len(xlsx_manifests),
-        "xlsx_manifest_bytes_utf8": _json_size_bytes(xlsx_manifests),
+        "xlsx_manifest_bytes_utf8": manifest_bytes,
         "target_count": len(target_payloads),
-        "target_payload_bytes_utf8": _json_size_bytes(target_payloads),
+        "target_payload_bytes_utf8": target_bytes,
+        "content_bytes_utf8": dump_bytes + manifest_bytes + target_bytes,
+        "output_contract": "typed_cells_compact",
     }
 
 
@@ -2458,29 +2554,19 @@ def _run_slide_ai_review(
     signature = _slide_ai_signature(job_dir, analysis, slide_number, target_ids, combined_context)
     slide_state["ai_input_stats"] = _ai_input_stats(xlsx_prompt_texts, xlsx_manifests, target_payloads)
 
-    understanding = slide_state.get("understanding") if slide_state.get("understanding_signature") == signature else None
-    if not understanding:
-        understanding = _call_with_job_debug(
-            job_dir,
-            suggest_slide_understanding,
-            SlideUnderstandingInput(
-                slide_number=slide_number,
-                slide_text=_structured_titles(slide_targets),
-                targets=target_payloads,
-                xlsx_manifests=xlsx_manifests,
-                xlsx_dumps=xlsx_prompt_texts,
-                manual_context=combined_context,
-            ),
-            root=PROJECT_ROOT,
-        )
-        slide_state["understanding_signature"] = signature
+    # Uma unica chamada decide a fonte e monta a matriz. Antes, o mesmo dump e
+    # contrato eram enviados primeiro ao "understanding" e novamente ao builder.
+    understanding = {
+        "mode": "single_call",
+        "slide_number": slide_number,
+        "slide_text": _structured_titles(slide_targets),
+        "source_files": [manifest.get("file_name") for manifest in xlsx_manifests],
+        "manual_context": combined_context,
+    }
     slide_state["understanding"] = understanding
     slide_state["warnings"] = warnings
     slide_state["input_signature"] = signature
 
-    builder_manifests, builder_prompt_texts = _builder_payload_from_understanding(
-        understanding, xlsx_manifests, xlsx_dumps, xlsx_prompt_texts
-    )
     matrix_result = _call_with_job_debug(
         job_dir,
         build_slide_matrices_with_ai,
@@ -2488,8 +2574,8 @@ def _run_slide_ai_review(
             slide_number=slide_number,
             slide_understanding=understanding,
             targets=target_payloads,
-            xlsx_manifests=builder_manifests,
-            xlsx_dumps=builder_prompt_texts,
+            xlsx_manifests=xlsx_manifests,
+            xlsx_dumps=xlsx_prompt_texts,
             target_ids=[target.target_id for target in slide_targets],
             manual_context=combined_context,
         ),
@@ -2507,7 +2593,8 @@ def _run_slide_ai_review(
             continue
         target = targets_by_id.get(target_id)
         object_type = target.object_type if target is not None else str(output.get("object_type") or "chart")
-        errors = validate_typed_edit_data(output.get("final_edit_data") or {}, object_type=object_type, target=target)
+        output["final_edit_data"] = normalize_typed_edit_data(output.get("final_edit_data") or {})
+        errors = validate_typed_edit_data(output["final_edit_data"], object_type=object_type, target=target)
         source_file = str(output.get("source_file") or "")
         if not source_file:
             errors.append("A IA nao informou o XLSX de origem (source_file) para este target.")
@@ -2615,49 +2702,6 @@ def _dump_datasource_entries_for_ai_review(job_dir: Path, entries: list) -> list
     return output
 
 
-def _builder_payload_from_understanding(
-    understanding: dict,
-    manifests: list[dict],
-    dumps: list,
-    prompt_texts: list[str],
-) -> tuple[list[dict], list[str]]:
-    """O understanding acabou de classificar quais XLSX do slide tem partes uteis
-    (usable_parts). O dump textual e o item mais pesado do payload, e reenvia-lo
-    integralmente ao matrix builder duplicava o custo das duas chamadas. Aqui so
-    reenviamos os dumps dos arquivos que o proprio understanding julgou uteis; se
-    ele nao apontou nenhum (ou apontou todos), mantemos o conjunto completo."""
-    useful: set[str] = set()
-    for item in understanding.get("xlsx_understanding") or []:
-        if item.get("usable_parts"):
-            file_name = str(item.get("file_name") or "")
-            if file_name:
-                useful.add(file_name)
-                useful.add(Path(file_name).name)
-    if not useful:
-        return manifests, prompt_texts
-    keep_indexes = [
-        index
-        for index, dump in enumerate(dumps)
-        if dump.file_name in useful or Path(dump.file_name).name in useful
-    ]
-    if not keep_indexes or len(keep_indexes) == len(dumps):
-        return manifests, prompt_texts
-    kept_files = {dumps[index].file_name for index in keep_indexes}
-    filtered_manifests = [manifest for manifest in manifests if manifest.get("file_name") in kept_files]
-    filtered_texts = [prompt_texts[index] for index in keep_indexes if index < len(prompt_texts)]
-    if not filtered_texts:
-        return manifests, prompt_texts
-    log_debug_event(
-        "slide_matrix_dump_filter",
-        {
-            "dumps_before": len(dumps),
-            "dumps_after": len(filtered_texts),
-            "kept_files": sorted(kept_files),
-        },
-    )
-    return (filtered_manifests or manifests), filtered_texts
-
-
 def _relevant_datasource_entries_for_targets(
     targets: list,
     entries: list,
@@ -2683,8 +2727,36 @@ def _relevant_datasource_entries_for_targets(
 
 
 def _source_manifests_for_entries(sources: list, entries: list) -> list[dict]:
-    selected = {entry.zip_path for entry in entries}
-    return [xlsx_source_manifest(source) for source in sources if source.file_name in selected]
+    entries_by_path = {entry.zip_path: entry for entry in entries}
+    output: list[dict] = []
+    for source in sources:
+        entry = entries_by_path.get(source.file_name)
+        if entry is None:
+            continue
+        manifest = xlsx_source_manifest(source)
+        semantic = manifest.get("semantic_context") or {}
+        profile = manifest.get("structural_profile") or {}
+        output.append(
+            {
+                "file_name": manifest.get("file_name"),
+                "sheet_name": manifest.get("sheet_name"),
+                "used_range": manifest.get("used_range"),
+                "requested_range": str(getattr(entry, "cell_range", "") or ""),
+                "orientation": manifest.get("orientation"),
+                "semantic_context": {
+                    key: semantic.get(key)
+                    for key in ("table_title", "row_group_label", "context_text", "graph_id", "ppt_tag", "variable")
+                    if semantic.get(key)
+                },
+                "structural_profile": {
+                    "name": profile.get("name"),
+                    "recipe_hint": profile.get("recipe_hint") or {},
+                },
+                "categories": manifest.get("categories") or [],
+                "series": manifest.get("series") or [],
+            }
+        )
+    return output
 
 
 def _slide_datasource_summary(job_dir: Path, slide_numbers: list[int]) -> dict[int, dict]:
@@ -3685,7 +3757,7 @@ def _ppt_contract_for_target(target) -> dict:
                 "headers": ["", *target.expected_categories],
                 "rows": [
                     [target.expected_series[index] if index < len(target.expected_series) else "", *row]
-                    for index, row in enumerate(target.expected_values[:8])
+                    for index, row in enumerate(target.expected_values)
                 ],
             }
         return {
@@ -3693,11 +3765,11 @@ def _ppt_contract_for_target(target) -> dict:
             "headers": ["", *target.expected_series],
             "rows": [
                 [target.expected_categories[index] if index < len(target.expected_categories) else "", *row]
-                for index, row in enumerate(target.expected_values[:8])
+                for index, row in enumerate(target.expected_values)
             ],
         }
     if target.object_type == "table":
-        return {"orientation": "table_cells", "headers": [], "rows": target.table_cells[:8]}
+        return {"orientation": "table_cells", "headers": [], "rows": target.table_cells}
     return {"orientation": target.object_type, "headers": [], "rows": []}
 
 
@@ -4283,7 +4355,7 @@ def _ai_source_match_plausibility_floor() -> float:
 
 
 def _auto_source_match_review_enabled() -> bool:
-    return _env_bool("AUTO_PPT_AI_AUTO_SOURCE_REVIEW", True)
+    return _env_bool("AUTO_PPT_AI_AUTO_SOURCE_REVIEW", False)
 
 
 def _source_match_ai_enabled(metadata: dict) -> bool:

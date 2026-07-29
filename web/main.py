@@ -75,7 +75,7 @@ from worker.processor import (
     apply_typed_outputs_to_analysis,
     parse_slide_selection,
 )
-from web import auth, entra
+from web import audit, auth, entra
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -261,6 +261,10 @@ def _clear_session() -> Response:
     response.delete_cookie(auth.SESSION_COOKIE)
     response.delete_cookie(auth.HANDSHAKE_COOKIE)
     return response
+
+
+def _actor(request: Request) -> str:
+    return audit.actor_from(request.cookies, auth)
 
 
 def _safe_next(value: str) -> str:
@@ -717,6 +721,17 @@ async def override_target_datasource(
         _save_job_metadata(job_dir, metadata)
         _clear_ai_cache(job_dir, target_id=target_id)
         _clear_render_cache(job_dir)
+        audit.record(
+            job_dir,
+            _actor(request),
+            "trocou_planilha_do_grafico",
+            {
+                "target": target_id,
+                "planilha": filename,
+                "intervalo": cell_range.strip(),
+                "origem": "planilha ja enviada" if existing_source.strip() else "upload novo",
+            },
+        )
         ai_notice = ""
         if ai_configured(PROJECT_ROOT):
             try:
@@ -736,8 +751,9 @@ async def override_target_datasource(
 
 
 @app.get("/jobs/{job_id}/download")
-async def download(job_id: str) -> Response:
+async def download(request: Request, job_id: str) -> Response:
     job_dir = _job_dir(job_id)
+    audit.remember_actor(job_dir, _actor(request))
     generated = _generated_ppt_path(job_dir)
     if not generated.exists():
         await run_in_threadpool(_generate_job_output, job_dir)
@@ -749,8 +765,9 @@ async def download(job_id: str) -> Response:
 
 
 @app.post("/jobs/{job_id}/generate")
-async def start_generation(job_id: str) -> JSONResponse:
+async def start_generation(request: Request, job_id: str) -> JSONResponse:
     job_dir = _job_dir(job_id)
+    audit.remember_actor(job_dir, _actor(request))
     if _generated_ppt_path(job_dir).exists():
         return JSONResponse({"status": "complete", "download_url": f"/jobs/{job_id}/download"})
     state = _load_generation_state(job_dir)
@@ -2386,9 +2403,21 @@ def _set_target_state_response(
         state = _load_slide_ai_state(job_dir)
         slide_state = state.setdefault("slides", {}).setdefault(str(target.slide_number), {})
         approvals = slide_state.setdefault("target_approvals", {})
-        approvals[canonical_id] = {"approved": approved, "skipped": skipped, "updated_at": _now_iso()}
+        actor = _actor(request)
+        approvals[canonical_id] = {
+            "approved": approved,
+            "skipped": skipped,
+            "updated_at": _now_iso(),
+            "by": actor,
+        }
         _save_slide_ai_state(job_dir, state)
         _clear_render_cache(job_dir)
+        audit.record(
+            job_dir,
+            actor,
+            "aprovou_grafico" if approved else "pulou_grafico",
+            {"target": canonical_id, "slide": target.slide_number},
+        )
         _save_project_checkpoint(job_dir, status="in_progress")
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc), allow_ai=False)
@@ -2407,9 +2436,21 @@ def _set_slide_state_response(
         job_dir = _job_dir(job_id)
         state = _load_slide_ai_state(job_dir)
         slide_state = state.setdefault("slides", {}).setdefault(str(slide_number), {})
-        slide_state["approval"] = {"approved": approved, "skipped": skipped, "updated_at": _now_iso()}
+        actor = _actor(request)
+        slide_state["approval"] = {
+            "approved": approved,
+            "skipped": skipped,
+            "updated_at": _now_iso(),
+            "by": actor,
+        }
         _save_slide_ai_state(job_dir, state)
         _clear_render_cache(job_dir)
+        audit.record(
+            job_dir,
+            actor,
+            "aprovou_slide" if approved else "pulou_slide",
+            {"slide": slide_number},
+        )
         _save_project_checkpoint(job_dir, status="in_progress")
     except Exception as exc:
         return _render_preview(request, job_id, error=str(exc), allow_ai=False)
@@ -3461,10 +3502,13 @@ def _save_project_run(job_dir: Path, output: bytes, analysis: AnalysisResult, fi
     project = load_project(project_meta.get("squad", ""), project_meta.get("slug", ""))
     if project is None:
         return
+    generated_by = audit.remembered_actor(job_dir) or audit.ANONYMOUS_ACTOR
     run = create_run(
         project,
         {
             "job_id": metadata.get("job_id"),
+            "generated_by": generated_by,
+            "generated_by_identified": audit.is_identified(generated_by),
             "targets_found": analysis.target_count,
             "plans_generated": len(analysis.plans),
             "manual_overrides": sorted(_manual_source_names(job_dir)),
@@ -3558,7 +3602,15 @@ def _save_or_update_mapping_template(job_dir: Path, project, analysis: AnalysisR
             "last_pptx": (metadata.get("files") or {}).get("pptx", ""),
             "last_datasources": (metadata.get("files") or {}).get("datasources", ""),
             "selected_slides": _selected_slides_for_job(job_dir),
+            "last_trained_by": audit.remembered_actor(job_dir) or audit.ANONYMOUS_ACTOR,
+            "last_trained_at": datetime.now().isoformat(timespec="seconds"),
         },
+    )
+    audit.record(
+        job_dir,
+        audit.remembered_actor(job_dir),
+        "treinou_memoria_do_squad",
+        {"template": template_ref.slug, "entradas": len(existing_entries)},
     )
     metadata["mapping_template"] = {
         "squad": template_ref.squad,

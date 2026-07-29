@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
+import subprocess
+import sys
 from zipfile import ZIP_DEFLATED, ZipFile
 import unittest
 
@@ -14,6 +17,27 @@ from ppt_automator.xlsx_parser import ParsedXlsxTable
 
 
 class RegressionValidationTests(unittest.TestCase):
+    def test_structural_validator_import_does_not_require_pillow(self) -> None:
+        repository_root = Path(__file__).resolve().parents[1]
+        code = """
+import builtins
+real_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == "PIL" or name.startswith("PIL."):
+        raise ModuleNotFoundError("Pillow intentionally unavailable")
+    return real_import(name, *args, **kwargs)
+builtins.__import__ = guarded_import
+import ppt_automator.regression_validation
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=repository_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_accepts_intact_noop_package(self) -> None:
         pptx = _minimal_pptx()
 

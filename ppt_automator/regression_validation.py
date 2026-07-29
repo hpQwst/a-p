@@ -11,7 +11,6 @@ import re
 import xml.etree.ElementTree as ET
 
 import openpyxl
-from PIL import Image, ImageChops, ImageDraw
 
 from .archive_safety import validate_pptx_bytes
 from .engine import _workbook_matrix
@@ -132,6 +131,14 @@ def validate_rendered_slides(
     target_padding_in: float = 0.12,
 ) -> RenderRegressionReport:
     """Compara renders e rejeita mudancas visuais fora dos objetos atualizados."""
+
+    try:
+        from PIL import Image, ImageChops, ImageDraw
+    except ModuleNotFoundError as exc:
+        raise PptxRegressionError(
+            "A regressao visual requer Pillow. Instale-o apenas no ambiente "
+            "local de validacao com: python -m pip install Pillow."
+        ) from exc
 
     plan_list = list(plans)
     original_images = _rendered_slide_paths(Path(original_render_dir))

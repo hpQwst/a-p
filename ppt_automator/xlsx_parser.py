@@ -741,6 +741,8 @@ def _period_score(values: list[Any]) -> float:
 
 def _looks_like_period(value: Any) -> bool:
     text = _norm(value)
+    if re.fullmatch(r"(?:19|20)\d{2}", text):
+        return True
     if re.fullmatch(r"(JAN|FEV|FEB|MAR|ABR|APR|MAI|MAY|JUN|JUL|AGO|AUG|SET|SEP|OUT|OCT|NOV|DEZ|DEC)\s*\d{2,4}", text):
         return True
     if re.fullmatch(r"\d{1,2}[/-]\d{2,4}", text):
@@ -757,7 +759,7 @@ def _is_header_cell(value: Any) -> bool:
     text = _text(value)
     if not text:
         return False
-    return _to_number(text) is None
+    return _looks_like_period(value) or _to_number(text) is None
 
 
 def _has_numeric_or_text(values: list[Any]) -> bool:

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 import re
 
+from .ppt_chart_writer import resolved_series_number_formats
 from .table_normalizer import TransformPlan
 
 
@@ -41,38 +42,88 @@ def build_preview(plans: list[TransformPlan]) -> list[PreviewTarget]:
 
 
 def _matrix_for_preview(plan: TransformPlan) -> tuple[list[str], list[list[Any]]]:
-    fmt = _display_format(plan)
     if plan.object_type == "chart" and plan.orientation_ppt == "categories_rows_series_columns":
-        return ["", *plan.series], [[plan.categories[i], *[_display_value(value, fmt) for value in row]] for i, row in enumerate(plan.values)]
+        formats = resolved_series_number_formats(plan.target, plan)
+        return ["", *plan.series], [
+            [
+                plan.categories[i],
+                *[
+                    _display_chart_value(
+                        value,
+                        formats[column] if column < len(formats) else "0.0",
+                    )
+                    for column, value in enumerate(row)
+                ],
+            ]
+            for i, row in enumerate(plan.values)
+        ]
     if plan.object_type == "chart":
-        return ["", *plan.categories], [[plan.series[i], *[_display_value(value, fmt) for value in row]] for i, row in enumerate(plan.values)]
+        formats = resolved_series_number_formats(plan.target, plan)
+        return ["", *plan.categories], [
+            [
+                plan.series[i],
+                *[
+                    _display_chart_value(
+                        value,
+                        formats[i] if i < len(formats) else "0.0",
+                    )
+                    for value in row
+                ],
+            ]
+            for i, row in enumerate(plan.values)
+        ]
     if plan.values:
-        return plan.categories, [[_display_value(value, fmt) for value in row] for row in plan.values]
+        return plan.categories, [
+            [_display_table_value(value, plan.number_format) for value in row]
+            for row in plan.values
+        ]
     return [], []
 
 
-def _display_format(plan: TransformPlan) -> str:
-    """Espelha como o PowerPoint vai exibir os valores gravados (verbatim):
-    1 casa decimal, com '%' apenas se o template do grafico ja usar percentual."""
-    template = plan.target.value_format if plan.object_type == "chart" else plan.number_format
-    return "percent" if "%" in (template or "") else "decimal"
-
-
-def _display_value(value: Any, fmt: str) -> Any:
+def _display_chart_value(value: Any, number_format: str) -> Any:
     if value is None or value == "":
         return ""
     parsed = _to_number(value)
     if parsed is None:
-        # Texto (rotulos de tabela, etc.) permanece verbatim.
         return value
-    if fmt == "percent":
-        # Formato percentual do template: o PPT multiplica por 100 na exibicao.
-        return _format_pt_number(parsed * 100) + "%"
-    return _format_pt_number(parsed)
+    is_percent = "%" in (number_format or "")
+    decimals = _decimal_places(number_format)
+    displayed = parsed * 100 if is_percent else parsed
+    suffix = "%" if is_percent else ""
+    return _format_pt_number(
+        displayed,
+        decimals=decimals,
+        thousands="," in (number_format or ""),
+    ) + suffix
 
 
-def _format_pt_number(value: float) -> str:
-    return f"{value:.1f}".replace(".", ",")
+def _display_table_value(value: Any, number_format: str) -> Any:
+    if value is None:
+        return ""
+    if number_format == "thousands_pt_br":
+        try:
+            number = float(value)
+            if number.is_integer():
+                return _format_pt_number(number, decimals=0, thousands=True)
+        except (TypeError, ValueError):
+            pass
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return str(value).replace(".", ",")
+    return value
+
+
+def _decimal_places(number_format: str) -> int:
+    primary = str(number_format or "0.0").split(";", 1)[0]
+    primary = re.sub(r'"[^"]*"', "", primary)
+    match = re.search(r"\.([0#]+)", primary)
+    return len(match.group(1)) if match else 0
+
+
+def _format_pt_number(value: float, *, decimals: int, thousands: bool) -> str:
+    text = f"{value:,.{decimals}f}" if thousands else f"{value:.{decimals}f}"
+    return text.replace(",", "\0").replace(".", ",").replace("\0", ".")
 
 
 def _to_number(value: Any) -> float | None:

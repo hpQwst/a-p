@@ -54,6 +54,23 @@ class XlsxRangeParserTests(unittest.TestCase):
 
         self.assertEqual(parsed.categories, ["Nov/25", "Dez/25", "Jan/26"])
 
+    def test_numeric_year_headers_are_parsed_as_periods(self) -> None:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append([None, 2025, 2026])
+        ws.append(["a", 50, 20])
+
+        data = BytesIO()
+        wb.save(data)
+        wb.close()
+
+        parsed = parse_xlsx_table(data.getvalue(), file_name="y.xlsx")
+
+        self.assertEqual(parsed.orientation, "single_series_row_categories_columns")
+        self.assertEqual(parsed.categories, ["2025", "2026"])
+        self.assertEqual(parsed.series, ["a"])
+        self.assertEqual(parsed.values, [[50, 20]])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ from unittest.mock import patch
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import openpyxl
+from fastapi.responses import HTMLResponse
 from fastapi.testclient import TestClient
 
 from ppt_automator import project_store
@@ -285,6 +286,50 @@ class UserIsolationWebTests(unittest.TestCase):
         self.assertTrue(main._generated_is_current(job_dir))
         self.assertEqual((job_dir / "generated.pptx").read_bytes(), b"output")
 
+    def test_chart_format_override_saves_without_reanalyzing_the_job(self) -> None:
+        project = project_store.create_project("squad1", "Formato do grafico")
+        user = project_store.ensure_user("formato@qwst.co")
+        project_store.update_user(user.email, squad="squad1")
+        job_id = "7" * 32
+        job_dir = main.RUNTIME_ROOT / job_id
+        job_dir.mkdir()
+        metadata_path = job_dir / "metadata.json"
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "job_id": job_id,
+                    "project": {
+                        "squad": project.squad,
+                        "slug": project.slug,
+                        "name": project.name,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch.object(main, "_analysis_for_job", side_effect=AssertionError("nao deve analisar")),
+            patch.object(main, "_save_project_checkpoint"),
+            patch.object(main, "_render_preview", return_value=HTMLResponse("ok")),
+        ):
+            response = self.client_for(user.email).post(
+                f"/jobs/{job_id}/targets/S001_T001_CHART/chart-formats",
+                data={
+                    "series_label_0": "Promotor",
+                    "format_0": "percent",
+                    "series_label_1": "NPS",
+                    "format_1": "auto",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            metadata["chart_format_overrides"],
+            {"S001_T001_CHART": {"Promotor": "percent"}},
+        )
+
     def test_preview_uses_before_after_tables_and_download_cleanup(self) -> None:
         template = (main.APP_ROOT / "templates" / "preview.html").read_text(encoding="utf-8")
         javascript = (main.APP_ROOT / "static" / "app.js").read_text(encoding="utf-8")
@@ -297,6 +342,9 @@ class UserIsolationWebTests(unittest.TestCase):
         self.assertIn("O PPT foi gerado, mas o link de download nao ficou disponivel", javascript)
         self.assertIn("statusFailures >= 3", javascript)
         self.assertNotIn("window.location.assign(state.download_url)", javascript)
+        self.assertIn("Formato definido pelo sistema", template)
+        self.assertIn("/chart-formats?slide=", template)
+        self.assertIn('name="series_label_', template)
         self.assertIn("--accent-foreground", stylesheet)
         self.assertNotIn(':root[data-theme="dark"] button {', stylesheet)
 

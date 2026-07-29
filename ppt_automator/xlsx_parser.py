@@ -31,6 +31,7 @@ class ParsedXlsxTable:
     used_range: tuple[int, int, int, int] | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     preview_rows: list[list[Any]] = field(default_factory=list)
+    series_number_formats: list[str] = field(default_factory=list)
     # Abas existentes no arquivo. No ZIP com varias abas, cada ParsedXlsxTable
     # representa uma delas; a lista completa sustenta avisos e selecao manual.
     sheet_names: list[str] = field(default_factory=list)
@@ -132,14 +133,16 @@ def parse_datasource_zip(
 
 def _parse_worksheet(data_ws, formula_ws, file_name: str, sheet_names: list[str]) -> ParsedXlsxTable:
     """Monta a tabela de UMA aba ja aberta, sem reabrir o workbook."""
-    raw_rows = [list(row) for row in data_ws.iter_rows(values_only=True)]
+    raw_rows, raw_format_rows = _worksheet_rows_and_formats(data_ws)
     formula_all_rows = [list(row) for row in formula_ws.iter_rows(values_only=True)]
     trimmed_rows, used_range = _trim_table(raw_rows)
     formula_rows = _slice_rows(formula_all_rows, used_range)
+    format_rows = _slice_rows(raw_format_rows, used_range)
     metadata = _extract_metadata(trimmed_rows)
     parsed = _parse_rectangular_table(
         trimmed_rows,
         formula_rows,
+        format_rows,
         file_name=file_name,
         sheet_name=data_ws.title,
         used_range=used_range,
@@ -171,15 +174,18 @@ def parse_xlsx_table(
     if range_ref:
         trimmed_rows, used_range = _rows_from_range(data_ws, range_ref)
         formula_rows, _formula_used_range = _rows_from_range(formula_ws, range_ref)
+        format_rows = _format_rows(data_ws, used_range)
     else:
-        raw_rows = [list(row) for row in data_ws.iter_rows(values_only=True)]
+        raw_rows, raw_format_rows = _worksheet_rows_and_formats(data_ws)
         formula_all_rows = [list(row) for row in formula_ws.iter_rows(values_only=True)]
         trimmed_rows, used_range = _trim_table(raw_rows)
         formula_rows = _slice_rows(formula_all_rows, used_range)
+        format_rows = _slice_rows(raw_format_rows, used_range)
     metadata = _extract_metadata(trimmed_rows)
     parsed = _parse_rectangular_table(
         trimmed_rows,
         formula_rows,
+        format_rows,
         file_name=file_name,
         sheet_name=data_ws.title,
         used_range=used_range,
@@ -316,9 +322,36 @@ def _slice_rows(rows: list[list[Any]], used_range: tuple[int, int, int, int] | N
     return output
 
 
+def _format_rows(worksheet: Any, used_range: tuple[int, int, int, int] | None) -> list[list[str]]:
+    if used_range is None:
+        return []
+    min_row, min_col, max_row, max_col = used_range
+    return [
+        [str(cell.number_format or "") for cell in row]
+        for row in worksheet.iter_rows(
+            min_row=min_row,
+            max_row=max_row,
+            min_col=min_col,
+            max_col=max_col,
+        )
+    ]
+
+
+def _worksheet_rows_and_formats(
+    worksheet: Any,
+) -> tuple[list[list[Any]], list[list[str]]]:
+    value_rows: list[list[Any]] = []
+    format_rows: list[list[str]] = []
+    for row in worksheet.iter_rows():
+        value_rows.append([cell.value for cell in row])
+        format_rows.append([str(cell.number_format or "") for cell in row])
+    return value_rows, format_rows
+
+
 def _parse_rectangular_table(
     rows: list[list[Any]],
     formula_rows: list[list[Any]],
+    format_rows: list[list[str]],
     file_name: str,
     sheet_name: str,
     used_range: tuple[int, int, int, int] | None,
@@ -369,7 +402,7 @@ def _parse_rectangular_table(
 
     label_col = _find_label_col(rows, header_row_index, header_start_col)
     header_values = [_text(value) for value in rows[header_row_index][header_start_col : header_end_col + 1]]
-    data_items: list[tuple[str, list[Any], list[Any]]] = []
+    data_items: list[tuple[str, list[Any], list[Any], list[str]]] = []
     for row_index in range(header_row_index + 1, len(rows)):
         row = rows[row_index]
         values = list(row[header_start_col : header_end_col + 1])
@@ -380,9 +413,13 @@ def _parse_rectangular_table(
         if row_index < len(formula_rows):
             formula_row = formula_rows[row_index]
             formula_values = list(formula_row[header_start_col : header_end_col + 1])
+        format_values: list[str] = []
+        if row_index < len(format_rows):
+            format_row = format_rows[row_index]
+            format_values = list(format_row[header_start_col : header_end_col + 1])
         if not label and _looks_like_nps_row(values, formula_values, data_items):
             label = "NPS"
-        data_items.append((label, values, formula_values))
+        data_items.append((label, values, formula_values, format_values))
 
     categories_in_header = _period_score(header_values) >= 0.45
     labels = [item[0] for item in data_items]
@@ -393,16 +430,30 @@ def _parse_rectangular_table(
         series = [labels[0] or "Valor"]
         values = [data_items[0][1]]
         categories = header_values
+        series_number_formats = [_dominant_number_format(data_items[0][3])]
     elif categories_in_header and not labels_are_categories:
         orientation = "series_rows_categories_columns"
         categories = header_values
-        series = [_series_label(label, values, formulas, index) for index, (label, values, formulas) in enumerate(data_items)]
+        series = [
+            _series_label(label, values, formulas, index)
+            for index, (label, values, formulas, _formats) in enumerate(data_items)
+        ]
         values = [item[1] for item in data_items]
+        series_number_formats = [_dominant_number_format(item[3]) for item in data_items]
     else:
         orientation = "categories_rows_series_columns"
-        categories = [label or f"Linha {index + 1}" for index, (label, _values, _formulas) in enumerate(data_items)]
+        categories = [
+            label or f"Linha {index + 1}"
+            for index, (label, _values, _formulas, _formats) in enumerate(data_items)
+        ]
         series = header_values
         values = [item[1] for item in data_items]
+        series_number_formats = [
+            _dominant_number_format(
+                [item[3][column] for item in data_items if column < len(item[3])]
+            )
+            for column in range(len(series))
+        ]
 
     return ParsedXlsxTable(
         source_id=_graph_id(Path(file_name).stem),
@@ -415,7 +466,18 @@ def _parse_rectangular_table(
         used_range=used_range,
         metadata=metadata,
         preview_rows=_preview_rows(categories, series, values, orientation),
+        series_number_formats=series_number_formats,
     )
+
+
+def _dominant_number_format(formats: list[str]) -> str:
+    meaningful = [str(fmt or "").strip() for fmt in formats if str(fmt or "").strip().lower() not in {"", "general"}]
+    if not meaningful:
+        return ""
+    counts: dict[str, int] = {}
+    for fmt in meaningful:
+        counts[fmt] = counts.get(fmt, 0) + 1
+    return max(counts, key=lambda fmt: (counts[fmt], -meaningful.index(fmt)))
 
 
 def _parse_key_value_rows(rows: list[list[Any]]) -> tuple[list[str], list[list[Any]]] | None:
@@ -562,7 +624,7 @@ def _series_label(label: str, values: list[Any], formulas: list[Any], index: int
     return f"Serie {index + 1}"
 
 
-def _looks_like_nps_row(values: list[Any], formulas: list[Any], previous: list[tuple[str, list[Any], list[Any]]]) -> bool:
+def _looks_like_nps_row(values: list[Any], formulas: list[Any], previous: list[tuple]) -> bool:
     formula_text = " ".join(_text(value) for value in formulas)
     if re.search(r"\([A-Z]+\d+-[A-Z]+\d+\)\*100", formula_text, flags=re.IGNORECASE):
         return True
@@ -571,7 +633,8 @@ def _looks_like_nps_row(values: list[Any], formulas: list[Any], previous: list[t
         return False
     previous_values = [
         number
-        for _label, row_values, _formula_values in previous
+        for item in previous
+        for row_values in [item[1]]
         for number in (_to_number(value) for value in row_values)
         if number is not None
     ]

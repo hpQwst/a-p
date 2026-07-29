@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict, OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -41,7 +41,7 @@ from ppt_automator.ai_debug import (
     set_ai_usage_log_path,
 )
 from ppt_automator.embedded_workbook_writer import EmbeddedWorkbookWriterUnavailable
-from ppt_automator.ppt_chart_writer import ChartSheetUnresolvedError
+from ppt_automator.ppt_chart_writer import ChartSheetUnresolvedError, resolved_series_number_formats
 from ppt_automator.ai_mapper import suggest_source_matches_with_ai
 from ppt_automator.ai_slide_matrix_builder import SlideMatrixBuildInput, build_slide_matrices_with_ai
 from ppt_automator.ai_transform import suggest_transform_diagnostics
@@ -951,6 +951,68 @@ async def override_target_datasource(
     )
 
 
+@app.post("/jobs/{job_id}/targets/{target_id}/chart-formats", response_class=HTMLResponse)
+async def update_chart_formats(request: Request, job_id: str, target_id: str) -> HTMLResponse:
+    try:
+        job_dir = _job_dir(job_id)
+        _validate_target_id(target_id)
+        form = await request.form()
+        allowed = {"auto", "percent", "number"}
+        indexes = sorted(
+            {
+                int(match.group(1))
+                for key in form.keys()
+                if (match := re.fullmatch(r"format_(\d+)", str(key))) is not None
+            }
+        )
+        if not indexes or len(indexes) > 256:
+            raise ValueError("Series do grafico nao encontradas.")
+        labels = {
+            index: str(form.get(f"series_label_{index}") or "").strip()[:200]
+            for index in indexes
+        }
+        label_counts = {
+            label: sum(1 for candidate in labels.values() if candidate == label)
+            for label in labels.values()
+            if label
+        }
+        overrides: dict[str, str] = {}
+        for index in indexes:
+            mode = str(form.get(f"format_{index}") or "auto").strip().lower()
+            if mode not in allowed:
+                raise ValueError("Formato invalido.")
+            if mode != "auto":
+                label = labels[index]
+                key = label if label and label_counts.get(label) == 1 else f"__index_{index}"
+                overrides[key] = mode
+
+        metadata = _load_job_metadata(job_dir)
+        all_overrides = dict(metadata.get("chart_format_overrides") or {})
+        if overrides:
+            all_overrides[target_id] = overrides
+        else:
+            all_overrides.pop(target_id, None)
+        metadata["chart_format_overrides"] = all_overrides
+        _save_job_metadata(job_dir, metadata)
+        _clear_render_cache(job_dir)
+        _discard_stale_generated_output(job_dir)
+        audit.record(
+            job_dir,
+            _actor(request),
+            "ajustou_formato_do_grafico",
+            {"target": target_id, "series": overrides},
+        )
+        _save_project_checkpoint(job_dir, status="in_progress", reason="formato_grafico")
+    except Exception as exc:
+        return _render_preview(request, job_id, error=str(exc), allow_ai=False)
+    return _render_preview(
+        request,
+        job_id,
+        notice="Formato das series salvo. Automático continua usando primeiro o contrato do PowerPoint.",
+        allow_ai=False,
+    )
+
+
 @app.get("/jobs/{job_id}/download")
 async def download(request: Request, job_id: str) -> Response:
     job_dir = _job_dir(job_id)
@@ -1091,7 +1153,7 @@ def _generation_input_signature(job_dir: Path, *, include_mapping_template: bool
     if metadata_path.exists():
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            metadata_keys = ["slides", "apply_slide_ai_outputs"]
+            metadata_keys = ["slides", "apply_slide_ai_outputs", "chart_format_overrides"]
             if include_mapping_template:
                 metadata_keys.append("mapping_template")
             relevant_metadata = {key: metadata.get(key) for key in metadata_keys}
@@ -1237,6 +1299,7 @@ def _generate_job_output(job_dir: Path) -> None:
     ai_diagnostics, _ai_status = _ai_diagnostics_for_job(job_dir, analysis, allow_ai=False)
     analysis = apply_ai_recommendations_to_analysis(analysis, ai_diagnostics)
     analysis = apply_typed_outputs_to_analysis(analysis, _slide_ai_target_outputs(job_dir))
+    analysis = _apply_chart_format_overrides(analysis, _load_job_metadata(job_dir))
     try:
         output = generate_updated_pptx(
             pptx_path.read_bytes(),
@@ -2159,6 +2222,7 @@ def _analysis_for_job(
         analysis = apply_ai_recommendations_to_analysis(analysis, _load_ai_diagnostics(job_dir))
     if apply_slide_outputs:
         analysis = apply_typed_outputs_to_analysis(analysis, _slide_ai_target_outputs(job_dir))
+    analysis = _apply_chart_format_overrides(analysis, metadata)
     return analysis, mapping_status, mapping_candidates, pause_for_mapping
 
 
@@ -3256,6 +3320,7 @@ def _cards_by_slide(
                 "has_plan": item is not None,
                 "datasource": datasource,
                 "chart_shape": _chart_shape_for_target(target),
+                "series_formats": _chart_series_format_controls(plan) if plan and target.object_type == "chart" else [],
                 "action": item.action if item else "aguardando_datasource",
                 "reason": item.reason if item else "Nenhum datasource compativel foi escolhido automaticamente.",
                 "confidence": item.confidence if item else None,
@@ -3286,6 +3351,56 @@ def _cards_by_slide(
             }
         )
     return cards
+
+
+def _apply_chart_format_overrides(analysis: AnalysisResult, metadata: dict) -> AnalysisResult:
+    configured = metadata.get("chart_format_overrides") or {}
+    plans = [
+        replace(
+            plan,
+            series_format_overrides={
+                str(key): str(value)
+                for key, value in (configured.get(plan.target_id) or {}).items()
+                if str(value) in {"percent", "number"}
+            },
+        )
+        if plan.object_type == "chart"
+        else plan
+        for plan in analysis.plans
+    ]
+    return replace(analysis, plans=plans)
+
+
+def _chart_series_format_controls(plan) -> list[dict]:
+    automatic_formats = resolved_series_number_formats(
+        plan.target,
+        replace(plan, series_format_overrides={}),
+    )
+    formats = resolved_series_number_formats(plan.target, plan)
+    controls = []
+    for index, label in enumerate(plan.series):
+        override = (
+            plan.series_format_overrides.get(label)
+            or plan.series_format_overrides.get(f"__index_{index}")
+            or "auto"
+        )
+        number_format = formats[index] if index < len(formats) else "0.0"
+        automatic_format = (
+            automatic_formats[index]
+            if index < len(automatic_formats)
+            else "0.0"
+        )
+        controls.append(
+            {
+                "index": index,
+                "label": label or f"Série {index + 1}",
+                "mode": override,
+                "effective_format": number_format,
+                "effective_label": "Percentual" if "%" in number_format else "Número",
+                "automatic_label": "Percentual" if "%" in automatic_format else "Número",
+            }
+        )
+    return controls
 
 
 def _ai_diagnostics_for_job(

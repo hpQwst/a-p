@@ -2493,6 +2493,47 @@ body:not(.show-advanced) .advanced-only {
   border-left: 3px solid var(--wire);
 }
 
+.chart-format-panel {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.chart-format-panel > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.chart-format-panel details summary {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.chart-format-panel form {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.chart-format-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.chart-format-grid label {
+  display: grid;
+  gap: 5px;
+}
+
+.chart-format-grid label > span {
+  font-weight: 700;
+}
+
 .target-preview-table {
   margin-top: 2px;
   max-height: 360px;

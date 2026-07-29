@@ -34,6 +34,7 @@ class TransformPlan:
     reason: str
     preserve_percentage_decimal: bool = False
     number_format: str = ""
+    series_format_overrides: dict[str, str] = field(default_factory=dict)
     typed_edit_data: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 

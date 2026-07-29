@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 from zipfile import ZipFile
 import re
+import unicodedata
 import xml.etree.ElementTree as ET
 
 
@@ -14,22 +15,66 @@ from .table_normalizer import TransformPlan
 
 
 
-PERCENT_FORMAT = "0.0%"
+PERCENT_FORMAT = "0%"
 DECIMAL_FORMAT = "0.0"
 
 
 def effective_value_format(template_format: str) -> str:
-    """Formato de EXIBICAO do grafico: sempre 1 casa decimal.
-
-    O valor gravado no cache/workbook e sempre verbatim (precisao total, para o
-    'Editar dados'); o formatCode so controla a exibicao. Preservamos o carater
-    de percentual apenas quando o proprio template ja usa '%' - nunca inventamos
-    um '%' que nao existe no contrato do PPT nem no XLSX.
-    """
+    """Preserva o contrato visual existente; General cai para decimal legivel."""
     fmt = (template_format or "").strip()
-    if "%" in fmt:
-        return PERCENT_FORMAT
-    return DECIMAL_FORMAT
+    return fmt if _meaningful_number_format(fmt) else DECIMAL_FORMAT
+
+
+def resolved_series_number_formats(target: PptTarget, plan: TransformPlan) -> list[str]:
+    """Resolve cada serie: override manual > PPT > XLSX > inferencia conservadora."""
+    target_labels = list(target.expected_series or [])
+    target_formats = list(target.series_value_formats or [])
+    target_global_format = (
+        target.value_format
+        if not any(_meaningful_number_format(fmt) for fmt in target_formats)
+        else ""
+    )
+    source_labels = list(plan.datasource.series or [])
+    source_formats = list(plan.datasource.series_number_formats or [])
+    explicit = (
+        plan.number_format
+        if plan.number_format and plan.number_format != "thousands_pt_br"
+        else ""
+    )
+    output: list[str] = []
+    for index, label in enumerate(plan.series):
+        target_format = _format_for_series(
+            label,
+            index,
+            target_labels,
+            target_formats,
+            allow_index_fallback=len(target_labels) == len(plan.series),
+        )
+        source_format = _format_for_series(
+            label,
+            index,
+            source_labels,
+            source_formats,
+            allow_index_fallback=len(source_labels) == len(plan.series),
+        )
+        automatic = next(
+            (
+                fmt
+                for fmt in (target_format, target_global_format, source_format, explicit)
+                if _meaningful_number_format(fmt)
+            ),
+            "",
+        )
+        if not automatic:
+            automatic = _inferred_series_format(plan, index, label)
+        mode = (
+            plan.series_format_overrides.get(label)
+            or plan.series_format_overrides.get(_series_key(label))
+            or plan.series_format_overrides.get(f"__index_{index}")
+            or "auto"
+        )
+        output.append(_format_for_mode(automatic, mode))
+    return output
 
 
 class ChartSheetUnresolvedError(RuntimeError):
@@ -58,28 +103,28 @@ def _updated_chart_xml_bytes(zf: ZipFile, target: PptTarget, plan: TransformPlan
             f"para este alvo; revise o template ou aplique um XLSX manualmente."
         )
     sheet = _sheet_ref(target.sheet_name)
-    explicit = plan.number_format if plan.number_format and plan.number_format != "thousands_pt_br" else ""
-    number_format = explicit or effective_value_format(target.value_format)
+    series_number_formats = resolved_series_number_formats(target, plan)
 
     if plan.orientation_ppt == "series_rows_categories_columns":
         end_col = _excel_col(len(plan.categories) + 1)
         for index, ser in enumerate(series_elements[: len(plan.series)]):
             excel_row = index + 2
             values = plan.values[index] if index < len(plan.values) else []
+            number_format = series_number_formats[index] if index < len(series_number_formats) else DECIMAL_FORMAT
             _update_series_text(ser, f"{sheet}!$A${excel_row}", plan.series[index])
             _update_series_categories(ser, f"{sheet}!$B$1:${end_col}$1", plan.categories)
             _update_series_values(ser, f"{sheet}!$B${excel_row}:${end_col}${excel_row}", values, number_format)
+            _update_series_data_label_number_format(ser, number_format)
     else:
         end_row = len(plan.categories) + 1
         for index, ser in enumerate(series_elements[: len(plan.series)]):
             excel_col = _excel_col(index + 2)
             values = [row[index] if index < len(row) else None for row in plan.values]
+            number_format = series_number_formats[index] if index < len(series_number_formats) else DECIMAL_FORMAT
             _update_series_text(ser, f"{sheet}!${excel_col}$1", plan.series[index])
             _update_series_categories(ser, f"{sheet}!$A$2:$A${end_row}", plan.categories)
             _update_series_values(ser, f"{sheet}!${excel_col}$2:${excel_col}${end_row}", values, number_format)
-
-    if number_format:
-        _update_data_label_number_format(root, number_format)
+            _update_series_data_label_number_format(ser, number_format)
 
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
@@ -172,14 +217,69 @@ def _set_format_code(cache: ET.Element, number_format: str) -> None:
     format_el.text = number_format
 
 
-def _update_data_label_number_format(root: ET.Element, number_format: str) -> None:
-    for d_lbls in root.findall(".//c:dLbls", NS):
-        num_fmt = d_lbls.find("./c:numFmt", NS)
-        if num_fmt is None:
-            num_fmt = ET.Element(f"{{{CHART_NS}}}numFmt")
-            d_lbls.insert(0, num_fmt)
-        num_fmt.attrib["formatCode"] = number_format
-        num_fmt.attrib["sourceLinked"] = "0"
+def _update_series_data_label_number_format(ser: ET.Element, number_format: str) -> None:
+    if not number_format:
+        return
+    d_lbls = ser.find("./c:dLbls", NS)
+    if d_lbls is None:
+        d_lbls = ET.SubElement(ser, f"{{{CHART_NS}}}dLbls")
+    num_fmt = d_lbls.find("./c:numFmt", NS)
+    if num_fmt is None:
+        num_fmt = ET.Element(f"{{{CHART_NS}}}numFmt")
+        d_lbls.insert(0, num_fmt)
+    num_fmt.attrib["formatCode"] = number_format
+    num_fmt.attrib["sourceLinked"] = "0"
+
+
+def _format_for_series(
+    label: str,
+    index: int,
+    labels: list[str],
+    formats: list[str],
+    *,
+    allow_index_fallback: bool,
+) -> str:
+    wanted = _series_key(label)
+    if wanted:
+        for candidate_index, candidate in enumerate(labels):
+            if _series_key(candidate) == wanted and candidate_index < len(formats):
+                return formats[candidate_index]
+    if allow_index_fallback and index < len(formats):
+        return formats[index]
+    return ""
+
+
+def _series_key(label: str) -> str:
+    text = unicodedata.normalize("NFKD", str(label or "")).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "", text.casefold())
+
+
+def _meaningful_number_format(number_format: str) -> bool:
+    return str(number_format or "").strip().lower() not in {"", "general", "@"}
+
+
+def _format_for_mode(automatic: str, mode: str) -> str:
+    normalized_mode = str(mode or "auto").strip().lower()
+    if normalized_mode == "percent":
+        return automatic if "%" in automatic else PERCENT_FORMAT
+    if normalized_mode == "number":
+        return automatic if _meaningful_number_format(automatic) and "%" not in automatic else DECIMAL_FORMAT
+    return effective_value_format(automatic)
+
+
+def _inferred_series_format(plan: TransformPlan, index: int, label: str) -> str:
+    values = (
+        plan.values[index]
+        if plan.orientation_ppt == "series_rows_categories_columns" and index < len(plan.values)
+        else [row[index] for row in plan.values if index < len(row)]
+    )
+    numeric = [_to_float(value) for value in values]
+    numeric = [value for value in numeric if value is not None]
+    label_key = _series_key(label)
+    percent_hint = any(token in label_key for token in ("percent", "share", "taxa", "proporcao"))
+    if numeric and percent_hint and all(abs(value) <= 1 for value in numeric):
+        return PERCENT_FORMAT
+    return DECIMAL_FORMAT
 
 
 def _chart_value_text(value: Any, numeric: bool, number_format: str = "") -> str:

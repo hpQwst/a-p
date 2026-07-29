@@ -75,6 +75,7 @@ class PptTarget:
     expected_series: list[str] = field(default_factory=list)
     expected_values: list[list[Any]] = field(default_factory=list)
     value_format: str = ""
+    series_value_formats: list[str] = field(default_factory=list)
     chart_kind: str = ""
     chart_series_colors: list[str] = field(default_factory=list)
     table_cells: list[list[str]] = field(default_factory=list)
@@ -244,6 +245,7 @@ def _chart_target(
     expected_values: list[list[Any]] = []
     orientation = ""
     value_format = ""
+    series_value_formats: list[str] = []
     chart_kind = ""
     chart_series_colors: list[str] = []
     if chart_path in zf.namelist():
@@ -254,6 +256,7 @@ def _chart_target(
         expected_values = structure["values"]
         orientation = structure["orientation"]
         value_format = structure["value_format"]
+        series_value_formats = structure.get("series_value_formats", [])
         chart_kind = structure.get("chart_kind", "")
         chart_series_colors = structure.get("series_colors", [])
 
@@ -279,6 +282,7 @@ def _chart_target(
         expected_series=expected_series,
         expected_values=expected_values,
         value_format=value_format,
+        series_value_formats=series_value_formats,
         chart_kind=chart_kind,
         chart_series_colors=chart_series_colors,
     )
@@ -334,13 +338,15 @@ def _read_chart_structure(zf: ZipFile, chart_path: str, workbook_path: str) -> d
     else:
         values = values_by_series
     kind, series_colors = _chart_kind_and_colors(chart_root, series_elements)
+    series_value_formats = _chart_series_value_formats(chart_root)
     return {
         "sheet_name": sheet_name or (workbook.worksheets[0].title if workbook else ""),
         "categories": categories,
         "series": series_labels,
         "values": values,
         "orientation": orientation,
-        "value_format": _chart_value_format(chart_root, series_elements),
+        "value_format": _chart_value_format(chart_root, series_elements, series_value_formats),
+        "series_value_formats": series_value_formats,
         "chart_kind": kind,
         "series_colors": series_colors,
     }
@@ -385,16 +391,46 @@ def _chart_kind_and_colors(
     return kind, colors
 
 
-def _chart_value_format(chart_root: ET.Element, series_elements: list[ET.Element]) -> str:
+def _chart_series_value_formats(chart_root: ET.Element) -> list[str]:
+    """Formato visual efetivo de cada serie, na ordem fisica do chart XML."""
+    output: list[str] = []
+    plot_area = chart_root.find(".//c:plotArea", NS)
+    if plot_area is None:
+        return output
+    for chart_group in list(plot_area):
+        if not chart_group.tag.rsplit("}", 1)[-1].endswith("Chart"):
+            continue
+        group_num_fmt = chart_group.find("./c:dLbls/c:numFmt", NS)
+        group_format = str(group_num_fmt.attrib.get("formatCode") or "") if group_num_fmt is not None else ""
+        for ser in chart_group.findall("./c:ser", NS):
+            series_num_fmt = ser.find("./c:dLbls/c:numFmt", NS)
+            series_format = (
+                str(series_num_fmt.attrib.get("formatCode") or "")
+                if series_num_fmt is not None
+                else ""
+            )
+            cache_format = _node_text(ser.find("./c:val//c:numCache/c:formatCode", NS))
+            output.append(series_format or group_format or (cache_format if cache_format.lower() != "general" else ""))
+    return output
+
+
+def _chart_value_format(
+    chart_root: ET.Element,
+    series_elements: list[ET.Element],
+    series_value_formats: list[str] | None = None,
+) -> str:
     """Formato numerico que o template ja define para os valores (o 'contrato').
 
     Preferimos o formatCode do numCache da primeira serie; se ausente, o numFmt
     dos rotulos de dados. Serve para preservar o carater do formato (ex.: se o
     template genuinamente usa '%') sem inventar percentuais que nao existem.
     """
+    for fmt in series_value_formats or []:
+        if fmt and fmt.lower() != "general":
+            return fmt
     for ser in series_elements:
         fmt = _node_text(ser.find("./c:val//c:numCache/c:formatCode", NS))
-        if fmt:
+        if fmt and fmt.lower() != "general":
             return fmt
     num_fmt = chart_root.find(".//c:dLbls/c:numFmt", NS)
     if num_fmt is not None and num_fmt.attrib.get("formatCode"):

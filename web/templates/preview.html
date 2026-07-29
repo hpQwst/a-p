@@ -463,6 +463,36 @@
                             {% endif %}
                           </div>
                         {% endif %}
+                        {% if item.series_formats %}
+                          <section class="chart-format-panel">
+                            <p>
+                              <strong>Formato definido pelo sistema:</strong>
+                              {% for series_format in item.series_formats %}
+                                <span>{{ series_format.label }}: {{ series_format.effective_label }}{% if not loop.last %} · {% endif %}</span>
+                              {% endfor %}
+                            </p>
+                            <details>
+                              <summary>Ajustar percentual ou número</summary>
+                              <form action="/jobs/{{ job_id }}/targets/{{ item.target }}/chart-formats?slide={{ slide }}" method="post" data-progress-message="Salvando formatos do gráfico...">
+                                <div class="chart-format-grid">
+                                  {% for series_format in item.series_formats %}
+                                    <label>
+                                      <span>{{ series_format.label }}</span>
+                                      <input type="hidden" name="series_label_{{ series_format.index }}" value="{{ series_format.label }}">
+                                      <select name="format_{{ series_format.index }}">
+                                        <option value="auto" {% if series_format.mode == 'auto' %}selected{% endif %}>Automático — {{ series_format.automatic_label }}</option>
+                                        <option value="percent" {% if series_format.mode == 'percent' %}selected{% endif %}>Percentual</option>
+                                        <option value="number" {% if series_format.mode == 'number' %}selected{% endif %}>Número</option>
+                                      </select>
+                                      <small>Formato efetivo: <code>{{ series_format.effective_format }}</code></small>
+                                    </label>
+                                  {% endfor %}
+                                </div>
+                                <button type="submit">Salvar formatos</button>
+                              </form>
+                            </details>
+                          </section>
+                        {% endif %}
                         {% if not item.has_plan and datasource_info.files %}
                           <div class="pick-source">
                             <strong>Qual planilha é este {% if item.object_type == 'table' %}quadro{% else %}gráfico{% endif %}?</strong>

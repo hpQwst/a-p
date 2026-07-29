@@ -12,46 +12,51 @@
     Rodar de novo publica uma versao nova.
 
 .EXAMPLE
-    .\infra\aws\deploy.ps1 -TeamPassword "senha-da-equipe"
+    .\infra\aws\deploy.ps1 -EntraTenantId "..." -EntraClientId "..." -EntraClientSecret "..." -EntraRedirectUri "https://.../auth/callback"
 #>
 param(
     [string]$AppName = "squad4e5-auto-ppt",
+    [string]$ExpectedAccountId = "134164930693",
     [string]$Region = "us-east-1",
-    [string]$TeamPassword = "",
     [string]$OpenAIKey = "",
     [string]$EntraTenantId = "",
     [string]$EntraClientId = "",
     [string]$EntraClientSecret = "",
     [string]$EntraRedirectUri = "",
+    [string]$BootstrapAdminEmails = "hugo.rocha@qwst.co",
     [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $SourceKey = "source/source.zip"
+$AwsCli = "C:\Program Files\Amazon\AWSCLIV2\aws.exe"
 
 if (-not $AppName.StartsWith("squad4") -and -not $AppName.StartsWith("squad5")) {
     throw "AppName precisa comecar com squad4/squad5. Recursos fora disso pertencem a outras pessoas."
 }
-foreach ($tool in @("aws", "git")) {
-    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "$tool nao encontrado." }
-}
+if (-not (Test-Path -LiteralPath $AwsCli)) { throw "AWS CLI nao encontrada em $AwsCli." }
+if (-not (Get-Command "git" -ErrorAction SilentlyContinue)) { throw "git nao encontrado." }
 
-$AccountId = (aws sts get-caller-identity --query Account --output text).Trim()
+$AccountId = (& $AwsCli sts get-caller-identity --profile default --region $Region --query Account --output text).Trim()
+if ($AccountId -ne $ExpectedAccountId) {
+    throw "Conta AWS inesperada: $AccountId."
+}
 Write-Host "Conta $AccountId | regiao $Region | app $AppName" -ForegroundColor Cyan
 
 # --- 1. infraestrutura de build ------------------------------------------
 Write-Host "[1/5] Infraestrutura de build (ECR, bucket, CodeBuild)..." -ForegroundColor Cyan
-aws cloudformation deploy `
+& $AwsCli cloudformation deploy `
     --template-file (Join-Path $PSScriptRoot "build.yaml") `
     --stack-name "$AppName-build" `
     --capabilities CAPABILITY_NAMED_IAM `
+    --profile default `
     --region $Region `
     --parameter-overrides "AppName=$AppName" "SourceObjectKey=$SourceKey" | Out-Null
 
-$BuildBucket = aws cloudformation describe-stacks --stack-name "$AppName-build" --region $Region `
+$BuildBucket = & $AwsCli cloudformation describe-stacks --stack-name "$AppName-build" --profile default --region $Region `
     --query "Stacks[0].Outputs[?OutputKey=='BuildBucketName'].OutputValue" --output text
-$RepositoryUri = aws cloudformation describe-stacks --stack-name "$AppName-build" --region $Region `
+$RepositoryUri = & $AwsCli cloudformation describe-stacks --stack-name "$AppName-build" --profile default --region $Region `
     --query "Stacks[0].Outputs[?OutputKey=='RepositoryUri'].OutputValue" --output text
 
 # --- 2. empacota o commit atual ------------------------------------------
@@ -71,22 +76,22 @@ if (-not $SkipBuild) {
     if (-not (Test-Path $zipPath)) { throw "Falha ao empacotar o codigo." }
 
     Write-Host "[3/5] Enviando para s3://$BuildBucket/$SourceKey..." -ForegroundColor Cyan
-    aws s3 cp $zipPath "s3://$BuildBucket/$SourceKey" --region $Region | Out-Null
+    & $AwsCli s3 cp $zipPath "s3://$BuildBucket/$SourceKey" --profile default --region $Region | Out-Null
     Remove-Item $zipPath -Force
 
     # --- 3. build --------------------------------------------------------
     Write-Host "[4/5] Construindo a imagem no CodeBuild..." -ForegroundColor Cyan
-    $buildId = aws codebuild start-build `
+    $buildId = & $AwsCli codebuild start-build `
         --project-name "$AppName-build" `
         --environment-variables-override "name=IMAGE_TAG,value=$ImageTag,type=PLAINTEXT" `
-        --region $Region --query "build.id" --output text
+        --profile default --region $Region --query "build.id" --output text
     do {
         Start-Sleep -Seconds 10
-        $status = (aws codebuild batch-get-builds --ids $buildId --region $Region --query "builds[0].buildStatus" --output text).Trim()
+        $status = (& $AwsCli codebuild batch-get-builds --ids $buildId --profile default --region $Region --query "builds[0].buildStatus" --output text).Trim()
         Write-Host "      $status" -ForegroundColor DarkGray
     } while ($status -eq "IN_PROGRESS")
     if ($status -ne "SUCCEEDED") {
-        throw "Build falhou ($status). Logs: aws codebuild batch-get-builds --ids $buildId --region $Region"
+        throw "Build falhou ($status). Consulte o build $buildId no CodeBuild."
     }
 }
 
@@ -99,7 +104,6 @@ if (-not $OpenAIKey) {
     }
 }
 if (-not $OpenAIKey) { throw "Informe -OpenAIKey ou deixe OPENAI_API_KEY no .env." }
-if (-not $TeamPassword) { throw "Informe -TeamPassword: e a senha que a equipe vai digitar para entrar." }
 
 function Set-Secret([string]$Name, [string]$Value) {
     # Sem redirecionar stderr: no PowerShell 5.1 isso vira NativeCommandError e,
@@ -110,14 +114,17 @@ function Set-Secret([string]$Name, [string]$Value) {
     try {
         # list-secrets devolve vazio quando nao existe. describe-secret serviria,
         # mas escreve no stderr e polui a saida do deploy na primeira execucao.
-        $existing = aws secretsmanager list-secrets --region $Region `
+        $existing = & $AwsCli secretsmanager list-secrets --profile default --region $Region `
             --filters "Key=name,Values=$Name" --query "SecretList[?Name=='$Name'].ARN | [0]" --output text
         if ($LASTEXITCODE -eq 0 -and $existing -and $existing -ne "None") {
-            aws secretsmanager put-secret-value --secret-id $Name --secret-string $Value --region $Region | Out-Null
+            & $AwsCli secretsmanager put-secret-value --secret-id $Name --secret-string $Value --profile default --region $Region | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "Nao consegui atualizar o secret $Name." }
+            & $AwsCli secretsmanager tag-resource --secret-id ($existing.Trim()) --tags "Key=Name,Value=$AppName" --profile default --region $Region | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Nao consegui etiquetar o secret $Name." }
             return $existing.Trim()
         }
-        $created = aws secretsmanager create-secret --name $Name --secret-string $Value --region $Region --query ARN --output text
+        $created = & $AwsCli secretsmanager create-secret --name $Name --secret-string $Value `
+            --tags "Key=Name,Value=$AppName" --profile default --region $Region --query ARN --output text
         if ($LASTEXITCODE -ne 0 -or -not $created) { throw "Nao consegui criar o secret $Name." }
         return $created.Trim()
     }
@@ -127,11 +134,10 @@ function Set-Secret([string]$Name, [string]$Value) {
 }
 
 $OpenAISecretArn = Set-Secret "$AppName/openai-api-key" $OpenAIKey
-$TeamPasswordSecretArn = Set-Secret "$AppName/team-password" $TeamPassword
 
 # Chave de assinatura do cookie. Gerada uma vez e reaproveitada: trocar a cada
 # deploy derrubaria a sessao de quem estivesse usando.
-$sessionArn = aws secretsmanager list-secrets --region $Region `
+$sessionArn = & $AwsCli secretsmanager list-secrets --profile default --region $Region `
     --filters "Key=name,Values=$AppName/session-secret" `
     --query "SecretList[?Name=='$AppName/session-secret'].ARN | [0]" --output text
 if (-not $sessionArn -or $sessionArn -eq "None") {
@@ -140,42 +146,45 @@ if (-not $sessionArn -or $sessionArn -eq "None") {
     $sessionArn = Set-Secret "$AppName/session-secret" ([Convert]::ToBase64String($bytes))
 }
 $SessionSecretArn = $sessionArn.Trim()
+& $AwsCli secretsmanager tag-resource --secret-id $SessionSecretArn `
+    --tags "Key=Name,Value=$AppName" --profile default --region $Region | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Nao consegui etiquetar o secret de sessao." }
 
-# Login Microsoft e opcional: sem o client secret, a stack sobe so com a senha.
+# Login Microsoft e obrigatorio em producao. A senha compartilhada foi
+# desativada para preservar identidade nominal e isolamento por squad.
 $EntraSecretArn = ""
-if ($EntraClientSecret) {
-    if (-not $EntraTenantId -or -not $EntraClientId -or -not $EntraRedirectUri) {
-        throw "Para o login Microsoft informe também -EntraTenantId, -EntraClientId e -EntraRedirectUri."
-    }
-    if ($EntraRedirectUri -notmatch '^https://[^/]+/auth/callback$') {
-        throw "EntraRedirectUri deve ser https://<host>/auth/callback (recebido: $EntraRedirectUri)."
-    }
-    $EntraSecretArn = Set-Secret "$AppName/entra-client-secret" $EntraClientSecret
+if (-not $EntraClientSecret -or -not $EntraTenantId -or -not $EntraClientId -or -not $EntraRedirectUri) {
+    throw "Informe EntraTenantId, EntraClientId, EntraClientSecret e EntraRedirectUri. Login por senha esta desativado."
 }
+if ($EntraRedirectUri -notmatch '^https://[^/]+/auth/callback$') {
+    throw "EntraRedirectUri deve ser https://<host>/auth/callback (recebido: $EntraRedirectUri)."
+}
+$EntraSecretArn = Set-Secret "$AppName/entra-client-secret" $EntraClientSecret
 
 # --- 5. aplicacao ---------------------------------------------------------
 Write-Host "[5/5] Publicando a aplicacao..." -ForegroundColor Cyan
-aws cloudformation deploy `
+& $AwsCli cloudformation deploy `
     --template-file (Join-Path $PSScriptRoot "apprunner.yaml") `
     --stack-name "$AppName-stack" `
     --capabilities CAPABILITY_NAMED_IAM `
+    --profile default `
     --region $Region `
     --parameter-overrides `
         "AppName=$AppName" `
         "ImageUri=$ImageUri" `
         "OpenAISecretArn=$OpenAISecretArn" `
-        "TeamPasswordSecretArn=$TeamPasswordSecretArn" `
         "SessionSecretArn=$SessionSecretArn" `
         "EntraTenantId=$EntraTenantId" `
         "EntraClientId=$EntraClientId" `
         "EntraRedirectUri=$EntraRedirectUri" `
         "EntraClientSecretArn=$EntraSecretArn" `
+        "BootstrapAdminEmails=$BootstrapAdminEmails" `
         "BucketName=$AppName-$AccountId" | Out-Null
 
-$ServiceUrl = aws cloudformation describe-stacks --stack-name "$AppName-stack" --region $Region `
+$ServiceUrl = & $AwsCli cloudformation describe-stacks --stack-name "$AppName-stack" --profile default --region $Region `
     --query "Stacks[0].Outputs[?OutputKey=='ServiceUrl'].OutputValue" --output text
 
 Write-Host ""
 Write-Host "Pronto. Envie este endereco para a equipe:" -ForegroundColor Green
 Write-Host "  $ServiceUrl" -ForegroundColor Green
-Write-Host "A primeira visita pede a senha da equipe." -ForegroundColor Green
+Write-Host "A primeira visita usa a conta Microsoft e pede a escolha do squad." -ForegroundColor Green

@@ -54,6 +54,30 @@
     return (unit === 0 ? value : value.toFixed(1)) + " " + units[unit];
   }
 
+  function updateCombinedUploadSize() {
+    var form = document.querySelector("[data-combined-upload-warning-mb]");
+    var summary = document.querySelector("[data-upload-size-summary]");
+    if (!form || !summary) {
+      return;
+    }
+    var total = 0;
+    form.querySelectorAll("input[type='file']").forEach(function (input) {
+      Array.prototype.forEach.call(input.files || [], function (file) {
+        total += file.size || 0;
+      });
+    });
+    var thresholdMb = parseInt(form.getAttribute("data-combined-upload-warning-mb") || "250", 10);
+    var threshold = thresholdMb * 1024 * 1024;
+    summary.classList.toggle("warn", total > threshold);
+    if (!total) {
+      summary.textContent = "Selecione os arquivos para ver o tamanho combinado.";
+    } else if (total > threshold) {
+      summary.textContent = "Arquivos: " + formatBytes(total) + ". Caso grande: o processamento pode levar alguns minutos. O tamanho é só uma estimativa; a ferramenta também verifica slides e objetos.";
+    } else {
+      summary.textContent = "Tamanho combinado: " + formatBytes(total) + ".";
+    }
+  }
+
   function bindDropzones() {
     document.querySelectorAll("[data-dropzone]").forEach(function (card) {
       var input = card.querySelector("input[type='file']");
@@ -85,6 +109,7 @@
     var overlay = document.getElementById("progress-overlay");
     var label = document.getElementById("progress-message");
     var steps = document.getElementById("progress-steps");
+    var realProgress = document.getElementById("real-progress");
     if (!overlay) {
       return;
     }
@@ -94,7 +119,28 @@
     if (steps) {
       renderProgressSteps(steps, progressStepsForMessage(message || ""));
     }
+    if (realProgress) {
+      realProgress.hidden = true;
+    }
     overlay.hidden = false;
+  }
+
+  function setRealProgress(progress, countSuffix) {
+    var container = document.getElementById("real-progress");
+    var bar = document.getElementById("progress-bar");
+    var count = document.getElementById("progress-count");
+    if (!container || !bar || !progress) {
+      return;
+    }
+    var total = parseInt(progress.total || 0, 10);
+    var completed = parseInt(progress.completed || 0, 10);
+    var percent = Math.max(0, Math.min(100, parseInt(progress.percent || 0, 10)));
+    container.hidden = total <= 0;
+    bar.value = percent;
+    bar.textContent = percent + "%";
+    if (count) {
+      count.textContent = completed + " de " + total + " " + (countSuffix || "objetos") + " · " + percent + "%";
+    }
   }
 
   function progressStepsForMessage(message) {
@@ -240,6 +286,7 @@
   }
 
   function updateProcessingSlides(state) {
+    updatePreviewObjectProgress(state && state.progress ? state.progress : null);
     var slides = state && state.slides ? state.slides : {};
     Object.keys(slides).forEach(function (key) {
       var item = slides[key] || {};
@@ -255,6 +302,24 @@
       setText(section, "[data-processing-slide-mapped]", item.mapped_count || 0);
       setText(section, "[data-processing-slide-targets]", item.target_count || 0);
     });
+  }
+
+  function updatePreviewObjectProgress(progress) {
+    var container = document.querySelector("[data-object-progress]");
+    if (!container || !progress) {
+      return;
+    }
+    var total = parseInt(progress.total || 0, 10);
+    var completed = parseInt(progress.completed || 0, 10);
+    var percent = Math.max(0, Math.min(100, parseInt(progress.percent || 0, 10)));
+    var bar = container.querySelector("[data-object-progress-bar]");
+    container.hidden = total <= 0;
+    setText(container, "[data-object-progress-label]", progress.message || "Analisando objetos do preview.");
+    setText(container, "[data-object-progress-count]", completed + " de " + total + " objetos · " + percent + "%");
+    if (bar) {
+      bar.value = percent;
+      bar.textContent = percent + "%";
+    }
   }
 
   function setText(root, selector, value) {
@@ -408,6 +473,9 @@
     if (target.matches("[data-project-select], [data-squad-select]")) {
       syncMappingTemplateOptions();
     }
+    if (target.matches("[data-admin-squad-switch]") && target.form) {
+      target.form.submit();
+    }
     if (target.matches("[data-preview-search]")) {
       applyPreviewFilters();
     }
@@ -416,6 +484,7 @@
     }
     if (target.matches("[data-dropzone] input[type='file']")) {
       updateFileCard(target);
+      updateCombinedUploadSize();
     }
   });
 
@@ -464,6 +533,39 @@
   });
 
   document.addEventListener("click", function (event) {
+    var saveButton = event.target && event.target.closest ? event.target.closest("[data-save-checkpoint]") : null;
+    if (saveButton) {
+      event.preventDefault();
+      var saveStatus = document.querySelector("[data-save-status]");
+      saveButton.disabled = true;
+      if (saveStatus) {
+        saveStatus.textContent = "Salvando...";
+      }
+      fetch(saveButton.getAttribute("data-save-url"), {
+        method: "POST",
+        headers: { Accept: "application/json" },
+      })
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("Não consegui salvar agora.");
+          }
+          return response.json();
+        })
+        .then(function (payload) {
+          if (saveStatus) {
+            saveStatus.textContent = payload.message || "Trabalho salvo.";
+          }
+        })
+        .catch(function (error) {
+          if (saveStatus) {
+            saveStatus.textContent = error.message || "Falha ao salvar.";
+          }
+        })
+        .finally(function () {
+          saveButton.disabled = false;
+        });
+      return;
+    }
     var asyncDownload = event.target && event.target.closest ? event.target.closest("[data-async-download]") : null;
     if (asyncDownload) {
       event.preventDefault();
@@ -487,7 +589,7 @@
             throw new Error("Nao recebi a URL de acompanhamento.");
           }
           var timer = window.setInterval(function () {
-            updateGenerationProgress(startedAt, "");
+            updateGenerationProgress(startedAt, {});
             fetch(statusUrl, { cache: "no-store" })
               .then(function (response) { return response.json(); })
               .then(function (state) {
@@ -501,7 +603,7 @@
                   if (overlay) { overlay.hidden = true; }
                   window.alert(state.message || "A geracao do PPT falhou.");
                 } else {
-                  updateGenerationProgress(startedAt, state.message || "");
+                  updateGenerationProgress(startedAt, state);
                 }
               })
               .catch(function () {});
@@ -540,16 +642,15 @@
     }
   });
 
-  function updateGenerationProgress(startedAt, serverMessage) {
+  function updateGenerationProgress(startedAt, state) {
     var target = document.getElementById("progress-message");
     if (!target) {
       return;
     }
     var seconds = Math.round((Date.now() - startedAt) / 1000);
     var elapsed = seconds < 60 ? seconds + "s" : Math.floor(seconds / 60) + "min " + (seconds % 60) + "s";
-    var base = serverMessage || "Gerando o PowerPoint...";
-    // Sem porcentagem de proposito: a geracao nao reporta progresso por slide,
-    // e uma barra inventada mentiria sobre quanto falta.
+    var base = (state && state.message) || "Gerando o PowerPoint...";
+    setRealProgress(state && state.progress ? state.progress : null, "objetos");
     var hint = seconds > 45 ? " Decks grandes levam alguns minutos — pode deixar aberto." : "";
     target.textContent = base + " (" + elapsed + ")" + hint;
   }

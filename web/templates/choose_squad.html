@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Escolher squad - QWST Auto PPT</title>
+    <script>
+      (function () {
+        var theme = localStorage.getItem("qwst-theme");
+        if (!theme) {
+          theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ asset_version('style.css') }}">
+  </head>
+  <body>
+    <main class="login-shell">
+      <section class="workspace-card login-card squad-choice-card">
+        <p class="eyebrow">Primeiro acesso</p>
+        <h1>Qual é o seu squad?</h1>
+        <p class="login-hint">Você verá somente projetos, arquivos e memórias deste squad. Depois da escolha, somente um administrador poderá alterar.</p>
+        {% if error %}<div class="notice warn">{{ error }}</div>{% endif %}
+        <form method="post" action="/choose-squad">
+          <fieldset class="squad-choice-grid">
+            <legend class="sr-only">Escolha um squad</legend>
+            {% for squad in squads %}
+              <label class="squad-choice">
+                <input type="radio" name="squad" value="{{ squad.value }}" required>
+                <span>{{ squad.label }}</span>
+              </label>
+            {% endfor %}
+          </fieldset>
+          <button type="submit">Confirmar squad</button>
+        </form>
+        <form method="post" action="/logout">
+          <button class="ghost-button" type="submit">Sair</button>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>

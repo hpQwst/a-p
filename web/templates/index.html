@@ -23,6 +23,23 @@
           <h1>Central de atualização</h1>
         </div>
         <div class="header-actions">
+          {% if is_admin %}
+            <form class="squad-view-switcher" method="get" action="/">
+              <label>
+                <span>Visualização</span>
+                <select name="squad" data-admin-squad-switch>
+                  {% for squad in all_squads %}
+                    <option value="{{ squad.value }}" {% if squad.value == selected_squad %}selected{% endif %}>{{ squad.label }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+            </form>
+            <a class="ghost-button" href="/admin/users">Administrar usuários</a>
+          {% endif %}
+          {% if current_user %}
+            <span class="user-chip">{{ current_user.email }}{% if not is_admin %} · {{ current_user.squad.title() }}{% endif %}</span>
+            <form method="post" action="/logout"><button class="ghost-button" type="submit">Sair</button></form>
+          {% endif %}
           <span class="header-status {% if not ai_available %}off{% endif %}">
             <span class="status-dot"></span>
             <span>{% if ai_available %}IA ativa{% else %}IA indisponível{% endif %}</span>
@@ -56,7 +73,15 @@
       </section>
 
       <section class="home-layout">
-        <form class="workspace-card upload-workspace" action="/preview" method="post" enctype="multipart/form-data" data-progress-message="Analisando arquivos e preparando preview..." data-large-deck-threshold="{{ large_deck_slide_threshold }}">
+        <form
+          class="workspace-card upload-workspace"
+          action="/preview"
+          method="post"
+          enctype="multipart/form-data"
+          data-progress-message="Analisando arquivos e preparando preview..."
+          data-large-deck-threshold="{{ large_deck_slide_threshold }}"
+          data-combined-upload-warning-mb="{{ combined_upload_warning_mb }}"
+        >
           <div class="workspace-head">
             <div>
               <p class="eyebrow">Nova atualização</p>
@@ -87,14 +112,22 @@
                   {% endfor %}
                 </select>
               </label>
-              <label>
-                <span>Squad</span>
-                <select name="squad" data-squad-select>
-                  {% for squad in squads %}
-                    <option value="{{ squad.value }}">{{ squad.label }}</option>
-                  {% endfor %}
-                </select>
-              </label>
+              {% if can_choose_squad %}
+                <label>
+                  <span>Squad</span>
+                  <select name="squad" data-squad-select>
+                    {% for squad in squads %}
+                      <option value="{{ squad.value }}" {% if squad.value == selected_squad %}selected{% endif %}>{{ squad.label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+              {% else %}
+                <label>
+                  <span>Squad</span>
+                  <input type="hidden" name="squad" value="{{ selected_squad }}">
+                  <span class="locked-squad">{{ selected_squad.title() }} · acesso fixo</span>
+                </label>
+              {% endif %}
             </div>
             <label>
               <span>Nome do novo projeto</span>
@@ -151,6 +184,9 @@
                 <span class="file-selected" data-file-name></span>
                 <input name="datasources" type="file" accept=".zip,.xlsx" multiple required>
               </label>
+            </div>
+            <div class="upload-size-summary" data-upload-size-summary>
+              Selecione os arquivos para ver o tamanho combinado.
             </div>
           </div>
 
@@ -298,6 +334,10 @@
       <div>
         <strong>Projeto em andamento</strong>
         <p id="progress-message">Processando...</p>
+        <div class="real-progress" id="real-progress" hidden>
+          <progress id="progress-bar" max="100" value="0">0%</progress>
+          <span id="progress-count" aria-live="polite"></span>
+        </div>
         <ol id="progress-steps" class="progress-steps"></ol>
       </div>
     </div>

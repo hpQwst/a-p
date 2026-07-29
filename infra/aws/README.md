@@ -1,19 +1,30 @@
 # Infraestrutura AWS
 
-Três arquivos, um caminho só:
+Quatro arquivos, um caminho só:
 
 | Arquivo | O que faz |
 | --- | --- |
 | `build.yaml` | CloudFormation: ECR, bucket de build e projeto CodeBuild |
 | `apprunner.yaml` | CloudFormation: bucket do estado compartilhado, roles IAM, escala e o serviço App Runner |
 | `deploy.ps1` | Publica: empacota o commit, envia ao S3, constrói, guarda segredos e sobe as stacks |
+| `configure-cost-controls.ps1` | Cria/atualiza orçamento mensal e tenta ativar a tag de custo `Name` |
 
 ```powershell
-.\infra\aws\deploy.ps1 -TeamPassword "a-senha-da-equipe"
+.\infra\aws\deploy.ps1 `
+  -EntraTenantId "..." `
+  -EntraClientId "..." `
+  -EntraClientSecret "..." `
+  -EntraRedirectUri "https://.../auth/callback" `
+  -BootstrapAdminEmails "hugo.rocha@qwst.co"
 ```
 
 Nada precisa ser configurado no console. O passo a passo está em
 [`DEPLOYMENT.md`](../../DEPLOYMENT.md).
+
+Produção aceita somente Microsoft Entra:
+`AUTO_PPT_TEAM_PASSWORD_ENABLED=0`. Usuários comuns ficam isolados na squad
+escolhida no primeiro login; administradores enxergam todas e gerenciam perfis
+em `/admin/users`.
 
 ## Por que o build vem de um zip no S3
 
@@ -33,6 +44,8 @@ descontinuado e não exige integração entre as nuvens.
 - **No máximo uma instância.** O estado compartilhado é JSON no S3; duas
   instâncias gravando ao mesmo tempo poderiam perder uma atualização. Aumentar
   `MaxSize` exige antes escrita condicional por ETag no `project_store.py`.
+- **2 GB permanecem suficientes.** Benchmarks reais ficaram abaixo de 640 MB de
+  pico; não aumentar memória sem nova medição.
 
 ## Histórico
 

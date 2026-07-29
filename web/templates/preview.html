@@ -28,12 +28,27 @@
           <h1>Confira antes de baixar</h1>
         </div>
         <div class="header-actions">
+          {% if current_user %}
+            <span class="user-chip">{{ current_user.email }}</span>
+            {% if current_user.is_admin %}<a class="ghost-button" href="/admin/users">Admin</a>{% endif %}
+          {% endif %}
+          <button
+            class="ghost-button"
+            type="button"
+            data-save-checkpoint
+            data-save-url="/jobs/{{ job_id }}/save"
+          >Salvar trabalho</button>
+          <span class="save-status" data-save-status aria-live="polite">
+            {% if checkpoint_summary.updated_at %}Salvo automaticamente{% endif %}
+          </span>
           <button type="button" class="theme-toggle" data-theme-toggle title="Alternar tema claro/escuro" aria-label="Alternar tema">◐</button>
           <button type="button" class="ghost-button" data-advanced-toggle aria-pressed="false" title="Mostrar detalhes técnicos">Modo avançado</button>
           <a class="ghost-button" href="/" title="Voltar para a central">Início</a>
           <a class="ghost-button advanced-only" href="/jobs/{{ job_id }}/debug-log" target="_blank" rel="noreferrer">Log debug</a>
           {% if preview_processing.active %}
             <button class="button" type="button" disabled>Preparando preview</button>
+          {% elif preview_processing.status == "error" %}
+            <button class="button" type="button" disabled>Preview com erro</button>
           {% elif async_generation %}
             <button class="button" type="button" data-async-download data-generate-url="/jobs/{{ job_id }}/generate">Gerar e baixar PPT</button>
           {% else %}
@@ -48,6 +63,24 @@
       {% if error %}
         <div class="notice warn">{{ error }}</div>
       {% endif %}
+
+      {% set _object_progress = preview_processing.progress or {} %}
+      <section
+        class="object-progress"
+        data-object-progress
+        {% if not preview_processing.active %}hidden{% endif %}
+        aria-live="polite"
+      >
+        <div class="object-progress-head">
+          <strong data-object-progress-label>{{ _object_progress.message or "Preparando objetos do preview..." }}</strong>
+          <span data-object-progress-count>
+            {{ _object_progress.completed or 0 }} de {{ _object_progress.total or 0 }} objetos
+          </span>
+        </div>
+        <progress data-object-progress-bar max="100" value="{{ _object_progress.percent or 0 }}">
+          {{ _object_progress.percent or 0 }}%
+        </progress>
+      </section>
 
       <section class="process-timeline advanced-only" aria-label="Andamento do processamento">
         {% for step in process_steps %}
@@ -120,34 +153,34 @@
           {% set _total = review_summary.targets %}
           {% set _pending = review_summary.unmapped %}
           {% set _pct = ((100 * _ready / _total) | round(0, 'floor') | int) if _total else 0 %}
-          <section class="review-gate {% if _pending %}has-pending{% else %}all-ready{% endif %}">
-            <div class="gate-progress">
-              <div class="gate-head">
-                <strong>{{ _ready }} de {{ _total }} prontos</strong>
-                {% if _pending %}
-                  <span class="gate-pending">{{ _pending }} pra revisar</span>
-                {% else %}
-                  <span class="gate-ok">tudo pronto</span>
-                {% endif %}
+          {% if not preview_processing.active and preview_processing.status != "error" %}
+            <section class="review-gate {% if _pending %}has-pending{% else %}all-ready{% endif %}">
+              <div class="gate-progress">
+                <div class="gate-head">
+                  <strong>{{ _ready }} de {{ _total }} prontos</strong>
+                  {% if _pending %}
+                    <span class="gate-pending">{{ _pending }} pra revisar</span>
+                  {% else %}
+                    <span class="gate-ok">tudo pronto</span>
+                  {% endif %}
+                </div>
+                <div class="gate-bar"><i style="width: {{ _pct }}%"></i></div>
+                <p class="gate-hint">
+                  {% if _pending %}
+                    Revise os gráficos em amarelo — o resto já está conectado. Dá pra baixar assim mesmo, mas os pendentes ficam sem atualizar.
+                  {% else %}
+                    Todos os gráficos foram conectados. Confira as prévias e baixe.
+                  {% endif %}
+                  Ao baixar, a ferramenta memoriza estas ligações e refaz sozinha na próxima vez.
+                </p>
               </div>
-              <div class="gate-bar"><i style="width: {{ _pct }}%"></i></div>
-              <p class="gate-hint">
-                {% if _pending %}
-                  Revise os gráficos em amarelo — o resto já está conectado. Dá pra baixar assim mesmo, mas os pendentes ficam sem atualizar.
-                {% else %}
-                  Todos os gráficos foram conectados. Confira as prévias e baixe.
-                {% endif %}
-                Ao baixar, a ferramenta memoriza estas ligações e refaz sozinha na próxima vez.
-              </p>
-            </div>
-            {% if not preview_processing.active %}
               {% if async_generation %}
                 <button type="button" class="button gate-download" data-async-download data-generate-url="/jobs/{{ job_id }}/generate">Baixar PowerPoint</button>
               {% else %}
                 <a class="button gate-download" href="/jobs/{{ job_id }}/download" data-progress-message="Gerando PowerPoint atualizado...">Baixar PowerPoint</a>
               {% endif %}
-            {% endif %}
-          </section>
+            </section>
+          {% endif %}
           <div class="status-grid advanced-only">
             <section class="mapping-stage {{ mapping_status.state }}">
               <div>
@@ -625,6 +658,10 @@
       <div>
         <strong>Projeto em andamento</strong>
         <p id="progress-message">Processando...</p>
+        <div class="real-progress" id="real-progress" hidden>
+          <progress id="progress-bar" max="100" value="0">0%</progress>
+          <span id="progress-count" aria-live="polite"></span>
+        </div>
         <ol id="progress-steps" class="progress-steps"></ol>
       </div>
     </div>

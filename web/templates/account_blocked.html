@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Acesso desativado - QWST Auto PPT</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ asset_version('style.css') }}">
+  </head>
+  <body>
+    <main class="login-shell">
+      <section class="workspace-card login-card">
+        <p class="eyebrow">Conta desativada</p>
+        <h1>Seu acesso está bloqueado</h1>
+        <div class="notice warn">A conta {{ user.email }} foi desativada por um administrador.</div>
+        <p class="login-hint">Fale com o responsável pelo QWST Auto PPT para reativar seu acesso.</p>
+        <form method="post" action="/logout">
+          <button type="submit">Sair</button>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>

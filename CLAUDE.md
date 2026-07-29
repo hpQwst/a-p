@@ -69,7 +69,7 @@ Once a project has a successful download, the system creates/updates a **mapping
 
 To keep a chart's "Edit Data" working and to run without Microsoft Office, the writer path is **serverless OOXML surgery**: open the `.pptx`/`.xlsx` as ZIP/OPC packages, patch only the necessary parts (`openxml_zip.py`, `embedded_workbook_writer.py`), and update the chart's visual XML cache — never `python-pptx`'s chart replace, never a full `openpyxl.save()` of the embedded workbook. This is what makes generation work in headless Linux containers (App Runner) without Office/COM. Don't reintroduce those shortcuts even if they look simpler — they were deliberately avoided (see `docs/pptx_serverless_openxml_poc.md` and the README section "Gráficos editáveis e Excel embutido").
 
-Formula evaluation for datasource XLSX uses only the internal, AST-restricted evaluator (`core.py: _SimpleFormulaEvaluator`) covering `SUM`/`SOMA`, `AVERAGE`/`MEDIA`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`/`SE`, `SUMIF`/`SOMASE`, `COUNTIF`/`CONT.SE`. Unsupported formulas fail by default; `AUTO_PPT_FORMULA_FALLBACK=cached` is an explicit opt-in to use a value already cached in the XLSX. Original files are never mutated in place.
+Formula evaluation for datasource XLSX uses only the internal, AST-restricted evaluator (`core.py: _SimpleFormulaEvaluator`) covering `SUM`/`SOMA`, `SUMPRODUCT`/`SOMARPRODUTO`, `AVERAGE`/`MEDIA`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`/`SE`, `SUMIF`/`SOMASE`, `COUNTIF`/`CONT.SE`. Unsupported formulas fail by default; `AUTO_PPT_FORMULA_FALLBACK=cached` is an explicit opt-in to use a value already cached in the XLSX. Original files are never mutated in place. XLSX files with pivot-cache metadata are read from an in-memory sanitized copy because recent `openpyxl` versions can reject legacy pivot records; the source file remains untouched.
 
 Preview and per-slide AI review use extracted OpenXML contracts, titles and structured XLSX text only. Never add Office, COM, LibreOffice, PDF conversion or slide-image rendering back to the runtime.
 
@@ -81,20 +81,21 @@ Preview and per-slide AI review use extracted OpenXML contracts, titles and stru
 
 ### Web layer (`web/main.py`)
 
-FastAPI app. Preview runs as a **background job**: `POST /preview` creates a job dir under `workspace_data/web_jobs/<job_id>/` (or `AUTO_PPT_RUNTIME_ROOT`), writes uploaded files, and submits work to a `ThreadPoolExecutor` (`_preview_processing_worker`). `GET /jobs/{id}/processing-status` is polled by the frontend while `preview_processing.json` tracks per-slide status; a render cache (`_save_render_cache`/`_load_render_cache`) avoids recomputation once a preview is complete. Most mutating endpoints (`override`, `review-ai`, `mapping-template`, `slides`) clear this cache and re-trigger analysis/AI as needed. All job-scoped debug events are appended to `log.txt` in the job dir via `ppt_automator/ai_debug.py`.
+FastAPI app. Preview runs as a **background job**: `POST /preview` creates a job dir under `workspace_data/web_jobs/<job_id>/` (or `AUTO_PPT_RUNTIME_ROOT`), writes uploaded files, persists the immutable inputs once in the project checkpoint, and submits work to a `ThreadPoolExecutor` (`_preview_processing_worker`). `GET /jobs/{id}/processing-status` is polled by the frontend while `preview_processing.json` tracks real object progress; generation does the same in `generation_processing.json`. A render cache (`_save_render_cache`/`_load_render_cache`) avoids recomputation once a preview is complete. Most mutating endpoints (`override`, `review-ai`, `mapping-template`, `slides`) clear this cache and autosave only small state/caches. `POST /jobs/{id}/save` is the explicit save button. After a restart, the project checkpoint restores inputs and restarts unfinished analysis. All job-scoped debug events are appended to `log.txt` in the job dir via `ppt_automator/ai_debug.py`.
 
 `worker/processor.py` is the thin orchestration layer between `web/main.py` and `ppt_automator/engine.py`: `AnalysisResult` (targets + sources + plans + preview + warnings), `analyze_files`, and helpers to layer AI source-matches, AI diagnostics, and manual per-target datasource overrides on top of the deterministic analysis.
 
 ### Storage (`ppt_automator/project_store.py`)
 
-Single storage abstraction switched by `AUTO_PPT_STORAGE_BACKEND` (`local` default, or `s3` with `AUTO_PPT_S3_BUCKET`/`AUTO_PPT_S3_PREFIX`). In dev, everything lives under `workspace_data/` (git-ignored). Layout: `squads/<squad>/projects/<slug>/{templates,runs,memory,memory/manual_sources}` and `squads/<squad>/mapping_templates/<slug>/template.json`. Manual mapping corrections are appended to `memory/corrections.json` per project for audit/future learning.
+Single storage abstraction switched by `AUTO_PPT_STORAGE_BACKEND` (`local` default, or `s3` with `AUTO_PPT_S3_BUCKET`/`AUTO_PPT_S3_PREFIX`). In dev, everything lives under `workspace_data/` (git-ignored). Layout: `squads/<squad>/projects/<slug>/{checkpoint,runs,memory}`, `squads/<squad>/mapping_templates/<slug>/template.json`, hashed user profiles under `users/profiles/`, and immutable admin events under `admin_audit/`. Manual mapping corrections are appended to `memory/corrections.json` per project for audit/future learning.
 
 ## Auth (`web/auth.py`, `web/entra.py`)
 
-Two modes that coexist, both enforced by the `require_team_password` middleware in `web/main.py`:
+Production uses **Microsoft Entra (OIDC)** only. Authorization Code flow via MSAL is single-tenant: `entra.exchange_code` rejects any `tid` that isn't ours. State and nonce ride in a signed cookie (`qwst_oidc`), not process memory.
 
-- **Microsoft Entra (OIDC)** — primary when `ENTRA_TENANT_ID`/`CLIENT_ID`/`CLIENT_SECRET`/`REDIRECT_URI` are all set. Authorization Code flow via MSAL, single-tenant: `entra.exchange_code` rejects any `tid` that isn't ours, so another directory's users can't in. State and nonce ride in a signed cookie (`qwst_oidc`), not process memory, so login survives restarts.
-- **Team password** — `AUTO_PPT_TEAM_PASSWORD`, kept as a fallback so nobody is locked out if Entra misbehaves.
+On first login, `project_store.ensure_user` creates a profile. Bootstrap emails from `AUTO_PPT_BOOTSTRAP_ADMINS` become admins; everyone else must choose one of `squad1`–`squad5` exactly once. Middleware enforces the squad on project routes, job routes and listings. Common users never change their own squad. Admins use `/admin/users` to change squad, activate/deactivate and promote/revoke admins; every change is recorded.
+
+The old team password is disabled in App Runner with `AUTO_PPT_TEAM_PASSWORD_ENABLED=0`; it remains available only for isolated local development.
 
 The session cookie never carries the password or any Microsoft token — only an expiry, the signed-in email, and an HMAC over both. The signing key comes from `AUTO_PPT_SESSION_SECRET` (falling back to the team password), derived rather than stored so every instance validates the same cookie.
 
@@ -104,15 +105,17 @@ Gotcha: MSAL adds `openid`/`profile`/`offline_access` itself and raises `ValueEr
 
 ## Deploy
 
-**AWS App Runner** (`us-east-1`), single container that does everything in-process — no separate workers, no queue. Shared state lives in S3 (`AUTO_PPT_STORAGE_BACKEND=s3`), which is what makes every user see the same projects and mapping templates.
+**AWS App Runner** (`us-east-1`), single container that does everything in-process — no separate workers, no queue. Shared state lives in S3 (`AUTO_PPT_STORAGE_BACKEND=s3`); authorization filters that state so common users only see their assigned squad while admins may select any squad.
 
 Code lives in **Azure DevOps** (`qwst-auto-ppt`); AWS never connects to the repo. `deploy.ps1` packs the current commit with `git archive`, uploads the zip to S3 and CodeBuild builds from that — CodeBuild cannot read Azure Repos natively, and this avoids mirroring or cross-cloud credentials. No local Docker needed, no console setup.
 
 ```powershell
-.\infra\aws\deploy.ps1 -TeamPassword "a-senha-da-equipe"
+.\infra\aws\deploy.ps1 -EntraTenantId "..." -EntraClientId "..." -EntraClientSecret "..." -EntraRedirectUri "https://.../auth/callback"
 ```
 
 Same command publishes a new version. Infra is `infra/aws/apprunner.yaml` + `infra/aws/deploy.ps1`; the full runbook is in `DEPLOYMENT.md`.
+
+`infra/aws/configure-cost-controls.ps1` maintains the `squad4e5-auto-ppt-monthly` USD 20 budget. Cost allocation tag activation may require the payer account. Real-deck benchmarks are documented in `DEPLOYMENT.md`; observed peak stayed below 640 MB, so the service remains at 2 GB.
 
 Two constraints that are deliberate, not accidental:
 

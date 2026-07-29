@@ -4,7 +4,7 @@ from dataclasses import replace
 from io import BytesIO
 import os
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 from zipfile import ZipFile
 
 from .embedded_workbook_writer import resolve_default_sheet_name, update_embedded_workbook
@@ -29,17 +29,32 @@ def analyze_update_package(
     datasources_zip: InputFile,
     formula_mode: str = "auto",
     slide_numbers: list[int] | set[int] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[PptTarget], list[ParsedXlsxTable], list[TransformPlan]]:
     targets = discover_ppt_targets(pptx_file, numeric_only=False, include_text_shapes=False)
     selected_slides = {int(slide) for slide in (slide_numbers or []) if int(slide) > 0}
     if selected_slides:
         targets = [target for target in targets if target.slide_number in selected_slides]
+    _emit_progress(
+        progress_callback,
+        phase="datasources",
+        completed=0,
+        total=len(targets),
+        message=f"{len(targets)} objeto(s) encontrado(s). Lendo planilhas.",
+    )
     sources = parse_datasource_zip(
         datasources_zip,
         formula_mode=formula_mode,
         include_names=_datasource_names_for_slides(datasources_zip, selected_slides) if selected_slides else None,
     )
-    plans = _build_slide_aware_plans(targets, sources, datasources_zip)
+    _emit_progress(
+        progress_callback,
+        phase="matching",
+        completed=0,
+        total=len(targets),
+        message="Planilhas lidas. Conectando cada objeto.",
+    )
+    plans = _build_slide_aware_plans(targets, sources, datasources_zip, progress_callback=progress_callback)
     return targets, sources, plans
 
 
@@ -56,6 +71,7 @@ def generate_updated_pptx(
     pptx_file: InputFile,
     plans: list[TransformPlan],
     targets: list[PptTarget] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> bytes:
     ppt_bytes = read_bytes(pptx_file)
     replacements: dict[str, bytes] = {}
@@ -66,6 +82,15 @@ def generate_updated_pptx(
         for target in rename_targets:
             rename_targets_by_slide.setdefault(target.slide_path, []).append(target)
 
+    total_targets = len(plans)
+    completed_targets = 0
+    _emit_progress(
+        progress_callback,
+        phase="targets",
+        completed=0,
+        total=total_targets,
+        message=f"Atualizando {total_targets} objeto(s).",
+    )
     with ZipFile(BytesIO(ppt_bytes)) as zf:
         for plan in plans:
             if plan.object_type == "chart":
@@ -89,6 +114,16 @@ def generate_updated_pptx(
                     )
 
                 replacements.update(updates)
+                completed_targets += 1
+                _emit_progress(
+                    progress_callback,
+                    phase="targets",
+                    completed=completed_targets,
+                    total=total_targets,
+                    target_id=plan.target_id,
+                    slide=plan.target.slide_number,
+                    message=f"Objeto {completed_targets} de {total_targets} atualizado.",
+                )
 
             elif plan.object_type == "table":
                 table_plans_by_slide.setdefault(plan.target.slide_path, []).append(plan)
@@ -97,6 +132,16 @@ def generate_updated_pptx(
             slide_xml = replacements.get(slide_path, zf.read(slide_path))
             for plan in slide_plans:
                 slide_xml = update_table_slide_xml(slide_xml, plan.target, plan)
+                completed_targets += 1
+                _emit_progress(
+                    progress_callback,
+                    phase="targets",
+                    completed=completed_targets,
+                    total=total_targets,
+                    target_id=plan.target_id,
+                    slide=plan.target.slide_number,
+                    message=f"Objeto {completed_targets} de {total_targets} atualizado.",
+                )
             replacements[slide_path] = slide_xml
 
         for slide_path, slide_targets in rename_targets_by_slide.items():
@@ -105,7 +150,22 @@ def generate_updated_pptx(
             slide_xml = replacements.get(slide_path, zf.read(slide_path))
             replacements[slide_path] = rename_targets_in_slide_xml(slide_xml, slide_targets)
 
-    return replace_zip_parts_preserving_structure(ppt_bytes, replacements)
+    _emit_progress(
+        progress_callback,
+        phase="packaging",
+        completed=completed_targets,
+        total=total_targets,
+        message="Objetos atualizados. Empacotando o PowerPoint.",
+    )
+    output = replace_zip_parts_preserving_structure(ppt_bytes, replacements)
+    _emit_progress(
+        progress_callback,
+        phase="complete",
+        completed=completed_targets,
+        total=total_targets,
+        message="PowerPoint pronto.",
+    )
+    return output
 
 
 def _datasource_names_for_slides(datasources_zip: InputFile, slide_numbers: set[int]) -> set[str] | None:
@@ -149,16 +209,19 @@ def _build_slide_aware_plans(
     targets: list[PptTarget],
     sources: list[ParsedXlsxTable],
     datasources_zip: InputFile,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[TransformPlan]:
     try:
         entries = collect_datasource_entries(datasources_zip)
     except Exception:
-        return build_transform_plans(targets, sources)
+        return build_transform_plans(targets, sources, progress_callback=progress_callback)
     if not any(entry.slide_number for entry in entries):
-        return build_transform_plans(targets, sources)
+        return build_transform_plans(targets, sources, progress_callback=progress_callback)
     entry_by_name = {entry.zip_path: entry for entry in entries}
     plans: list[TransformPlan] = []
-    for target in targets:
+    eligible_targets = [target for target in targets if target.object_type in {"chart", "table"}]
+    completed = 0
+    for target in eligible_targets:
         if target.object_type not in {"chart", "table"}:
             continue
         selected_entries, _warnings = entries_for_slide(entries, target.slide_number)
@@ -173,4 +236,28 @@ def _build_slide_aware_plans(
         if not relevant_sources:
             relevant_sources = sources
         plans.extend(build_transform_plans([target], relevant_sources))
+        completed += 1
+        _emit_progress(
+            progress_callback,
+            phase="matching",
+            completed=completed,
+            total=len(eligible_targets),
+            slide=target.slide_number,
+            target_id=target.target_id,
+            message=f"Objeto {completed} de {len(eligible_targets)} analisado.",
+        )
     return plans
+
+
+def _emit_progress(
+    callback: Callable[[dict[str, Any]], None] | None,
+    **payload: Any,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(payload)
+    except Exception:
+        # Progresso e observabilidade: nunca podem corromper o PPT nem abortar
+        # uma analise que conseguiria terminar normalmente.
+        return

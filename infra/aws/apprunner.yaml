@@ -1,8 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   QWST Auto PPT - App Runner + S3. Um container unico serve a aplicacao e guarda
-  o estado compartilhado (projetos, mapeamentos e memoria dos squads) no S3, para
-  que todo mundo veja o mesmo aprendizado.
+  projetos, mapeamentos, usuarios e memoria isolada por squad no S3.
 
 Parameters:
   AppName:
@@ -15,9 +14,6 @@ Parameters:
   OpenAISecretArn:
     Type: String
     Description: ARN do secret com a chave da OpenAI.
-  TeamPasswordSecretArn:
-    Type: String
-    Description: ARN do secret com a senha compartilhada da equipe.
   BucketName:
     Type: String
     Description: Bucket S3 que guarda o estado compartilhado.
@@ -31,7 +27,7 @@ Parameters:
   EntraTenantId:
     Type: String
     Default: ""
-    Description: Vazio desliga o login Microsoft e deixa so a senha da equipe.
+    Description: Tenant do login Microsoft obrigatorio em producao.
   EntraClientId:
     Type: String
     Default: ""
@@ -42,6 +38,10 @@ Parameters:
     Type: String
     Default: ""
     Description: ARN do secret com o client secret do Entra.
+  BootstrapAdminEmails:
+    Type: String
+    Default: hugo.rocha@qwst.co
+    Description: E-mails separados por virgula que nascem como admin.
 
 Conditions:
   HasEntra: !Not [!Equals [!Ref EntraClientSecretArn, ""]]
@@ -85,7 +85,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess
 
-  # Permissoes do container em execucao: so o bucket do app e os dois secrets.
+  # Permissoes do container em execucao: so o bucket do app e os secrets usados.
   InstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -121,8 +121,8 @@ Resources:
                 Action: secretsmanager:GetSecretValue
                 Resource: !If
                   - HasEntra
-                  - [!Ref OpenAISecretArn, !Ref TeamPasswordSecretArn, !Ref SessionSecretArn, !Ref EntraClientSecretArn]
-                  - [!Ref OpenAISecretArn, !Ref TeamPasswordSecretArn, !Ref SessionSecretArn]
+                  - [!Ref OpenAISecretArn, !Ref SessionSecretArn, !Ref EntraClientSecretArn]
+                  - [!Ref OpenAISecretArn, !Ref SessionSecretArn]
 
   # Uma instancia no maximo. O project_store grava JSON no S3 e duas instancias
   # gravando ao mesmo tempo poderiam perder uma atualizacao. Com o uso atual
@@ -164,20 +164,20 @@ Resources:
                 Value: !Ref EntraClientId
               - Name: ENTRA_REDIRECT_URI
                 Value: !Ref EntraRedirectUri
+              - Name: AUTO_PPT_TEAM_PASSWORD_ENABLED
+                Value: "0"
+              - Name: AUTO_PPT_BOOTSTRAP_ADMINS
+                Value: !Ref BootstrapAdminEmails
             RuntimeEnvironmentSecrets: !If
               - HasEntra
               - - Name: OPENAI_API_KEY
                   Value: !Ref OpenAISecretArn
-                - Name: AUTO_PPT_TEAM_PASSWORD
-                  Value: !Ref TeamPasswordSecretArn
                 - Name: AUTO_PPT_SESSION_SECRET
                   Value: !Ref SessionSecretArn
                 - Name: ENTRA_CLIENT_SECRET
                   Value: !Ref EntraClientSecretArn
               - - Name: OPENAI_API_KEY
                   Value: !Ref OpenAISecretArn
-                - Name: AUTO_PPT_TEAM_PASSWORD
-                  Value: !Ref TeamPasswordSecretArn
                 - Name: AUTO_PPT_SESSION_SECRET
                   Value: !Ref SessionSecretArn
       InstanceConfiguration:

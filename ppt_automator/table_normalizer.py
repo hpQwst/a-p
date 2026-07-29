@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 import re
 import unicodedata
 
@@ -57,6 +57,7 @@ class SourceMatchCandidate:
 def build_transform_plans(
     targets: Iterable[PptTarget],
     sources: Iterable[ParsedXlsxTable],
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[TransformPlan]:
     """Match deterministico por SLIDE resolvido como atribuicao global 1:1.
 
@@ -72,8 +73,20 @@ def build_transform_plans(
     by_slide: dict[int, list[PptTarget]] = {}
     for target in eligible:
         by_slide.setdefault(target.slide_number, []).append(target)
+    completed = 0
+    total = len(eligible)
     for slide_number in sorted(by_slide):
-        plans.extend(_assign_slide_plans(slide_number, by_slide[slide_number], source_list))
+        plans.extend(
+            _assign_slide_plans(
+                slide_number,
+                by_slide[slide_number],
+                source_list,
+                progress_callback=progress_callback,
+                completed_offset=completed,
+                total_targets=total,
+            )
+        )
+        completed += len(by_slide[slide_number])
     return plans
 
 
@@ -81,6 +94,10 @@ def _assign_slide_plans(
     slide_number: int,
     slide_targets: list[PptTarget],
     all_sources: list[ParsedXlsxTable],
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    completed_offset: int = 0,
+    total_targets: int = 0,
 ) -> list[TransformPlan]:
     candidate_sources = _sources_for_slide(slide_number, all_sources)
     if not candidate_sources:
@@ -90,7 +107,7 @@ def _assign_slide_plans(
     score_matrix: list[list[float]] = []
     strong_matrix: list[list[bool]] = []
     reason_matrix: list[list[str]] = []
-    for target in slide_targets:
+    for target_index, target in enumerate(slide_targets):
         candidates = {c.source.file_name: c for c in source_match_candidates(target, candidate_sources)}
         row_scores, row_strong, row_reason = [], [], []
         for source in candidate_sources:
@@ -101,6 +118,17 @@ def _assign_slide_plans(
         score_matrix.append(row_scores)
         strong_matrix.append(row_strong)
         reason_matrix.append(row_reason)
+        _notify_progress(
+            progress_callback,
+            {
+                "phase": "matching",
+                "completed": completed_offset + target_index + 1,
+                "total": total_targets or len(slide_targets),
+                "slide": slide_number,
+                "target_id": target.target_id,
+                "message": f"Objeto {completed_offset + target_index + 1} de {total_targets or len(slide_targets)} analisado.",
+            },
+        )
 
     cost = [[1.0 - score for score in row] for row in score_matrix]
     assignment = _hungarian(cost)
@@ -129,6 +157,19 @@ def _assign_slide_plans(
             reason += f"; vencedor claro no slide (margem {margin:.0%} para o 2o melhor)"
         plans.append(normalize_to_target(target, source, confidence=confidence, match_reason=reason))
     return plans
+
+
+def _notify_progress(
+    callback: Callable[[dict[str, Any]], None] | None,
+    payload: dict[str, Any],
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(payload)
+    except Exception:
+        # Observabilidade nao pode abortar uma analise valida.
+        pass
 
 
 def _sources_for_slide(slide_number: int, sources: list[ParsedXlsxTable]) -> list[ParsedXlsxTable]:

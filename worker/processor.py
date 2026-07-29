@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 import re
 
 from ppt_automator import analyze_update_package, generate_updated_pptx
@@ -36,8 +36,14 @@ def analyze_files(
     datasource_zip_bytes: bytes,
     manual_sources: ManualSourceMap | None = None,
     slide_numbers: list[int] | set[int] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> AnalysisResult:
-    targets, sources, plans = analyze_update_package(pptx_bytes, datasource_zip_bytes, slide_numbers=slide_numbers)
+    targets, sources, plans = analyze_update_package(
+        pptx_bytes,
+        datasource_zip_bytes,
+        slide_numbers=slide_numbers,
+        progress_callback=progress_callback,
+    )
     targets, plans = _select_slides(targets, plans, slide_numbers)
     plans, sources = _apply_manual_sources(targets, sources, plans, manual_sources or {})
     return AnalysisResult(

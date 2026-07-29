@@ -793,6 +793,8 @@ class _SimpleFormulaEvaluator:
             "ARREDONDAR": "round",
             "SUMIF": "_sumif",
             "SOMASE": "_sumif",
+            "SUMPRODUCT": "_sumproduct",
+            "SOMARPRODUTO": "_sumproduct",
             "COUNTIF": "_countif",
             "CONT.SE": "_countif",
             "CONTSE": "_countif",
@@ -828,6 +830,7 @@ class _SimpleFormulaEvaluator:
             "_counta": lambda *args: sum(1 for value in _flatten(args) if value not in (None, "")),
             "_if": lambda condition, true_value, false_value=None: true_value if condition else false_value,
             "_sumif": self._sumif,
+            "_sumproduct": _sumproduct,
             "_countif": self._countif,
             "round": round,
             "abs": abs,
@@ -865,6 +868,20 @@ class _SimpleFormulaEvaluator:
 
     def _countif(self, criteria_range: Any, criteria: Any) -> int:
         return sum(1 for value in _flatten([criteria_range]) if _matches_criteria(value, criteria))
+
+
+def _sumproduct(*args: Any) -> float:
+    arrays = [list(_flatten([arg])) for arg in args]
+    if not arrays:
+        return 0.0
+    length = min((len(values) for values in arrays), default=0)
+    total = 0.0
+    for index in range(length):
+        product = 1.0
+        for values in arrays:
+            product *= _to_number(values[index])
+        total += product
+    return total
 
 
 def _evaluate_formula_expression(expression: str, env: dict[str, Any]) -> Any:

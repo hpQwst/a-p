@@ -1,170 +1,188 @@
 # Deploy — AWS App Runner
 
-O QWST Auto PPT roda como um site interno: a equipe abre uma URL no navegador,
-digita a senha compartilhada e usa. Não há programa para instalar em máquina
-nenhuma, e todo mundo enxerga os mesmos projetos e mapeamentos.
+O QWST Auto PPT roda como site interno, protegido pelo Microsoft Entra. Cada
+usuário comum pertence a uma das squads `squad1`–`squad5` e só enxerga dados
+dessa squad. Administradores podem selecionar qualquer squad e gerenciar
+usuários em `/admin/users`.
 
 ## Arquitetura
 
-```
-Azure DevOps  ──► (repositório: fonte da verdade do código)
-      │
-      │  deploy.ps1 empacota o commit e envia
-      ▼
-S3 (build) ──► CodeBuild ──► ECR ──┐
-                                   │
-Equipe (navegador) ──HTTPS──► App Runner  squad4e5-auto-ppt
-                                   │       1 vCPU / 2 GB, no máx. 1 instância
-                                   └──► S3  squad4e5-auto-ppt-<conta>
-                                            (estado compartilhado)
+```text
+Azure DevOps  ──► deploy.ps1 ──► S3 (build) ──► CodeBuild ──► ECR
+                                                                 │
+Equipe ──HTTPS / Microsoft Entra──► App Runner squad4e5-auto-ppt │
+                                      1 vCPU / 2 GB, máx. 1       │
+                                                   └──────────────┘
+                                                   └──► S3 de estado
 ```
 
-O código vive no Azure DevOps. A AWS **não se conecta ao repositório**: o
-`deploy.ps1` empacota o commit atual com `git archive`, envia o zip para o S3 e o
-CodeBuild constrói a partir dele. Isso evita credencial cruzada entre nuvens e
-funciona com qualquer serviço de repositório — o CodeBuild, aliás, não consegue
-ler Azure Repos nativamente.
+O código vive no Azure DevOps. A AWS não se conecta ao repositório:
+`deploy.ps1` empacota o commit atual com `git archive`, envia o zip ao S3 e
+dispara o CodeBuild. Não é necessário Docker local.
 
-Um único container faz tudo: recebe o upload, analisa, chama a IA quando
-necessário e gera o PPT. Não existem workers separados nem fila.
+Um único container recebe uploads, analisa, chama IA quando necessário e gera o
+PPT. O estado durável fica no S3. Entradas imutáveis são persistidas uma vez;
+salvamentos manuais e automáticos posteriores gravam apenas estado e caches
+pequenos. Se a instância reiniciar durante um preview, o trabalho é restaurado e
+a análise pendente recomeça.
 
-A geração do PPT roda sem Microsoft Office: o pacote Office Open XML é editado de
-forma cirúrgica (atualiza o `.xlsx` embutido, preserva a estrutura ZIP/OPC e
-atualiza o cache visual do gráfico). É isso que permite rodar em container Linux
-mantendo o "Editar dados" funcional.
+A geração roda sem Microsoft Office, por edição cirúrgica do pacote OOXML. O
+Excel embutido e o cache visual do gráfico são atualizados sem quebrar
+“Editar dados”.
 
-**Por que no máximo uma instância:** o estado compartilhado é gravado como JSON no
-S3. Cada gravação isolada é atômica, mas duas instâncias gravando o mesmo arquivo
-ao mesmo tempo poderiam perder uma atualização. Com o uso atual (poucas vezes por
-mês) uma instância sobra. Antes de aumentar `MaxSize`, é preciso implementar
-escrita condicional por ETag no `project_store.py`.
+O limite de uma instância é deliberado: duas instâncias gravando o mesmo objeto
+JSON simultaneamente poderiam perder uma atualização. Antes de aumentar
+`MaxSize`, implemente escrita condicional por ETag em `project_store.py`.
 
 ## Pré-requisitos
 
-- AWS CLI logado com permissão na conta (`aws sts get-caller-identity`)
-- Região `us-east-1` — **App Runner não existe em `sa-east-1`**
-- `OPENAI_API_KEY` no `.env` local (ou passado por parâmetro)
-- Uma senha para a equipe
+- AWS CLI autenticado na conta correta, região `us-east-1`;
+- chave OpenAI;
+- aplicativo Microsoft Entra single-tenant;
+- URI de redirecionamento exatamente
+  `https://<url-do-app>/auth/callback`;
+- e-mail do administrador inicial.
 
-Não é preciso ter Docker nem conectar a AWS ao repositório: a imagem é
-construída no CodeBuild a partir de um zip.
-
-> **Limite de recursos:** só criar/alterar recursos que comecem com `squad4`/`squad5`.
-> Tudo o mais na conta pertence a outras pessoas.
+Só crie ou altere recursos iniciados por `squad4` ou `squad5`. Os recursos deste
+projeto usam `squad4e5-auto-ppt`.
 
 ## Publicar
 
-Não há configuração manual no console: o próprio script cria tudo.
+O deploy de produção exige Entra e desativa a senha compartilhada:
 
 ```powershell
-.\infra\aws\deploy.ps1 -TeamPassword "a-senha-da-equipe"
+.\infra\aws\deploy.ps1 `
+  -EntraTenantId "..." `
+  -EntraClientId "..." `
+  -EntraClientSecret "..." `
+  -EntraRedirectUri "https://.../auth/callback" `
+  -BootstrapAdminEmails "hugo.rocha@qwst.co"
 ```
 
-O que ele faz, em ordem:
+O script:
 
-1. Sobe a stack de build (`build.yaml`): repositório ECR, bucket de build e projeto CodeBuild
-2. Empacota o **último commit** com `git archive` e envia o zip para o S3
-3. Dispara o CodeBuild e espera a imagem ficar pronta
-4. Guarda a chave da OpenAI e a senha da equipe no Secrets Manager
-5. Sobe a stack da aplicação (`apprunner.yaml`) e imprime a URL
+1. cria ou atualiza build bucket, ECR e CodeBuild;
+2. empacota o último commit e envia o zip ao S3;
+3. constrói e publica a imagem;
+4. grava OpenAI, Entra e sessão no Secrets Manager;
+5. cria ou atualiza S3 de estado e App Runner;
+6. imprime a URL.
 
-Envie a URL para a equipe — a primeira visita pede a senha.
+O script publica o último commit, não alterações soltas no disco. Faça commit e
+push para Azure DevOps e GitHub antes do deploy.
 
-> O deploy publica o **último commit**, não o que está no disco. Se houver
-> alterações não commitadas, o script avisa. Commite e envie para o Azure DevOps
-> antes de publicar.
+## Variáveis de produção
 
-## Publicar uma versão nova
-
-O mesmo comando. Ele constrói a imagem do commit atual e manda o App Runner
-trocar. Ninguém precisa atualizar nada na própria máquina.
-
-```powershell
-.\infra\aws\deploy.ps1 -TeamPassword "a-senha-da-equipe"
-```
-
-Para trocar apenas a senha da equipe, sem reconstruir a imagem:
-
-```powershell
-.\infra\aws\deploy.ps1 -TeamPassword "nova-senha" -SkipBuild
-```
-
-## Variáveis no ambiente publicado
-
-Definidas pela stack — não altere à mão no console:
+Definidas pela stack:
 
 | Variável | Valor |
 | --- | --- |
 | `AUTO_PPT_STORAGE_BACKEND` | `s3` |
 | `AUTO_PPT_S3_BUCKET` | `squad4e5-auto-ppt-<conta>` |
 | `AUTO_PPT_RUNTIME_ROOT` | `/tmp/auto-ppt-jobs` |
+| `AUTO_PPT_TEAM_PASSWORD_ENABLED` | `0` |
+| `AUTO_PPT_BOOTSTRAP_ADMINS` | lista de e-mails |
+| `ENTRA_TENANT_ID` | diretório corporativo |
+| `ENTRA_CLIENT_ID` | aplicativo corporativo |
+| `ENTRA_REDIRECT_URI` | callback HTTPS |
 | `OPENAI_API_KEY` | secret |
-| `AUTO_PPT_TEAM_PASSWORD` | secret |
+| `ENTRA_CLIENT_SECRET` | secret |
+| `AUTO_PPT_SESSION_SECRET` | secret |
 
-`AUTO_PPT_TEAM_PASSWORD` é o que protege a URL. **Se ficar vazia e o login
-Microsoft não estiver configurado, o app fica aberto para qualquer pessoa que
-tenha o link.**
+A senha antiga pode continuar existindo no Secrets Manager por histórico, mas
+não é injetada no App Runner e não autentica ninguém.
 
-## Login com a conta Microsoft (opcional)
+## Usuários e isolamento
 
-Além da senha da equipe, o app aceita login corporativo via Microsoft Entra. As
-duas formas convivem: a senha continua funcionando como reserva.
+No primeiro login:
 
-Para ligar, o registro do aplicativo no Entra precisa ter como URI de redirecionamento
-exatamente `https://<url-do-app>/auth/callback`, e estas variáveis precisam chegar
-ao container:
+- e-mails em `AUTO_PPT_BOOTSTRAP_ADMINS` viram administradores;
+- demais usuários escolhem uma única squad entre `squad1` e `squad5`;
+- usuários comuns não podem trocar a própria squad;
+- administradores podem alterar squad, ativar/desativar e promover/rebaixar;
+- alterações administrativas são auditadas no S3.
 
-| Variável | Observação |
-| --- | --- |
-| `ENTRA_TENANT_ID` | id do diretório |
-| `ENTRA_CLIENT_ID` | id do aplicativo |
-| `ENTRA_CLIENT_SECRET` | guardar no Secrets Manager, nunca no código |
-| `ENTRA_REDIRECT_URI` | idêntico ao cadastrado, com `/auth/callback` no fim |
-| `AUTO_PPT_SESSION_SECRET` | assina o cookie de sessão |
-
-O aplicativo é single-tenant: contas de outro diretório são recusadas mesmo que a
-Microsoft autentique com sucesso. A tela de login avisa se a configuração estiver
-pela metade ou com o endereço de retorno malformado.
+O middleware aplica isolamento tanto nas listagens quanto em URLs diretas de
+projetos e jobs.
 
 ## Verificar
 
 ```powershell
-aws apprunner list-services --region us-east-1 --query "ServiceSummaryList[?ServiceName=='squad4e5-auto-ppt']"
+& "C:\Program Files\Amazon\AWSCLIV2\aws.exe" apprunner list-services `
+  --profile default --region us-east-1 `
+  --query "ServiceSummaryList[?ServiceName=='squad4e5-auto-ppt']"
 ```
 
-Logs da aplicação ficam no CloudWatch, em `/aws/apprunner/squad4e5-auto-ppt`.
+Depois do deploy:
 
-Depois de subir, teste o ciclo inteiro: entrar com a senha, subir um `.pptx` com
-as planilhas, gerar o preview e baixar o PPT. Depois abra de outra máquina e
-confirme que o projeto e o mapeamento aparecem — é isso que prova que o estado
-compartilhado está funcionando.
+1. confirme tela com apenas login Microsoft;
+2. entre como administrador e revise `/admin/users`;
+3. entre como usuário comum e confirme o isolamento por squad;
+4. suba PPTX e planilhas, gere preview, salve e baixe o PPT;
+5. confirme progresso por objeto durante preview e geração;
+6. retome o projeto depois de uma nova sessão.
 
-## Custo
+Logs ficam no CloudWatch em `/aws/apprunner/squad4e5-auto-ppt`.
 
-O App Runner cobra a memória provisionada continuamente e a CPU só durante as
-requisições; some ECR e S3, ambos baratos no volume deste projeto. A conta já tem
-outro serviço App Runner igual (1 vCPU / 2 GB), então a fatura atual é a melhor
-referência de custo real.
+## Memória e tamanho de upload
 
-Para pausar sem destruir nada:
+Benchmarks locais com cópias, sem alterar os originais:
+
+| Caso | Slides | Arquivos | Pico observado |
+| --- | ---: | ---: | ---: |
+| TIM | 89 | 203,4 MB + 0,8 MB | 334,4 MB |
+| Natura CB | 40 | 26,7 MB + 4,6 MB | 487,6 MB |
+| Natura CB | 118 | 80,6 MB + 4,6 MB | 636,7 MB |
+
+Resultado: 2 GB continuam adequados; não aumentar memória. A interface mostra
+um aviso suave quando o upload combinado passa de
+`AUTO_PPT_WARN_COMBINED_MB` (padrão 250 MB), mas não bloqueia o usuário. O
+tamanho compactado prevê mal o pico de RAM.
+
+Para repetir uma medição:
 
 ```powershell
-aws apprunner pause-service --service-arn <arn-do-servico> --region us-east-1
+.\.venv\Scripts\python.exe scripts\measure_memory_case.py `
+  --pptx "caminho\modelo.pptx" `
+  --xlsx "caminho\dados.xlsx"
 ```
 
-## Recuperar um mapeamento sobrescrito
+## Custos
 
-O bucket tem versionamento ligado. Se um mapeamento for salvo errado, dá para
-listar e restaurar a versão anterior:
+`configure-cost-controls.ps1` mantém um orçamento mensal de US$ 20, filtrado
+pela tag `Name=squad4e5-auto-ppt`, com alerta real em 80% e previsto em 100%:
 
 ```powershell
-aws s3api list-object-versions --bucket squad4e5-auto-ppt-<conta> --prefix auto-ppt/squads/
+.\infra\aws\configure-cost-controls.ps1 `
+  -AlertEmail "hugo.rocha@qwst.co"
 ```
 
-## Próximos degraus (ainda não construídos)
+A ativação da tag `Name` como cost allocation tag exige a conta pagadora. Se a
+conta vinculada receber `AccessDenied`, o administrador de Billing deve ativar
+essa tag; o orçamento já pode existir, mas o filtro só passa a contabilizar
+custos depois da ativação.
 
-Se o volume crescer ou surgir necessidade de mais controle:
+App Runner cobra memória provisionada continuamente e CPU durante requisições.
+Para pausar sem destruir estado:
 
-- Login corporativo (OIDC) no lugar da senha compartilhada
-- Escrita condicional por ETag no `project_store.py`, para permitir mais de uma instância
-- `AUTO_PPT_ASYNC_GENERATION=1` se algum deck grande estourar o tempo limite da requisição
+```powershell
+& "C:\Program Files\Amazon\AWSCLIV2\aws.exe" apprunner pause-service `
+  --service-arn <arn-do-servico> --profile default --region us-east-1
+```
+
+## Recuperar dados
+
+O bucket tem versionamento. Para localizar versões anteriores:
+
+```powershell
+& "C:\Program Files\Amazon\AWSCLIV2\aws.exe" s3api list-object-versions `
+  --bucket squad4e5-auto-ppt-<conta> `
+  --prefix auto-ppt/squads/ `
+  --profile default --region us-east-1
+```
+
+## Próximos degraus
+
+- escrita condicional por ETag antes de permitir mais de uma instância;
+- fila externa apenas se o volume simultâneo justificar o custo;
+- `AUTO_PPT_ASYNC_GENERATION=1` se algum deck exceder o limite da requisição.

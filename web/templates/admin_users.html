@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Usuários - QWST Auto PPT</title>
+    <script>
+      (function () {
+        var theme = localStorage.getItem("qwst-theme");
+        if (!theme) {
+          theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ asset_version('style.css') }}">
+  </head>
+  <body>
+    <main class="app-shell admin-shell">
+      <header class="product-header">
+        <div>
+          <p class="eyebrow">Administração</p>
+          <h1>Usuários e squads</h1>
+          <p class="subtitle">Cada pessoa acessa somente o squad definido aqui.</p>
+        </div>
+        <div class="header-actions">
+          <span class="user-chip">{{ current_user.email }}</span>
+          <a class="ghost-button" href="/">Voltar à central</a>
+          <form method="post" action="/logout"><button class="ghost-button" type="submit">Sair</button></form>
+        </div>
+      </header>
+
+      {% if notice %}<div class="notice ok">{{ notice }}</div>{% endif %}
+      {% if error %}<div class="notice warn">{{ error }}</div>{% endif %}
+
+      <section class="workspace-card admin-card">
+        <div class="admin-table-head">
+          <strong>{{ users|length }} usuário(s)</strong>
+          <span>Alterações ficam registradas na trilha administrativa.</span>
+        </div>
+        <div class="admin-user-list">
+          {% for user in users %}
+            <form class="admin-user-row" method="post" action="/admin/users/update">
+              <input type="hidden" name="email" value="{{ user.email }}">
+              <div class="admin-user-identity">
+                <strong>{{ user.email }}</strong>
+                <small>Atualizado {{ user.updated_at }}</small>
+              </div>
+              <label>
+                <span>Squad</span>
+                <select name="squad">
+                  <option value="" {% if not user.squad %}selected{% endif %}>Sem squad</option>
+                  {% for squad in squads %}
+                    <option value="{{ squad.value }}" {% if user.squad == squad.value %}selected{% endif %}>{{ squad.label }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>
+                <span>Papel</span>
+                <select name="role">
+                  <option value="user" {% if user.role == "user" %}selected{% endif %}>Usuário</option>
+                  <option value="admin" {% if user.role == "admin" %}selected{% endif %}>Admin</option>
+                </select>
+              </label>
+              <label class="admin-active">
+                <input type="checkbox" name="active" value="1" {% if user.active %}checked{% endif %}>
+                <span>Ativo</span>
+              </label>
+              <button type="submit" class="secondary">Salvar</button>
+            </form>
+          {% else %}
+            <div class="empty-state"><strong>Nenhum usuário entrou ainda.</strong></div>
+          {% endfor %}
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

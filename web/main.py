@@ -55,16 +55,22 @@ from ppt_automator.project_store import (
     create_project,
     create_run,
     ensure_store,
+    ensure_user,
     load_project_bytes,
     load_project_json,
+    load_user,
     list_mapping_templates,
     list_projects,
+    list_users,
     load_mapping_template,
     load_project,
+    normalize_email,
+    record_admin_event,
     safe_filename,
     save_mapping_template,
     save_project_bytes,
     save_project_json,
+    update_user,
 )
 from worker.processor import (
     AnalysisResult,
@@ -123,19 +129,77 @@ templates.env.globals["asset_version"] = _asset_version
 
 @app.middleware("http")
 async def require_team_password(request: Request, call_next):
-    """Bloqueia o app inteiro sem sessao valida.
-
-    Vale para os dois modos (Microsoft Entra e senha da equipe). Sem nenhum dos
-    dois configurado o app fica aberto, o que so faz sentido localmente."""
-    if auth.auth_enabled() and not auth.path_is_public(request.url.path):
+    """Autentica e aplica isolamento real antes de qualquer rota do produto."""
+    request.state.user = None
+    path = request.url.path
+    if auth.auth_enabled() and not auth.path_is_public(path):
         if not auth.request_is_authenticated(request.cookies):
-            if request.headers.get("accept", "").startswith("application/json"):
+            if _request_wants_json(request):
                 return JSONResponse({"error": "Sessao expirada. Entre de novo."}, status_code=401)
-            destination = request.url.path
+            destination = path
             if request.url.query:
                 destination = f"{destination}?{request.url.query}"
             return RedirectResponse(f"/login?next={quote(destination, safe='')}", status_code=303)
+
+        email = auth.current_user(request.cookies)
+        # Sessao sem identidade so existia no fallback por senha compartilhada.
+        # Mantemos compatibilidade local, mas producao desliga esse modo.
+        if email:
+            user = ensure_user(email)
+            request.state.user = user
+            if not user.active:
+                return templates.TemplateResponse(
+                    request,
+                    "account_blocked.html",
+                    {"user": user},
+                    status_code=403,
+                )
+            if path.startswith("/admin") and not user.is_admin:
+                return _access_denied(request, "Apenas administradores podem abrir esta tela.")
+            if not user.is_admin and not user.squad and path != "/choose-squad":
+                return RedirectResponse("/choose-squad", status_code=303)
+            if not user.is_admin and user.squad:
+                path_squad = _squad_from_path(path)
+                if path_squad and path_squad != user.squad:
+                    return _access_denied(request, "Este projeto pertence a outro squad.")
+                job_squad = _job_squad_from_runtime_path(path)
+                if job_squad and job_squad != user.squad:
+                    return _access_denied(request, "Este job pertence a outro squad.")
     return await call_next(request)
+
+
+def _request_wants_json(request: Request) -> bool:
+    return request.headers.get("accept", "").startswith("application/json")
+
+
+def _access_denied(request: Request, message: str) -> Response:
+    if _request_wants_json(request):
+        return JSONResponse({"error": message}, status_code=403)
+    return templates.TemplateResponse(
+        request,
+        "error.html",
+        {"message": message, "current_user": getattr(request.state, "user", None)},
+        status_code=403,
+    )
+
+
+def _squad_from_path(path: str) -> str:
+    match = re.match(r"^/projects/(squad[1-5])(?:/|$)", path)
+    return match.group(1) if match else ""
+
+
+def _job_squad_from_runtime_path(path: str) -> str:
+    match = re.match(r"^/jobs/([a-f0-9]{32})(?:/|$)", path)
+    if not match:
+        return ""
+    metadata_path = RUNTIME_ROOT / match.group(1) / "metadata.json"
+    if not metadata_path.exists():
+        return ""
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str((metadata.get("project") or {}).get("squad") or "")
 
 
 def _login_page(request: Request, destination: str, error: str = "", status_code: int = 200) -> HTMLResponse:
@@ -187,6 +251,8 @@ async def login_submit(request: Request, password: str = Form(""), next: str = F
     destination = _safe_next(next)
     if not auth.auth_enabled():
         return RedirectResponse(destination, status_code=303)
+    if not auth.team_password_enabled():
+        return _login_page(request, destination, error="A senha compartilhada foi desativada. Entre com a Microsoft.", status_code=403)
     if not auth.password_matches(password):
         return _login_page(request, destination, error="Senha incorreta. Tente de novo.", status_code=401)
     return _start_session(request, destination)
@@ -243,6 +309,9 @@ async def entra_callback(
     except entra.EntraError as exc:
         return _login_page(request, destination, error=str(exc), status_code=401)
 
+    user = ensure_user(email)
+    if not user.is_admin and not user.squad:
+        destination = "/choose-squad"
     return _start_session(request, destination, subject=email)
 
 
@@ -267,6 +336,10 @@ def _actor(request: Request) -> str:
     return audit.actor_from(request.cookies, auth)
 
 
+def _request_user(request: Request):
+    return getattr(request.state, "user", None)
+
+
 def _safe_next(value: str) -> str:
     """So aceita caminho interno, para ninguem usar ?next= para redirecionar
     a vitima a um site externo depois do login."""
@@ -274,6 +347,46 @@ def _safe_next(value: str) -> str:
     if not candidate.startswith("/") or candidate.startswith("//"):
         return "/"
     return candidate
+
+
+@app.get("/choose-squad", response_class=HTMLResponse)
+async def choose_squad_form(request: Request) -> Response:
+    user = _request_user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if user.is_admin or user.squad:
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "choose_squad.html",
+        {"user": user, "squads": _squad_labels(), "error": ""},
+    )
+
+
+@app.post("/choose-squad", response_class=HTMLResponse)
+async def choose_squad_submit(request: Request, squad: str = Form("")) -> Response:
+    user = _request_user(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if user.is_admin or user.squad:
+        return RedirectResponse("/", status_code=303)
+    try:
+        selected = _normalize_squad_form(squad)
+        updated = update_user(user.email, squad=selected)
+        record_admin_event(
+            updated.email,
+            "selecionou_squad_no_primeiro_acesso",
+            updated.email,
+            {"squad": updated.squad},
+        )
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request,
+            "choose_squad.html",
+            {"user": user, "squads": _squad_labels(), "error": str(exc)},
+            status_code=400,
+        )
+    return RedirectResponse("/", status_code=303)
 
 
 @app.middleware("http")
@@ -296,20 +409,97 @@ async def production_guardrails(request: Request, call_next):
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request) -> HTMLResponse:
+async def index(request: Request, squad: str = "") -> HTMLResponse:
     ensure_store()
+    user = _request_user(request)
+    if user is not None and user.is_admin:
+        try:
+            selected_squad = _normalize_squad_form(squad or SQUADS[0])
+        except ValueError:
+            selected_squad = SQUADS[0]
+        visible_squads = [selected_squad]
+    elif user is not None and user.squad:
+        selected_squad = user.squad
+        visible_squads = [user.squad]
+    else:
+        selected_squad = _normalize_squad_form(squad or SQUADS[0])
+        visible_squads = list(SQUADS)
     return templates.TemplateResponse(
         request,
         "index.html",
         {
-            "squads": _squad_labels(),
-            "projects_by_squad": _projects_by_squad(),
-            "project_cards_by_squad": _project_cards_by_squad(),
-            "resume_cards": _resume_cards(),
-            "mapping_templates_by_squad": _mapping_templates_by_squad(),
+            "squads": _squad_labels(visible_squads),
+            "all_squads": _squad_labels(),
+            "selected_squad": selected_squad,
+            "current_user": user,
+            "is_admin": bool(user and user.is_admin),
+            "can_choose_squad": bool(user is None or user.is_admin),
+            "projects_by_squad": _projects_by_squad(visible_squads),
+            "project_cards_by_squad": _project_cards_by_squad(visible_squads),
+            "resume_cards": _resume_cards(visible_squads),
+            "mapping_templates_by_squad": _mapping_templates_by_squad(visible_squads),
             "ai_available": ai_configured(PROJECT_ROOT),
             "large_deck_slide_threshold": _large_deck_slide_threshold(),
+            "combined_upload_warning_mb": _combined_upload_warning_mb(),
         },
+    )
+
+
+@app.get("/admin/users", response_class=HTMLResponse)
+async def admin_users(request: Request, notice: str = "", error: str = "") -> HTMLResponse:
+    user = _request_user(request)
+    if user is None or not user.is_admin:
+        return _access_denied(request, "Apenas administradores podem abrir esta tela.")
+    ensure_store()
+    return templates.TemplateResponse(
+        request,
+        "admin_users.html",
+        {
+            "current_user": user,
+            "users": list_users(),
+            "squads": _squad_labels(),
+            "notice": notice,
+            "error": error,
+        },
+    )
+
+
+@app.post("/admin/users/update", response_class=HTMLResponse)
+async def admin_update_user(
+    request: Request,
+    email: str = Form(""),
+    squad: str = Form(""),
+    role: str = Form("user"),
+    active: str = Form(""),
+) -> Response:
+    actor = _request_user(request)
+    if actor is None or not actor.is_admin:
+        return _access_denied(request, "Apenas administradores podem alterar usuarios.")
+    try:
+        before = ensure_user(email)
+        after = update_user(
+            email,
+            squad=squad,
+            role=role,
+            active=bool(active),
+        )
+        record_admin_event(
+            actor.email,
+            "alterou_usuario",
+            after.email,
+            {
+                "antes": {"squad": before.squad, "role": before.role, "active": before.active},
+                "depois": {"squad": after.squad, "role": after.role, "active": after.active},
+            },
+        )
+    except ValueError as exc:
+        return RedirectResponse(
+            f"/admin/users?error={quote(str(exc), safe='')}",
+            status_code=303,
+        )
+    return RedirectResponse(
+        f"/admin/users?notice={quote(f'Usuario {after.email} atualizado.', safe='')}",
+        status_code=303,
     )
 
 
@@ -347,6 +537,7 @@ async def preview(
     confirm_large_deck: str = Form(""),
 ) -> HTMLResponse:
     try:
+        squad = _authorized_form_squad(request, squad, project_ref)
         project = _resolve_project(project_ref, squad, project_name)
         mapping_template = _resolve_mapping_template(project, mapping_template_ref)
         selected_slides = parse_slide_selection(slides_to_update)
@@ -403,6 +594,7 @@ async def preview(
             "auto_source_review_confidence_floor": _ai_review_confidence_floor(),
             "mapping_template": _mapping_template_metadata(mapping_template),
             "ppt_summary": ppt_summary,
+            "combined_upload_bytes": len(pptx_bytes) + sum(len(data) for _name, data in datasource_payloads) + len(mapping_bytes),
         },
     )
 
@@ -426,6 +618,7 @@ async def preview(
                 "numbers": selected_slides,
             },
             "ppt_summary": ppt_summary,
+            "combined_upload_bytes": len(pptx_bytes) + sum(len(data) for _name, data in datasource_payloads) + len(mapping_bytes),
             "large_deck_slide_threshold": _large_deck_slide_threshold(),
             "large_deck_confirmed": bool(confirm_large_deck),
             "mapping_template": _mapping_template_metadata(mapping_template),
@@ -434,7 +627,7 @@ async def preview(
             "ignore_mapping_candidates": False,
         },
     )
-    _save_project_checkpoint(job_dir, status="in_progress")
+    _save_project_checkpoint(job_dir, status="in_progress", include_inputs=True, reason="preview_criado")
     _init_preview_processing_state(job_dir)
     _start_preview_processing(job_dir)
     return _render_preview(request, job_id, notice="Preview iniciado. Os slides serao preenchidos conforme o processamento terminar.")
@@ -447,6 +640,10 @@ async def resume_project_preview(request: Request, squad: str, slug: str) -> HTM
         if project is None:
             raise ValueError("Projeto nao encontrado.")
         job_id = _restore_project_checkpoint(project)
+        job_dir = _job_dir(job_id)
+        if not (job_dir / "render_cache.json").exists():
+            _init_preview_processing_state(job_dir)
+            _start_preview_processing(job_dir)
     except Exception as exc:
         return _error_response(request, str(exc), status_code=400)
     return _render_preview(
@@ -782,6 +979,28 @@ async def start_generation(request: Request, job_id: str) -> JSONResponse:
     return JSONResponse({"status": "queued", "status_url": f"/jobs/{job_id}/generation-status"}, status_code=202)
 
 
+@app.post("/jobs/{job_id}/save")
+async def save_job_checkpoint(request: Request, job_id: str) -> JSONResponse:
+    job_dir = _job_dir(job_id)
+    actor = _actor(request)
+    await run_in_threadpool(
+        _save_project_checkpoint,
+        job_dir,
+        "in_progress",
+        False,
+        "salvamento_manual",
+    )
+    audit.record(job_dir, actor, "salvou_checkpoint_manual")
+    checkpoint = _load_job_checkpoint_summary(job_dir)
+    return JSONResponse(
+        {
+            "status": "saved",
+            "saved_at": checkpoint.get("updated_at") or _now_iso(),
+            "message": "Trabalho salvo. Voce pode voltar depois pela pagina inicial.",
+        }
+    )
+
+
 @app.get("/jobs/{job_id}/generation-status")
 async def generation_status(job_id: str) -> JSONResponse:
     job_dir = _job_dir(job_id)
@@ -886,7 +1105,13 @@ def _save_generation_state(job_dir: Path, state: dict) -> None:
 def _init_generation_state(job_dir: Path) -> None:
     _save_generation_state(
         job_dir,
-        {"status": "queued", "active": True, "message": "Aguardando geracao do PPT.", "created_at": _now_iso()},
+        {
+            "status": "queued",
+            "active": True,
+            "message": "Aguardando geracao do PPT.",
+            "created_at": _now_iso(),
+            "progress": {"completed": 0, "total": 0, "percent": 0, "phase": "queued"},
+        },
     )
 
 
@@ -894,7 +1119,9 @@ def _generate_job_worker(job_dir: Path) -> None:
     try:
         _generate_job_output(job_dir)
     except Exception as exc:
-        _save_generation_state(job_dir, {"status": "error", "active": False, "message": str(exc)})
+        state = _load_generation_state(job_dir)
+        state.update({"status": "error", "active": False, "message": str(exc)})
+        _save_generation_state(job_dir, state)
         _log_job_debug_event(job_dir, "generation_worker_error", {"error": repr(exc)})
     finally:
         with GENERATION_RUNNING_LOCK:
@@ -906,7 +1133,9 @@ def _generate_job_output(job_dir: Path) -> None:
     datasource_path = job_dir / "datasources.zip"
     if not pptx_path.exists() or not datasource_path.exists():
         raise FileNotFoundError("Job nao encontrado.")
-    _save_generation_state(job_dir, {"status": "running", "active": True, "message": "Gerando PPT atualizado."})
+    state = _load_generation_state(job_dir)
+    state.update({"status": "running", "active": True, "message": "Gerando PPT atualizado."})
+    _save_generation_state(job_dir, state)
     manual_sources = _manual_sources_for_job(job_dir)
     selected_slides = _selected_slides_for_job(job_dir)
     analysis = _cached_analyze_files(job_dir, manual_sources, selected_slides)
@@ -917,7 +1146,12 @@ def _generate_job_output(job_dir: Path) -> None:
     analysis = apply_ai_recommendations_to_analysis(analysis, ai_diagnostics)
     analysis = apply_typed_outputs_to_analysis(analysis, _slide_ai_target_outputs(job_dir))
     try:
-        output = generate_updated_pptx(pptx_path.read_bytes(), analysis.plans, targets=analysis.targets)
+        output = generate_updated_pptx(
+            pptx_path.read_bytes(),
+            analysis.plans,
+            targets=analysis.targets,
+            progress_callback=lambda payload: _record_generation_progress(job_dir, payload),
+        )
     except (EmbeddedWorkbookWriterUnavailable, ChartSheetUnresolvedError) as exc:
         raise RuntimeError(str(exc)) from exc
     file_name = _output_file_name(job_dir)
@@ -925,7 +1159,45 @@ def _generate_job_output(job_dir: Path) -> None:
     _generated_metadata_path(job_dir).write_text(json.dumps({"file_name": file_name}, ensure_ascii=False), encoding="utf-8")
     _save_project_run(job_dir, output, analysis, file_name)
     _save_project_checkpoint(job_dir, status="completed")
-    _save_generation_state(job_dir, {"status": "complete", "active": False, "message": "PPT pronto para download."})
+    state = _load_generation_state(job_dir)
+    state.update(
+        {
+            "status": "complete",
+            "active": False,
+            "message": "PPT pronto para download.",
+            "progress": {**(state.get("progress") or {}), "percent": 100, "phase": "complete"},
+        }
+    )
+    _save_generation_state(job_dir, state)
+
+
+def _record_generation_progress(job_dir: Path, payload: dict) -> None:
+    completed = max(int(payload.get("completed") or 0), 0)
+    total = max(int(payload.get("total") or 0), 0)
+    phase = str(payload.get("phase") or "targets")
+    if phase == "complete":
+        percent = 100
+    else:
+        # Empacotar o ZIP final e uma unidade real adicional. Assim a barra nao
+        # anuncia 100% enquanto o arquivo ainda esta sendo fechado.
+        percent = round(100 * completed / max(total + 1, 1))
+    state = _load_generation_state(job_dir)
+    state.update(
+        {
+            "status": "running",
+            "active": True,
+            "message": str(payload.get("message") or state.get("message") or "Gerando PPT atualizado."),
+            "progress": {
+                "completed": completed,
+                "total": total,
+                "percent": min(max(percent, 0), 100),
+                "phase": phase,
+                "slide": payload.get("slide"),
+                "target_id": payload.get("target_id"),
+            },
+        }
+    )
+    _save_generation_state(job_dir, state)
 
 
 def _reset_debug_log(job_dir: Path) -> None:
@@ -981,6 +1253,13 @@ def _init_preview_processing_state(job_dir: Path) -> None:
             "mapped": 0,
             "unmapped": 0,
         },
+        "progress": {
+            "completed": 0,
+            "total": 0,
+            "percent": 0,
+            "phase": "queued",
+            "message": "Preparando objetos do preview.",
+        },
     }
     _save_preview_processing_state(job_dir, state)
     _log_job_debug_event(
@@ -1022,6 +1301,7 @@ def _preview_processing_worker(job_dir: Path) -> None:
             apply_cached_source_matches=True,
             apply_cached_diagnostics=False,
             apply_slide_outputs=False,
+            progress_callback=lambda payload: _record_preview_progress(job_dir, payload),
         )
         log_debug_event(
             "analysis_done",
@@ -1161,6 +1441,25 @@ def _save_preview_processing_state(job_dir: Path, state: dict) -> None:
     tmp.replace(path)
 
 
+def _record_preview_progress(job_dir: Path, payload: dict) -> None:
+    state = _load_preview_processing_state(job_dir) or {}
+    completed = max(int(payload.get("completed") or 0), 0)
+    total = max(int(payload.get("total") or 0), 0)
+    phase = str(payload.get("phase") or "analysis")
+    percent = 100 if phase == "complete" else round(100 * completed / max(total, 1))
+    state["progress"] = {
+        "completed": completed,
+        "total": total,
+        "percent": min(max(percent, 0), 100),
+        "phase": phase,
+        "slide": payload.get("slide"),
+        "target_id": payload.get("target_id"),
+        "message": str(payload.get("message") or "Analisando objetos do preview."),
+    }
+    state["message"] = state["progress"]["message"]
+    _save_preview_processing_state(job_dir, state)
+
+
 def _update_preview_processing_state(
     job_dir: Path,
     status: str,
@@ -1175,6 +1474,11 @@ def _update_preview_processing_state(
     state["active"] = status in {"queued", "running"}
     state["current_stage"] = current_stage
     state["message"] = message
+    if state.get("progress"):
+        state["progress"]["message"] = message
+        if status == "complete":
+            state["progress"]["phase"] = "complete"
+            state["progress"]["percent"] = 100
     log_debug_event(
         "processing_state_update",
         {
@@ -1505,6 +1809,8 @@ def _render_preview(
             cached["notice"] = notice
             cached["error"] = error
             cached["ai_log_entries"] = _read_ai_logs(job_dir)
+            cached["current_user"] = _request_user(request)
+            cached["checkpoint_summary"] = _load_job_checkpoint_summary(job_dir)
             return templates.TemplateResponse(request, "preview.html", cached)
     metadata = _load_job_metadata(job_dir)
     processing_state = _load_preview_processing_state(job_dir)
@@ -1517,10 +1823,7 @@ def _render_preview(
                 "current_stage": processing_state.get("current_stage"),
             },
         )
-        return templates.TemplateResponse(
-            request,
-            "preview.html",
-            _processing_preview_context(
+        context = _processing_preview_context(
                 request,
                 job_id,
                 metadata,
@@ -1528,8 +1831,10 @@ def _render_preview(
                 notice=notice,
                 error=error,
                 selected_preview_slide=selected_preview_slide,
-            ),
-        )
+            )
+        context["current_user"] = _request_user(request)
+        context["checkpoint_summary"] = _load_job_checkpoint_summary(job_dir)
+        return templates.TemplateResponse(request, "preview.html", context)
     cached = _load_render_cache(job_dir)
     if ai_diagnostic_target_ids is None and _completed_preview_cache_usable(request, cached, selected_preview_slide):
         _log_job_debug_event(
@@ -1543,6 +1848,8 @@ def _render_preview(
         cached["notice"] = notice
         cached["error"] = error
         cached["ai_log_entries"] = _read_ai_logs(job_dir)
+        cached["current_user"] = _request_user(request)
+        cached["checkpoint_summary"] = _load_job_checkpoint_summary(job_dir)
         return templates.TemplateResponse(request, "preview.html", cached)
     try:
         render_started = time.perf_counter()
@@ -1595,6 +1902,8 @@ def _render_preview(
     )
     if not context["preview_is_windowed"]:
         _save_render_cache(job_dir, context)
+    context["current_user"] = _request_user(request)
+    context["checkpoint_summary"] = _load_job_checkpoint_summary(job_dir)
     _log_job_debug_event(
         job_dir,
         "render_preview_recompute_done",
@@ -1639,7 +1948,12 @@ def _analyze_files_signature(job_dir: Path, selected_slides: list[int]) -> tuple
     )
 
 
-def _cached_analyze_files(job_dir: Path, manual_sources: dict, selected_slides: list[int]) -> AnalysisResult:
+def _cached_analyze_files(
+    job_dir: Path,
+    manual_sources: dict,
+    selected_slides: list[int],
+    progress_callback=None,
+) -> AnalysisResult:
     signature = _analyze_files_signature(job_dir, selected_slides)
     job_key = job_dir.name
     with ANALYZE_FILES_CACHE_LOCK:
@@ -1647,12 +1961,22 @@ def _cached_analyze_files(job_dir: Path, manual_sources: dict, selected_slides: 
         if cached is not None and cached[0] == signature:
             ANALYZE_FILES_CACHE.move_to_end(job_key)
             log_debug_event("analyze_files_cache_hit", {"job_id": job_key})
+            if progress_callback:
+                progress_callback(
+                    {
+                        "phase": "matching",
+                        "completed": cached[1].target_count,
+                        "total": cached[1].target_count,
+                        "message": f"{cached[1].target_count} objeto(s) recuperado(s) do cache.",
+                    }
+                )
             return cached[1]
     analysis = analyze_files(
         (job_dir / "input.pptx").read_bytes(),
         (job_dir / "datasources.zip").read_bytes(),
         manual_sources=manual_sources,
         slide_numbers=selected_slides,
+        progress_callback=progress_callback,
     )
     with ANALYZE_FILES_CACHE_LOCK:
         ANALYZE_FILES_CACHE[job_key] = (signature, analysis)
@@ -1667,10 +1991,16 @@ def _analysis_for_job(
     apply_cached_source_matches: bool = True,
     apply_cached_diagnostics: bool = True,
     apply_slide_outputs: bool = True,
+    progress_callback=None,
 ) -> tuple[AnalysisResult, dict, list[dict], bool]:
     metadata = _load_job_metadata(job_dir)
     selected_slides = _selected_slides_for_job(job_dir)
-    analysis = _cached_analyze_files(job_dir, _manual_sources_for_job(job_dir), selected_slides)
+    analysis = _cached_analyze_files(
+        job_dir,
+        _manual_sources_for_job(job_dir),
+        selected_slides,
+        progress_callback=progress_callback,
+    )
     mapping_candidates = []
     selected_mapping_template = _selected_mapping_template(metadata)
     if selected_mapping_template:
@@ -3393,23 +3723,46 @@ def _resolve_project(project_ref: str, squad: str, project_name: str):
     return create_project(_normalize_squad_form(squad), project_name.strip())
 
 
-def _save_project_checkpoint(job_dir: Path, status: str = "in_progress") -> None:
+def _save_project_checkpoint(
+    job_dir: Path,
+    status: str = "in_progress",
+    include_inputs: bool = False,
+    reason: str = "autosave",
+) -> None:
     metadata = _load_job_metadata(job_dir)
     project_meta = metadata.get("project", {})
     project = load_project(project_meta.get("squad", ""), project_meta.get("slug", ""))
     if project is None:
         return
 
+    try:
+        previous = load_project_json(project, ["checkpoint"], "checkpoint.json")
+    except FileNotFoundError:
+        previous = {}
+    inputs_persisted = bool(previous.get("inputs_persisted")) or include_inputs
+    manual_overrides = {}
+    previous_overrides = previous.get("manual_overrides") or {}
+    for target_id, (filename, data, cell_range) in _manual_sources_for_job(job_dir).items():
+        digest = hashlib.sha256(data).hexdigest()
+        manual_overrides[target_id] = {
+            "filename": filename,
+            "range": cell_range,
+            "sha256": digest,
+        }
+        previous_override = previous_overrides.get(target_id) or {}
+        if previous_override.get("filename") != filename or previous_override.get("sha256") != digest:
+            save_project_bytes(project, ["checkpoint", "overrides", target_id], filename, data)
+
     checkpoint = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": status,
         "job_id": metadata.get("job_id"),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "save_reason": reason,
+        "save_count": int(previous.get("save_count") or 0) + 1,
+        "inputs_persisted": inputs_persisted,
         "metadata": metadata,
-        "manual_overrides": {
-            target_id: {"filename": filename, "range": cell_range}
-            for target_id, (filename, _data, cell_range) in _manual_sources_for_job(job_dir).items()
-        },
+        "manual_overrides": manual_overrides,
         "caches": {
             cache_name: (job_dir / cache_name).exists()
             for cache_name in ("ai_source_matches.json", "ai_diagnostics.json", "render_cache.json")
@@ -3419,14 +3772,17 @@ def _save_project_checkpoint(job_dir: Path, status: str = "in_progress") -> None
         },
         "slide_ai_state": (job_dir / "slide_ai_state.json").exists(),
     }
-    save_project_bytes(project, ["checkpoint"], "input.pptx", (job_dir / "input.pptx").read_bytes())
-    save_project_bytes(project, ["checkpoint"], "datasources.zip", (job_dir / "datasources.zip").read_bytes())
-    mapping_path = job_dir / "mapping.xlsx"
-    if mapping_path.exists():
-        save_project_bytes(project, ["checkpoint"], "mapping.xlsx", mapping_path.read_bytes())
+    # Inputs sao imutaveis. Sobem uma unica vez, antes do worker iniciar. Os
+    # autosaves seguintes gravam apenas JSON/caches pequenos: retomada robusta
+    # sem reenviar um deck de centenas de MB a cada clique.
+    if include_inputs or not inputs_persisted:
+        save_project_bytes(project, ["checkpoint"], "input.pptx", (job_dir / "input.pptx").read_bytes())
+        save_project_bytes(project, ["checkpoint"], "datasources.zip", (job_dir / "datasources.zip").read_bytes())
+        mapping_path = job_dir / "mapping.xlsx"
+        if mapping_path.exists():
+            save_project_bytes(project, ["checkpoint"], "mapping.xlsx", mapping_path.read_bytes())
+        checkpoint["inputs_persisted"] = True
 
-    for target_id, (filename, data, _cell_range) in _manual_sources_for_job(job_dir).items():
-        save_project_bytes(project, ["checkpoint", "overrides", target_id], filename, data)
     for cache_name in ("ai_source_matches.json", "ai_diagnostics.json", "render_cache.json"):
         cache_path = job_dir / cache_name
         if cache_path.exists():
@@ -3438,6 +3794,18 @@ def _save_project_checkpoint(job_dir: Path, status: str = "in_progress") -> None
     if ai_log_path.exists():
         save_project_bytes(project, ["checkpoint", "logs"], "ai_usage.jsonl", ai_log_path.read_bytes())
     save_project_json(project, ["checkpoint"], "checkpoint.json", checkpoint)
+
+
+def _load_job_checkpoint_summary(job_dir: Path) -> dict:
+    try:
+        metadata = _load_job_metadata(job_dir)
+        project_meta = metadata.get("project") or {}
+        project = load_project(project_meta.get("squad", ""), project_meta.get("slug", ""))
+        if project is None:
+            return {}
+        return load_project_json(project, ["checkpoint"], "checkpoint.json")
+    except (FileNotFoundError, ValueError):
+        return {}
 
 
 def _restore_project_checkpoint(project) -> str:
@@ -3848,6 +4216,10 @@ def _max_request_bytes() -> int:
     return max(_env_int("AUTO_PPT_MAX_REQUEST_MB", 600), 1) * 1024 * 1024
 
 
+def _combined_upload_warning_mb() -> int:
+    return max(_env_int("AUTO_PPT_WARN_COMBINED_MB", 250), 1)
+
+
 def _save_job_metadata(job_dir: Path, payload: dict) -> None:
     (job_dir / "metadata.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -3959,17 +4331,17 @@ def _unique_targets(targets: list) -> list:
     return output
 
 
-def _projects_by_squad() -> dict[str, list]:
-    return {squad: list_projects(squad) for squad in SQUADS}
+def _projects_by_squad(squads: list[str] | None = None) -> dict[str, list]:
+    return {squad: list_projects(squad) for squad in (squads or SQUADS)}
 
 
-def _mapping_templates_by_squad() -> dict[str, list]:
-    return {squad: list_mapping_templates(squad) for squad in SQUADS}
+def _mapping_templates_by_squad(squads: list[str] | None = None) -> dict[str, list]:
+    return {squad: list_mapping_templates(squad) for squad in (squads or SQUADS)}
 
 
-def _project_cards_by_squad() -> dict[str, list[dict]]:
+def _project_cards_by_squad(squads: list[str] | None = None) -> dict[str, list[dict]]:
     output: dict[str, list[dict]] = {}
-    for squad in SQUADS:
+    for squad in (squads or SQUADS):
         cards = []
         for project in list_projects(squad):
             checkpoint = _checkpoint_summary(project)
@@ -3987,11 +4359,11 @@ def _project_cards_by_squad() -> dict[str, list[dict]]:
     return output
 
 
-def _resume_cards() -> list[dict]:
+def _resume_cards(squads: list[str] | None = None) -> list[dict]:
     """Lista plana de projetos com progresso salvo ('continue de onde parou'),
     do mais recente para o mais antigo - independente de squad."""
     cards: list[dict] = []
-    for squad in SQUADS:
+    for squad in (squads or SQUADS):
         for project in list_projects(squad):
             checkpoint = _checkpoint_summary(project)
             if not checkpoint:
@@ -4051,8 +4423,8 @@ def _checkpoint_slide_label(checkpoint: dict) -> str:
     return ", ".join(str(slide) for slide in slides)
 
 
-def _squad_labels() -> list[dict[str, str]]:
-    return [{"value": squad, "label": squad.title()} for squad in SQUADS]
+def _squad_labels(squads: list[str] | None = None) -> list[dict[str, str]]:
+    return [{"value": squad, "label": squad.title()} for squad in (squads or SQUADS)]
 
 
 def _normalize_squad_form(value: str) -> str:
@@ -4062,18 +4434,34 @@ def _normalize_squad_form(value: str) -> str:
     return normalized
 
 
+def _authorized_form_squad(request: Request, squad: str, project_ref: str = "") -> str:
+    user = _request_user(request)
+    requested = _normalize_squad_form(squad)
+    if project_ref:
+        try:
+            ref_squad, _slug = project_ref.split("|", 1)
+            ref_squad = _normalize_squad_form(ref_squad)
+        except ValueError as exc:
+            raise ValueError("Projeto selecionado invalido.") from exc
+        if ref_squad != requested:
+            raise ValueError("O projeto selecionado nao pertence ao squad informado.")
+    if user is None or user.is_admin:
+        return requested
+    if not user.squad or requested != user.squad:
+        raise ValueError("Voce so pode criar ou abrir projetos do seu squad.")
+    if project_ref and ref_squad != user.squad:
+        raise ValueError("Voce so pode abrir projetos do seu squad.")
+    return user.squad
+
+
 def _error_response(request: Request, message: str, status_code: int = 400) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "error.html",
         {
             "message": message,
-            "squads": _squad_labels(),
-            "projects_by_squad": _projects_by_squad(),
-            "project_cards_by_squad": _project_cards_by_squad(),
-            "mapping_templates_by_squad": _mapping_templates_by_squad(),
-            "ai_available": ai_configured(PROJECT_ROOT),
-            "large_deck_slide_threshold": _large_deck_slide_threshold(),
+            "error_title": "Nao consegui concluir esta acao",
+            "current_user": _request_user(request),
         },
         status_code=status_code,
     )

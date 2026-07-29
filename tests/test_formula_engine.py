@@ -25,6 +25,22 @@ class FormulaEngineTests(unittest.TestCase):
         finally:
             result.close()
 
+    def test_calculates_sumproduct_used_by_real_datasources(self) -> None:
+        workbook = openpyxl.Workbook()
+        worksheet = workbook.active
+        worksheet["A1"] = 2
+        worksheet["A2"] = 3
+        worksheet["B1"] = 10
+        worksheet["B2"] = 20
+        worksheet["C1"] = "=SUMPRODUCT(A1:A2,B1:B2)"
+
+        output = prepare_workbook_values(_workbook_bytes(workbook), formula_mode="auto")
+        result = openpyxl.load_workbook(BytesIO(output), data_only=True)
+        try:
+            self.assertEqual(result.active["C1"].value, 80)
+        finally:
+            result.close()
+
     def test_rejects_unknown_formula_instead_of_guessing_a_value(self) -> None:
         workbook = openpyxl.Workbook()
         workbook.active["A1"] = "=VLOOKUP(1,A1:B2,2,FALSE)"

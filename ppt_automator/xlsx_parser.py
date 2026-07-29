@@ -5,9 +5,10 @@ from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any, BinaryIO
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 import re
 import unicodedata
+import xml.etree.ElementTree as ET
 
 import openpyxl
 from openpyxl.utils.cell import range_boundaries
@@ -68,9 +69,10 @@ def parse_xlsx_table(
     cell_range: str = "",
 ) -> ParsedXlsxTable:
     original_bytes = read_bytes(workbook_file)
-    calculated_bytes = prepare_workbook_values(original_bytes, formula_mode=formula_mode)
+    readable_bytes = _openpyxl_readable_copy(original_bytes)
+    calculated_bytes = prepare_workbook_values(readable_bytes, formula_mode=formula_mode)
     data_wb = openpyxl.load_workbook(BytesIO(calculated_bytes), data_only=True, read_only=True)
-    formula_wb = openpyxl.load_workbook(BytesIO(original_bytes), data_only=False, read_only=True)
+    formula_wb = openpyxl.load_workbook(BytesIO(readable_bytes), data_only=False, read_only=True)
     data_ws, range_ref = _select_worksheet(data_wb, cell_range)
     formula_ws = formula_wb[data_ws.title] if data_ws.title in formula_wb.sheetnames else formula_wb.worksheets[0]
     if range_ref:
@@ -98,6 +100,66 @@ def parse_xlsx_table(
     data_wb.close()
     formula_wb.close()
     return parsed
+
+
+def _openpyxl_readable_copy(workbook_bytes: bytes) -> bytes:
+    """Remove apenas metadados de pivot que impedem o openpyxl de ler o XLSX.
+
+    Tabelas dinamicas nao sao fonte de dados deste produto; os valores visiveis
+    das celulas continuam no worksheet. A cirurgia acontece numa copia em
+    memoria, nunca no arquivo enviado nem no original do usuario.
+    """
+    with ZipFile(BytesIO(workbook_bytes)) as source:
+        names = source.namelist()
+        has_pivot_parts = any(
+            name.startswith(("xl/pivotCache/", "xl/pivotTables/"))
+            for name in names
+        )
+        if not has_pivot_parts:
+            return workbook_bytes
+        output = BytesIO()
+        with ZipFile(output, "w", ZIP_DEFLATED) as target:
+            for info in source.infolist():
+                name = info.filename
+                if name.startswith(("xl/pivotCache/", "xl/pivotTables/")):
+                    continue
+                data = source.read(name)
+                if name == "xl/workbook.xml":
+                    data = _remove_xml_children_by_local_name(data, {"pivotCaches"})
+                elif name.endswith(".rels"):
+                    data = _remove_pivot_relationships(data)
+                elif name == "[Content_Types].xml":
+                    data = _remove_pivot_content_types(data)
+                target.writestr(info, data)
+        return output.getvalue()
+
+
+def _remove_xml_children_by_local_name(xml_bytes: bytes, names: set[str]) -> bytes:
+    root = ET.fromstring(xml_bytes)
+    for parent in root.iter():
+        for child in list(parent):
+            if child.tag.rsplit("}", 1)[-1] in names:
+                parent.remove(child)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _remove_pivot_relationships(xml_bytes: bytes) -> bytes:
+    root = ET.fromstring(xml_bytes)
+    for relationship in list(root):
+        rel_type = str(relationship.attrib.get("Type") or "").lower()
+        if "pivottable" in rel_type or "pivotcache" in rel_type:
+            root.remove(relationship)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _remove_pivot_content_types(xml_bytes: bytes) -> bytes:
+    root = ET.fromstring(xml_bytes)
+    for child in list(root):
+        part_name = str(child.attrib.get("PartName") or "").lower()
+        content_type = str(child.attrib.get("ContentType") or "").lower()
+        if "/pivottable" in part_name or "/pivotcache" in part_name or "pivot" in content_type:
+            root.remove(child)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def _select_worksheet(workbook: Any, cell_range: str) -> tuple[Any, str]:

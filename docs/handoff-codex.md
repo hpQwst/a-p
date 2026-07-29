@@ -1,5 +1,12 @@
 # Handoff para o Codex — automatizador-ppt
 
+> **Resolvido em 2026-07-29:** Hugo respondeu às perguntas da seção 4. Foram
+> implementados usuários `squad1`–`squad5` isolados, administração, login Entra
+> sem senha compartilhada, progresso real, salvamento manual + automático,
+> retomada após reinício, benchmark com cópias locais dos arquivos reais e
+> controles de custo. As decisões históricas abaixo ficam preservadas como
+> contexto; o estado atual está em `CLAUDE.md` e `DEPLOYMENT.md`.
+
 Documento de contexto para continuar o trabalho a partir daqui. Foi escrito por
 um agente anterior (Claude) que não deixa histórico acessível ao Codex, então
 tudo que importa está aqui.

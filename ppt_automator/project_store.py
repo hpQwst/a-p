@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+import hashlib
 import json
 import os
 import re
@@ -49,6 +50,21 @@ class RunRef:
     created_at: str
 
 
+@dataclass(frozen=True)
+class UserRef:
+    email: str
+    squad: str
+    role: str
+    active: bool
+    created_at: str
+    updated_at: str
+    backend: str
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == "admin"
+
+
 def storage_backend() -> str:
     return os.getenv("AUTO_PPT_STORAGE_BACKEND", "local").strip().lower() or "local"
 
@@ -92,6 +108,8 @@ def ensure_store() -> str:
         for squad in SQUADS:
             (root / "squads" / squad / "projects").mkdir(parents=True, exist_ok=True)
             (root / "squads" / squad / "mapping_templates").mkdir(parents=True, exist_ok=True)
+        (root / "users" / "profiles").mkdir(parents=True, exist_ok=True)
+        (root / "admin_audit").mkdir(parents=True, exist_ok=True)
         return str(root)
     if backend == "s3":
         bucket = _s3_bucket()
@@ -99,6 +117,158 @@ def ensure_store() -> str:
             raise ValueError("AUTO_PPT_S3_BUCKET precisa estar configurado quando AUTO_PPT_STORAGE_BACKEND=s3.")
         return f"s3://{bucket}/{storage_prefix()}"
     raise ValueError(f"Backend de storage nao suportado: {backend}")
+
+
+def normalize_email(value: str) -> str:
+    email = (value or "").strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise ValueError("E-mail de usuario invalido.")
+    return email
+
+
+def bootstrap_admin_emails() -> set[str]:
+    raw = os.getenv("AUTO_PPT_BOOTSTRAP_ADMINS", "hugo.rocha@qwst.co")
+    return {
+        item.strip().lower()
+        for item in re.split(r"[,;\s]+", raw)
+        if item.strip() and "@" in item
+    }
+
+
+def load_user(email: str) -> UserRef | None:
+    email = normalize_email(email)
+    backend = storage_backend()
+    if backend == "local":
+        path = _local_user_path(email)
+        if not path.exists():
+            return None
+        return _user_from_payload(_read_json_file(path), backend)
+    if backend == "s3":
+        try:
+            return _user_from_payload(_read_json_s3(_s3_user_key(email)), backend)
+        except FileNotFoundError:
+            return None
+    raise ValueError(f"Backend de storage nao suportado: {backend}")
+
+
+def ensure_user(email: str) -> UserRef:
+    """Cria o perfil no primeiro login.
+
+    Administradores de bootstrap entram ativos e sem squad fixo. Demais
+    usuarios ficam ativos, mas precisam escolher um dos cinco squads antes de
+    acessar qualquer projeto.
+    """
+    email = normalize_email(email)
+    existing = load_user(email)
+    if existing is not None:
+        return existing
+    now = utc_now()
+    is_bootstrap_admin = email in bootstrap_admin_emails()
+    payload = {
+        "schema_version": 1,
+        "email": email,
+        "squad": "",
+        "role": "admin" if is_bootstrap_admin else "user",
+        "active": True,
+        "created_at": now,
+        "updated_at": now,
+        "backend": storage_backend(),
+    }
+    _save_user_payload(payload)
+    return _user_from_payload(payload, storage_backend())
+
+
+def list_users() -> list[UserRef]:
+    backend = storage_backend()
+    payloads: list[dict] = []
+    if backend == "local":
+        root = data_root() / "users" / "profiles"
+        if not root.exists():
+            return []
+        payloads = [_read_json_file(path) for path in root.glob("*.json")]
+    elif backend == "s3":
+        client = _s3_client()
+        bucket = _s3_bucket(required=True)
+        prefix = _s3_user_prefix()
+        token = None
+        while True:
+            kwargs = {"Bucket": bucket, "Prefix": prefix}
+            if token:
+                kwargs["ContinuationToken"] = token
+            response = client.list_objects_v2(**kwargs)
+            for item in response.get("Contents", []):
+                key = item.get("Key", "")
+                if key.endswith(".json"):
+                    payloads.append(_read_json_s3(key))
+            if not response.get("IsTruncated"):
+                break
+            token = response.get("NextContinuationToken")
+    else:
+        raise ValueError(f"Backend de storage nao suportado: {backend}")
+    return sorted(
+        (_user_from_payload(payload, backend) for payload in payloads),
+        key=lambda item: (not item.active, item.email),
+    )
+
+
+def update_user(
+    email: str,
+    *,
+    squad: str | None = None,
+    role: str | None = None,
+    active: bool | None = None,
+) -> UserRef:
+    email = normalize_email(email)
+    current = ensure_user(email)
+    next_squad = current.squad if squad is None else (normalize_squad(squad) if squad else "")
+    next_role = current.role if role is None else role.strip().lower()
+    if next_role not in {"user", "admin"}:
+        raise ValueError("Papel de usuario invalido.")
+    next_active = current.active if active is None else bool(active)
+    if email in bootstrap_admin_emails() and (next_role != "admin" or not next_active):
+        raise ValueError("O administrador de bootstrap nao pode ser desativado nem rebaixado.")
+    if current.role == "admin" and current.active and (next_role != "admin" or not next_active):
+        remaining = [
+            user
+            for user in list_users()
+            if user.email != email and user.role == "admin" and user.active
+        ]
+        if not remaining:
+            raise ValueError("Mantenha ao menos um administrador ativo.")
+    payload = {
+        "schema_version": 1,
+        "email": email,
+        "squad": next_squad,
+        "role": next_role,
+        "active": next_active,
+        "created_at": current.created_at,
+        "updated_at": utc_now(),
+        "backend": storage_backend(),
+    }
+    _save_user_payload(payload)
+    return _user_from_payload(payload, storage_backend())
+
+
+def record_admin_event(actor: str, action: str, subject: str, details: dict | None = None) -> str:
+    payload = {
+        "schema_version": 1,
+        "id": str(uuid.uuid4()),
+        "created_at": utc_now(),
+        "actor": normalize_email(actor),
+        "action": str(action or "").strip(),
+        "subject": str(subject or "").strip().lower(),
+        "details": details or {},
+    }
+    filename = f"{datetime.now(UTC).strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}.json"
+    if storage_backend() == "local":
+        path = data_root() / "admin_audit" / filename
+        _write_json_file(path, payload)
+        return str(path)
+    if storage_backend() == "s3":
+        key = _s3_admin_audit_key(filename)
+        _write_json_s3(key, payload)
+        return f"s3://{_s3_bucket(required=True)}/{key}"
+    raise ValueError(f"Backend de storage nao suportado: {storage_backend()}")
 
 
 def list_projects(squad: str) -> list[ProjectRef]:
@@ -444,6 +614,39 @@ def _mapping_template_from_payload(payload: dict, backend: str) -> MappingTempla
     )
 
 
+def _user_from_payload(payload: dict, backend: str) -> UserRef:
+    return UserRef(
+        email=normalize_email(str(payload.get("email") or "")),
+        squad=str(payload.get("squad") or ""),
+        role=str(payload.get("role") or "user"),
+        active=bool(payload.get("active", True)),
+        created_at=str(payload.get("created_at") or ""),
+        updated_at=str(payload.get("updated_at") or ""),
+        backend=backend,
+    )
+
+
+def _user_file_id(email: str) -> str:
+    return hashlib.sha256(normalize_email(email).encode("utf-8")).hexdigest()
+
+
+def _local_user_path(email: str) -> Path:
+    return data_root() / "users" / "profiles" / f"{_user_file_id(email)}.json"
+
+
+def _save_user_payload(payload: dict) -> None:
+    email = normalize_email(str(payload.get("email") or ""))
+    if storage_backend() == "local":
+        path = _local_user_path(email)
+        with _file_lock(path):
+            _write_json_file(path, payload)
+        return
+    if storage_backend() == "s3":
+        _write_json_s3(_s3_user_key(email), payload)
+        return
+    raise ValueError(f"Backend de storage nao suportado: {storage_backend()}")
+
+
 def _normalize_mapping_entries(entries: dict) -> dict:
     output = {}
     for target_id, entry in (entries or {}).items():
@@ -625,6 +828,18 @@ def _s3_mapping_template_prefix(squad: str, slug: str, *parts: str) -> str:
         segments.append(slug)
     segments.extend(part.strip("/") for part in parts if part)
     return "/".join(segment for segment in segments if segment)
+
+
+def _s3_user_prefix() -> str:
+    return "/".join(segment for segment in [storage_prefix(), "users", "profiles"] if segment) + "/"
+
+
+def _s3_user_key(email: str) -> str:
+    return f"{_s3_user_prefix()}{_user_file_id(email)}.json"
+
+
+def _s3_admin_audit_key(filename: str) -> str:
+    return "/".join(segment for segment in [storage_prefix(), "admin_audit", safe_filename(filename)] if segment)
 
 
 def _s3_client():

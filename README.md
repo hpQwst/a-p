@@ -20,10 +20,14 @@ Na interface FastAPI, envie:
 
 O fluxo atual da UI web e:
 
-1. `Projeto`: escolha o squad e informe o nome do projeto.
-2. `Arquivos`: envie o PPTX modelo e o ZIP com os XLSX.
-3. `Preview`: confira todos os targets descobertos por slide, com tipo, datasource, acao e matriz final. Se algum match estiver errado, envie um XLSX diretamente no card daquele target.
-4. `Download`: baixe o PPT atualizado.
+1. `Acesso`: entre com Microsoft Entra. No primeiro login, usuário comum escolhe
+   uma única squad; administrador pode visualizar qualquer uma.
+2. `Projeto`: escolha ou crie um projeto dentro da squad permitida.
+3. `Arquivos`: envie o PPTX modelo e o ZIP com os XLSX.
+4. `Preview`: acompanhe o progresso por objeto, confira os matches e ajuste os
+   pendentes. O trabalho é salvo automaticamente e também pelo botão
+   `Salvar trabalho`.
+5. `Download`: acompanhe a geração por objeto e baixe o PPT atualizado.
 
 ## Core novo de targets
 
@@ -52,6 +56,8 @@ O produto organiza o trabalho assim:
 - `Modelos de mapeamento`: memoria reutilizavel por squad, separada dos projetos. Um mapeamento criado no Squad2 nunca aparece como candidato para projetos do Squad1.
 - `Execucoes`: cada geracao salva uma nova pasta/objeto com inputs, PPT final e relatorio JSON.
 - `Memoria`: correcoes manuais de mapeamento ficam salvas no projeto para auditoria e evolucao futura.
+- `Usuários`: perfis comuns ficam isolados em uma squad; administradores alteram
+  squad, papel e status em `/admin/users`.
 
 Por padrao, em desenvolvimento, isso fica em `workspace_data/` e nao vai para o Git. Na AWS, o mesmo contrato usa S3 com:
 
@@ -105,7 +111,7 @@ No caminho recomendado, a IA de mapeamento recebe registros JSONL por slide: obj
 
 Essa revisao enxuta de datasource roda automaticamente para targets sem match e para matches deterministicos abaixo de `AUTO_PPT_AI_REVIEW_CONFIDENCE_FLOOR` (padrao `0.80`), quando `OPENAI_API_KEY` estiver configurada. Para desligar essa revisao automatica e manter apenas o fluxo deterministico/manual, use `AUTO_PPT_AI_AUTO_SOURCE_REVIEW=0`. Esse mecanismo nao habilita a IA por slide nem a gravacao de matrizes finais por IA.
 
-Em decks grandes, a revisao enxuta cobre todos os targets pendentes numa unica passada de preview, em lotes de `AUTO_PPT_AI_SOURCE_MATCH_BATCH_TARGETS` (padrao 10) ate o teto de `AUTO_PPT_AI_MATCH_MAX_CALLS` chamadas (padrao 12, ou seja, ate 120 targets por passada). O cache e salvo apos cada lote. A revisao por slide (texto estruturado + matriz) e limitada a `AUTO_PPT_SLIDE_AI_MAX_SLIDES_PER_RUN` slides por execucao (padrao 12), priorizando os slides com targets sem match ou de baixa confianca.
+Em decks grandes, a revisao enxuta cobre todos os targets pendentes numa unica passada de preview, em lotes de `AUTO_PPT_AI_SOURCE_MATCH_BATCH_TARGETS` (padrao 10) ate o teto de `AUTO_PPT_AI_MATCH_MAX_CALLS` chamadas (padrao 12, ou seja, ate 120 targets por passada). O cache e salvo apos cada lote. A revisao por slide (texto estruturado + matriz) e limitada a `AUTO_PPT_SLIDE_AI_MAX_SLIDES_PER_RUN` slides por execucao (padrao 1), priorizando os slides com targets sem match ou de baixa confianca.
 
 Cada operacao de IA pode usar um modelo proprio via `OPENAI_MODEL_SOURCE_MATCH`, `OPENAI_MODEL_SLIDE_UNDERSTANDING`, `OPENAI_MODEL_SLIDE_MATRIX_BUILDER` e `OPENAI_MODEL_TRANSFORM_DIAGNOSTICS`, todos com fallback para `OPENAI_MODEL`. O match enxuto escolhe entre candidatos ja pontuados localmente e funciona bem em modelos mais baratos.
 
@@ -133,7 +139,7 @@ Se a sugestao estiver errada, o card do target permite enviar um XLSX correto e 
 
 ## Formulas no Excel
 
-O servidor interpreta formulas sem iniciar Office, COM ou LibreOffice. O avaliador interno cobre referencias de celulas/ranges, operacoes aritmeticas, `SUM`/`SOMA`, `AVERAGE`/`MEDIA`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`/`SE`, `SUMIF`/`SOMASE` e `COUNTIF`/`CONT.SE`.
+O servidor interpreta formulas sem iniciar Office, COM ou LibreOffice. O avaliador interno cobre referencias de celulas/ranges, operacoes aritmeticas, `SUM`/`SOMA`, `SUMPRODUCT`/`SOMARPRODUTO`, `AVERAGE`/`MEDIA`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`/`SE`, `SUMIF`/`SOMASE` e `COUNTIF`/`CONT.SE`.
 
 Uma formula fora desse contrato interrompe o preview com uma mensagem clara; assim o sistema nao inventa valores. Como excecao consciente, `AUTO_PPT_FORMULA_FALLBACK=cached` permite usar o valor de cache ja salvo pelo autor do XLSX.
 
@@ -146,7 +152,7 @@ Para preservar o comando `Editar dados` do PowerPoint, o sistema nao usa `python
 Isso significa:
 
 - em desenvolvimento Windows, o app continua funcionando normalmente;
-- em Linux/Docker/Fargate Linux, a geracao final de PPT com graficos editaveis deve funcionar sem Microsoft Office;
+- no container Linux do App Runner, a geracao final funciona sem Microsoft Office;
 - o workbook embutido mantem dados completos para `Editar dados`;
 - o `chart.xml` e atualizado para o grafico ja abrir visualmente correto;
 - tabelas PowerPoint/DrawingML sao atualizadas diretamente no XML preservando estilo.
@@ -168,9 +174,13 @@ O teste MB usa, por padrao, `C:\Users\HugoRocha\Documents\automatizador-ppt-arqu
 
 ## Deploy AWS
 
-A infraestrutura de producao esta em `infra/aws/v1-fargate.yaml`: ALB HTTPS, uma task web e workers Fargate sob demanda para preview e geração. Estado, inputs e resultados transitórios ficam no S3; não há Office, LibreOffice, EFS ou fila obrigatória na v1.
+Produção usa um único serviço AWS App Runner em `us-east-1`, com 1 vCPU, 2 GB,
+máximo de uma instância e estado durável no S3. O acesso é exclusivamente pelo
+Microsoft Entra; a senha compartilhada está desativada.
 
-Veja [infra/aws/README.md](infra/aws/README.md) e [docs/aws_architecture.md](docs/aws_architecture.md) para pré-requisitos e comando de deploy. O acesso exige CIDR corporativo/VPN; o script bloqueia exposição pública até haver autenticação OIDC/Cognito.
+Veja [DEPLOYMENT.md](DEPLOYMENT.md) e
+[infra/aws/README.md](infra/aws/README.md) para arquitetura, controles de custo,
+benchmark de memória e comando de publicação.
 
 ## Estrategia tecnica
 

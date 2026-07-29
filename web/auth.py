@@ -1,12 +1,11 @@
 """Autenticacao do app.
 
-Dois modos, que convivem:
+Dois modos disponiveis:
 
-- **Microsoft Entra (OIDC)**: modo principal quando `ENTRA_CLIENT_ID` e companhia
-  estao definidos. Fluxo Authorization Code, aplicativo single-tenant.
-- **Senha unica da equipe**: reserva, em `AUTO_PPT_TEAM_PASSWORD`. Continua
-  existindo de proposito, para ninguem ficar sem acesso se o Entra estiver fora
-  do ar ou mal configurado.
+- **Microsoft Entra (OIDC)**: modo exclusivo de producao. Fluxo Authorization
+  Code, aplicativo single-tenant e identidade nominal para isolamento por squad.
+- **Senha unica da equipe**: somente desenvolvimento local. Producao define
+  `AUTO_PPT_TEAM_PASSWORD_ENABLED=0`, mesmo que o segredo antigo ainda exista.
 
 Sem nenhum dos dois configurados o app fica aberto, o que so faz sentido em
 desenvolvimento local.
@@ -73,6 +72,11 @@ def entra_enabled() -> bool:
 
 
 def team_password_enabled() -> bool:
+    configured = os.getenv("AUTO_PPT_TEAM_PASSWORD_ENABLED", "").strip().lower()
+    if configured in {"0", "false", "no", "off"}:
+        return False
+    if configured in {"1", "true", "yes", "on"}:
+        return bool(team_password())
     return bool(team_password())
 
 
@@ -174,6 +178,8 @@ def _safe_decode(value: str) -> str:
 
 
 def password_matches(candidate: str) -> bool:
+    if not team_password_enabled():
+        return False
     expected = team_password()
     if not expected:
         return False

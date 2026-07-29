@@ -72,6 +72,40 @@ class PptChartWriterFormatTests(unittest.TestCase):
         self.assertEqual(parsed.series, ["Detrator", "Promotor", "NPS"])
         self.assertEqual(parsed.series_number_formats, ["0%", "0%", "#,##0.0"])
 
+    def test_uniform_xlsx_percent_format_survives_axis_reorientation(self) -> None:
+        target = replace(
+            _mixed_chart_target(),
+            expected_series=["Faixa A", "Faixa B"],
+            series_value_formats=["", ""],
+        )
+        source = ParsedXlsxTable(
+            source_id="dados",
+            file_name="dados.xlsx",
+            sheet_name="Sheet1",
+            orientation="categories_rows_series_columns",
+            categories=["Faixa A", "Faixa B"],
+            series=["Total", "Rede 1", "Rede 2"],
+            values=[[0.6, 0.7, 0.8], [0.4, 0.3, 0.2]],
+            series_number_formats=["###0.0%", "###0.0%", "###0.0%"],
+        )
+        plan = TransformPlan(
+            target=target,
+            datasource=source,
+            action="transpose",
+            orientation_xlsx=source.orientation,
+            orientation_ppt="series_rows_categories_columns",
+            categories=source.series,
+            series=source.categories,
+            values=source.values,
+            confidence=1.0,
+            reason="teste",
+        )
+
+        self.assertEqual(
+            resolved_series_number_formats(target, plan),
+            ["###0.0%", "###0.0%"],
+        )
+
     def test_chart_xml_receives_distinct_formats_without_scaling_values(self) -> None:
         target = _mixed_chart_target()
         plan = _mixed_chart_plan(target)

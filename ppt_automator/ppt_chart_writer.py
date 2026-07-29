@@ -36,6 +36,7 @@ def resolved_series_number_formats(target: PptTarget, plan: TransformPlan) -> li
     )
     source_labels = list(plan.datasource.series or [])
     source_formats = list(plan.datasource.series_number_formats or [])
+    uniform_source_format = _uniform_number_format(source_formats)
     explicit = (
         plan.number_format
         if plan.number_format and plan.number_format != "thousands_pt_br"
@@ -60,7 +61,13 @@ def resolved_series_number_formats(target: PptTarget, plan: TransformPlan) -> li
         automatic = next(
             (
                 fmt
-                for fmt in (target_format, target_global_format, source_format, explicit)
+                for fmt in (
+                    target_format,
+                    target_global_format,
+                    source_format,
+                    uniform_source_format,
+                    explicit,
+                )
                 if _meaningful_number_format(fmt)
             ),
             "",
@@ -75,6 +82,21 @@ def resolved_series_number_formats(target: PptTarget, plan: TransformPlan) -> li
         )
         output.append(_format_for_mode(automatic, mode))
     return output
+
+
+def _uniform_number_format(formats: list[str]) -> str:
+    meaningful = [str(fmt).strip() for fmt in formats if _meaningful_number_format(fmt)]
+    if not meaningful:
+        return ""
+    normalized = {_normalized_format_contract(fmt) for fmt in meaningful}
+    return meaningful[0] if len(normalized) == 1 else ""
+
+
+def _normalized_format_contract(number_format: str) -> str:
+    text = str(number_format or "").strip().casefold()
+    if "%" in text:
+        return "percent"
+    return re.sub(r"[^0#?.,]", "", text)
 
 
 class ChartSheetUnresolvedError(RuntimeError):

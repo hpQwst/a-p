@@ -14,6 +14,7 @@ import openpyxl
 from fastapi.testclient import TestClient
 
 from ppt_automator import analyze_update_package, generate_updated_pptx
+from ppt_automator.regression_validation import validate_generated_pptx
 from web.main import app
 
 
@@ -28,13 +29,18 @@ NS = {"s": SHEET_NS}
 
 @unittest.skipUnless(PPT.exists() and DATASOURCES.exists(), "Arquivos Andre de regressao nao encontrados.")
 class AndreWebFlowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.targets, cls.sources, cls.plans = analyze_update_package(PPT, DATASOURCES)
+        cls.generated = generate_updated_pptx(PPT, cls.plans, targets=cls.targets)
+
     def test_andre_package_analyzes_without_none_comparison_error(self) -> None:
-        targets, sources, plans = analyze_update_package(PPT, DATASOURCES)
-        self.assertGreaterEqual(len(targets), 12)
-        self.assertEqual(len(sources), 12)
-        self.assertEqual(len(plans), 12)
-        output = generate_updated_pptx(PPT, plans)
-        self.assertGreater(len(output), 1_000_000)
+        self.assertGreaterEqual(len(self.targets), 12)
+        self.assertEqual(len(self.sources), 12)
+        self.assertEqual(len(self.plans), 12)
+        self.assertGreater(len(self.generated), 1_000_000)
+        report = validate_generated_pptx(PPT, self.generated, self.plans)
+        self.assertEqual(report.charts_checked + report.tables_checked, len(self.plans))
 
     def test_selected_slides_only_parse_their_datasources(self) -> None:
         targets, sources, plans = analyze_update_package(PPT, DATASOURCES, slide_numbers=[3])
@@ -45,10 +51,8 @@ class AndreWebFlowTests(unittest.TestCase):
         self.assertEqual(len(plans), 4)
 
     def test_generated_chart_workbook_keeps_edit_data_package_valid(self) -> None:
-        _targets, _sources, plans = analyze_update_package(PPT, DATASOURCES)
-        plan = next(item for item in plans if item.target.shape_name == "7792738590")
-        output = generate_updated_pptx(PPT, plans)
-        with ZipFile(BytesIO(output)) as pptx:
+        plan = next(item for item in self.plans if item.target.shape_name == "7792738590")
+        with ZipFile(BytesIO(self.generated)) as pptx:
             workbook_bytes = pptx.read(plan.target.workbook_embedded)
 
         with ZipFile(BytesIO(workbook_bytes)) as workbook:

@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 import openpyxl
 
 from ppt_automator import analyze_update_package, generate_updated_pptx
+from ppt_automator.regression_validation import validate_generated_pptx
 
 
 MB_DIR = Path(os.getenv("AUTO_PPT_MB_TEST_DIR", r"C:\Users\HugoRocha\Documents\automatizador-ppt-arquivos\mb"))
@@ -60,7 +61,10 @@ class MbUpdateTargetTests(unittest.TestCase):
         self.assertEqual(source.values[0], [13126.0, 12626.0, 8483.0, 9401.0, 11929.0])
 
     def test_generated_ppt_updates_chart_and_powerpoint_table(self) -> None:
-        output = generate_updated_pptx(PPT, self.plans)
+        output = generate_updated_pptx(PPT, self.plans, targets=self.targets)
+        report = validate_generated_pptx(PPT, output, self.plans)
+        self.assertEqual(report.charts_checked, 1)
+        self.assertEqual(report.tables_checked, 1)
         with ZipFile(BytesIO(output)) as zf:
             wb = openpyxl.load_workbook(BytesIO(zf.read("ppt/embeddings/Microsoft_Excel_Worksheet.xlsx")), data_only=True)
             ws = wb.worksheets[0]

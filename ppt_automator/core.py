@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Iterable
 from zipfile import ZipFile
 import ast
+import math
 import os
 import posixpath
 import re
@@ -799,6 +800,8 @@ class _SimpleFormulaEvaluator:
             "CONT.SE": "_countif",
             "CONTSE": "_countif",
             "ABS": "abs",
+            "SQRT": "_sqrt",
+            "RAIZ": "_sqrt",
         }
 
         def repl(match: re.Match[str]) -> str:
@@ -834,6 +837,7 @@ class _SimpleFormulaEvaluator:
             "_countif": self._countif,
             "round": round,
             "abs": abs,
+            "_sqrt": lambda value: math.sqrt(_to_number(value)),
         }
 
     def _cell_value(self, sheet_name: str, coordinate: str) -> Any:

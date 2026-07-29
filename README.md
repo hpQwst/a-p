@@ -140,7 +140,7 @@ Se a sugestao estiver errada, o card do target permite enviar um XLSX correto e 
 
 ## Formulas no Excel
 
-O servidor interpreta formulas sem iniciar Office, COM ou LibreOffice. O avaliador interno cobre referencias de celulas/ranges, operacoes aritmeticas, `SUM`/`SOMA`, `SUMPRODUCT`/`SOMARPRODUTO`, `AVERAGE`/`MEDIA`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`/`SE`, `SUMIF`/`SOMASE` e `COUNTIF`/`CONT.SE`.
+O servidor interpreta formulas sem iniciar Office, COM ou LibreOffice. O avaliador interno cobre referencias de celulas/ranges, operacoes aritmeticas, `SUM`/`SOMA`, `SUMPRODUCT`/`SOMARPRODUTO`, `AVERAGE`/`MEDIA`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`/`SE`, `SUMIF`/`SOMASE`, `COUNTIF`/`CONT.SE` e `SQRT`/`RAIZ`.
 
 Uma formula fora desse contrato interrompe o preview com uma mensagem clara; assim o sistema nao inventa valores. Como excecao consciente, `AUTO_PPT_FORMULA_FALLBACK=cached` permite usar o valor de cache ja salvo pelo autor do XLSX.
 
@@ -165,13 +165,22 @@ O preview e a IA trabalham com contratos OpenXML, titulos, contexto textual e du
 ## Teste rapido
 
 ```powershell
-python scripts/smoke_test.py
-python -m unittest tests.test_mb_update_targets
+.\.venv\Scripts\python.exe -m unittest discover tests
 ```
 
-O smoke test usa os arquivos de exemplo da pasta, cria um PPT em `outputs/` e valida o auto-match com os datasources renomeados.
+Antes de deployar, rode tambem a regressao com os decks reais. Ela trabalha
+somente em copias dentro de `workspace_data/`, compara o pacote Open XML,
+workbooks embutidos, tabelas e geometria, abre original e resultado no PowerPoint
+e rejeita mudancas visuais fora dos objetos atualizados:
 
-O teste MB usa, por padrao, `C:\Users\HugoRocha\Documents\automatizador-ppt-arquivos\mb` e valida descoberta de chart+tabela, normalizacao/transposicao, escala de percentuais e escrita no PPT final.
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_real_deck_regression.py --include-large --render
+```
+
+Por padrao, as fixtures ficam em
+`C:\Users\HugoRocha\Documents\automatizador-ppt-arquivos`. Use
+`AUTO_PPT_REAL_FIXTURE_ROOT` ou `--fixtures-root` para apontar para outra copia.
+Os casos atuais cobrem `andre`, `andre-enxuto`, `hugo`, `mb` e o `mb2` grande.
 
 ## Deploy AWS
 

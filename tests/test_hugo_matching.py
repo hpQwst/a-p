@@ -4,7 +4,8 @@ from pathlib import Path
 import os
 import unittest
 
-from ppt_automator import analyze_update_package
+from ppt_automator import analyze_update_package, generate_updated_pptx
+from ppt_automator.regression_validation import validate_generated_pptx
 
 
 HUGO_DIR = Path(os.getenv("AUTO_PPT_HUGO_TEST_DIR", r"C:\Users\HugoRocha\Documents\automatizador-ppt-arquivos\hugo"))
@@ -37,6 +38,11 @@ class HugoMatchingTests(unittest.TestCase):
                 self.assertIn(target_id, plan_by_shape)
                 self.assertEqual(plan_by_shape[target_id].datasource.file_name, filename)
                 self.assertGreaterEqual(plan_by_shape[target_id].confidence, 0.45)
+
+    def test_generated_hugo_deck_passes_structural_regression(self) -> None:
+        generated = generate_updated_pptx(PPT, self.plans, targets=self.targets)
+        report = validate_generated_pptx(PPT, generated, self.plans)
+        self.assertEqual(report.charts_checked + report.tables_checked, len(self.plans))
 
 
 if __name__ == "__main__":

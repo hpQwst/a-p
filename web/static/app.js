@@ -468,7 +468,8 @@
     if (asyncDownload) {
       event.preventDefault();
       asyncDownload.disabled = true;
-      showProgress("Enviando geracao para o worker...");
+      var startedAt = Date.now();
+      showProgress("Preparando a geração...");
       fetch(asyncDownload.getAttribute("data-generate-url"), { method: "POST" })
         .then(function (response) {
           if (!response.ok) {
@@ -483,9 +484,10 @@
           }
           var statusUrl = payload.status_url;
           if (!statusUrl) {
-            throw new Error("O worker nao retornou uma URL de status.");
+            throw new Error("Nao recebi a URL de acompanhamento.");
           }
           var timer = window.setInterval(function () {
+            updateGenerationProgress(startedAt, "");
             fetch(statusUrl, { cache: "no-store" })
               .then(function (response) { return response.json(); })
               .then(function (state) {
@@ -498,6 +500,8 @@
                   var overlay = document.getElementById("progress-overlay");
                   if (overlay) { overlay.hidden = true; }
                   window.alert(state.message || "A geracao do PPT falhou.");
+                } else {
+                  updateGenerationProgress(startedAt, state.message || "");
                 }
               })
               .catch(function () {});
@@ -535,6 +539,20 @@
       setAllDetails(false);
     }
   });
+
+  function updateGenerationProgress(startedAt, serverMessage) {
+    var target = document.getElementById("progress-message");
+    if (!target) {
+      return;
+    }
+    var seconds = Math.round((Date.now() - startedAt) / 1000);
+    var elapsed = seconds < 60 ? seconds + "s" : Math.floor(seconds / 60) + "min " + (seconds % 60) + "s";
+    var base = serverMessage || "Gerando o PowerPoint...";
+    // Sem porcentagem de proposito: a geracao nao reporta progresso por slide,
+    // e uma barra inventada mentiria sobre quanto falta.
+    var hint = seconds > 45 ? " Decks grandes levam alguns minutos — pode deixar aberto." : "";
+    target.textContent = base + " (" + elapsed + ")" + hint;
+  }
 
   function applyAdvancedMode(on) {
     document.body.classList.toggle("show-advanced", on);

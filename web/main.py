@@ -837,6 +837,27 @@ def _generated_metadata_path(job_dir: Path) -> Path:
     return job_dir / "generated.json"
 
 
+OUTPUT_NAME_SEPARATOR = "__"
+
+
+def _output_file_name(job_dir: Path) -> str:
+    """Mantem o nome do PPT enviado e acrescenta so um sufixo de data/hora.
+
+    Os analistas reaproveitam o mesmo nome de deck todo mes, mudando uma
+    variavel; trocar o nome por 'ppt_automatizado' obrigava a renomear tudo de
+    volta. O separador '__' e visivel e nao aparece em nome de arquivo normal,
+    entao da para apagar do sufixo em diante sem pensar."""
+    try:
+        metadata = _load_job_metadata(job_dir)
+        original = str((metadata.get("files") or {}).get("pptx") or "")
+    except Exception:
+        original = ""
+    stem = Path(safe_filename(original or "ppt_atualizado.pptx")).stem or "ppt_atualizado"
+    # Nao empilha sufixo quando o arquivo enviado ja saiu daqui antes.
+    stem = stem.split(OUTPUT_NAME_SEPARATOR)[0].strip() or "ppt_atualizado"
+    return f"{stem}{OUTPUT_NAME_SEPARATOR}{datetime.now().strftime('%Y-%m-%d_%H%M')}.pptx"
+
+
 def _generated_filename(job_dir: Path) -> str:
     try:
         return str(json.loads(_generated_metadata_path(job_dir).read_text(encoding="utf-8")).get("file_name") or "ppt_automatizado.pptx")
@@ -899,7 +920,7 @@ def _generate_job_output(job_dir: Path) -> None:
         output = generate_updated_pptx(pptx_path.read_bytes(), analysis.plans, targets=analysis.targets)
     except (EmbeddedWorkbookWriterUnavailable, ChartSheetUnresolvedError) as exc:
         raise RuntimeError(str(exc)) from exc
-    file_name = f"ppt_automatizado_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
+    file_name = _output_file_name(job_dir)
     _generated_ppt_path(job_dir).write_bytes(output)
     _generated_metadata_path(job_dir).write_text(json.dumps({"file_name": file_name}, ensure_ascii=False), encoding="utf-8")
     _save_project_run(job_dir, output, analysis, file_name)
@@ -3718,12 +3739,13 @@ def _large_deck_confirmation_message(ppt_summary: dict, selected_slides: list[in
 
 
 def _async_generation_enabled() -> bool:
-    """Quando ligado, o botao de download dispara POST /generate e o navegador
-    acompanha por polling, em vez de gerar o PPT dentro da propria requisicao.
+    """Gera o PPT em segundo plano e deixa o navegador acompanhar por polling.
 
-    Fica desligado por padrao porque o caminho sincrono e o que esta em uso hoje.
-    Vale ligar se algum deck grande estourar o tempo limite da requisicao."""
-    return os.getenv("AUTO_PPT_ASYNC_GENERATION", "0").strip().lower() in {"1", "true", "yes", "on"}
+    Ligado por padrao: gerar dentro da requisicao funciona num deck pequeno, mas
+    um deck grande passa do tempo limite do App Runner e o usuario nao recebe
+    arquivo nenhum. Em segundo plano o tempo de geracao deixa de competir com o
+    tempo limite da requisicao."""
+    return os.getenv("AUTO_PPT_ASYNC_GENERATION", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _job_dir(job_id: str, create: bool = False) -> Path:

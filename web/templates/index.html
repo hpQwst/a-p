@@ -23,6 +23,7 @@
           <h1>Central de atualização</h1>
         </div>
         <div class="header-actions">
+          <a class="ghost-button" href="/models/{{ selected_squad }}/new">Preparar modelo</a>
           {% if is_admin %}
             <form class="squad-view-switcher" method="get" action="/">
               <label>
@@ -218,6 +219,34 @@
         </form>
 
         <aside class="library-column">
+          <section class="workspace-card library-card">
+            <div class="workspace-head">
+              <div>
+                <p class="eyebrow">Modelos preparados</p>
+                <h2>Rodadas sem remapear</h2>
+              </div>
+              <a class="mini-pill" href="/models/{{ selected_squad }}/new">Novo</a>
+            </div>
+            {% set has_prepared_models = prepared_models_by_squad.values()|map('length')|sum %}
+            {% if has_prepared_models %}
+              <div class="mapping-list">
+                {% for squad, prepared_models in prepared_models_by_squad.items() %}
+                  {% for model in prepared_models %}
+                    <a class="mapping-card prepared-model-card" href="/models/{{ squad }}/{{ model.slug }}/run">
+                      <strong>{{ model.name }}</strong>
+                      <span>{{ model.active_count }} ativos · {{ model.object_count }} objetos · v{{ model.version_count }}</span>
+                    </a>
+                  {% endfor %}
+                {% endfor %}
+              </div>
+            {% else %}
+              <div class="empty-state compact">
+                <strong>Nenhum modelo preparado</strong>
+                <p>Mapeie um PPT uma vez, preencha o XLSX e reutilize nas proximas rodadas.</p>
+              </div>
+            {% endif %}
+          </section>
+
           <section class="workspace-card library-card">
             <div class="workspace-head">
               <div>

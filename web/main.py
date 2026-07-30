@@ -55,6 +55,18 @@ from ppt_automator.learned_mapping import (
     mapping_entry_learning_fields,
     resolve_learned_matches,
 )
+from ppt_automator.model_preparer import (
+    ALLOWED_ORIENTATIONS,
+    ALLOWED_READ_MODES,
+    ALLOWED_VALUE_FORMATS,
+    EDITABLE_COLUMNS,
+    build_mapping_workbook,
+    datasource_zip,
+    mapping_entries_from_rows,
+    prepare_model_assets,
+    read_mapping_workbook,
+    validate_mapping_package,
+)
 from ppt_automator.xlsx_plaintext_dump import dump_xlsx_workbook, dump_xlsx_zip_entries
 from ppt_automator.project_store import (
     SQUADS,
@@ -66,16 +78,21 @@ from ppt_automator.project_store import (
     load_project_json,
     load_user,
     list_mapping_templates,
+    list_prepared_models,
     list_projects,
     list_users,
     load_mapping_template,
+    load_prepared_model,
+    load_prepared_model_bytes,
     load_project,
     normalize_email,
     record_admin_event,
     safe_filename,
     save_mapping_template,
+    save_prepared_model,
     save_project_bytes,
     save_project_json,
+    slugify,
     update_user,
 )
 from worker.processor import (
@@ -192,7 +209,7 @@ def _access_denied(request: Request, message: str) -> Response:
 
 
 def _squad_from_path(path: str) -> str:
-    match = re.match(r"^/projects/(squad[1-5])(?:/|$)", path)
+    match = re.match(r"^/(?:projects|models)/(squad[1-5])(?:/|$)", path)
     return match.group(1) if match else ""
 
 
@@ -452,10 +469,314 @@ async def index(request: Request, squad: str = "") -> HTMLResponse:
             "project_cards_by_squad": _project_cards_by_squad(visible_squads),
             "resume_cards": _resume_cards(visible_squads),
             "mapping_templates_by_squad": _mapping_templates_by_squad(visible_squads),
+            "prepared_models_by_squad": _prepared_models_by_squad(visible_squads),
             "ai_available": ai_configured(PROJECT_ROOT),
             "large_deck_slide_threshold": _large_deck_slide_threshold(),
         },
     )
+
+
+@app.get("/models/{squad}/new", response_class=HTMLResponse)
+async def new_prepared_model(request: Request, squad: str) -> HTMLResponse:
+    squad = _normalize_squad_form(squad)
+    return templates.TemplateResponse(
+        request,
+        "model_new.html",
+        {
+            "current_user": _request_user(request),
+            "squad": squad,
+            "projects": list_projects(squad),
+        },
+    )
+
+
+@app.post("/models/{squad}/prepare", response_class=HTMLResponse)
+async def prepare_model(
+    request: Request,
+    squad: str,
+    model_name: str = Form(""),
+    pptx: UploadFile = File(...),
+) -> Response:
+    try:
+        squad = _authorized_form_squad(request, squad)
+        _validate_upload(pptx, ".pptx", "Envie um arquivo PPTX.")
+        pptx_bytes = await _read_upload_limited(pptx, "PPTX")
+        validate_pptx_bytes(pptx_bytes)
+        clean_name = str(model_name or Path(pptx.filename or "modelo.pptx").stem).strip()
+        manifest, identified = await run_in_threadpool(
+            prepare_model_assets,
+            pptx_bytes,
+            model_name=clean_name,
+            original_filename=pptx.filename or "modelo.pptx",
+        )
+    except Exception as exc:
+        return _error_response(request, str(exc), status_code=400)
+
+    job_id = uuid.uuid4().hex
+    job_dir = _job_dir(job_id, create=True)
+    (job_dir / "original.pptx").write_bytes(pptx_bytes)
+    (job_dir / "identified.pptx").write_bytes(identified)
+    (job_dir / "model_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (job_dir / "studio_mapping.json").write_text("{}", encoding="utf-8")
+    _save_job_metadata(
+        job_dir,
+        {
+            "job_id": job_id,
+            "kind": "model_studio",
+            "created_at": _now_iso(),
+            "project": {"squad": squad, "slug": "", "name": clean_name},
+            "files": {"pptx": pptx.filename or "modelo.pptx"},
+            "model_name": clean_name,
+        },
+    )
+    audit.record(job_dir, _actor(request), "abriu_preparador_de_modelo", {"objetos": manifest["object_count"]})
+    return RedirectResponse(f"/models/{squad}/studio/{job_id}", status_code=303)
+
+
+@app.get("/models/{squad}/studio/{job_id}", response_class=HTMLResponse)
+async def model_studio(
+    request: Request,
+    squad: str,
+    job_id: str,
+) -> HTMLResponse:
+    try:
+        squad = _normalize_squad_form(squad)
+        context = _model_studio_context(request, squad, _job_dir(job_id))
+    except Exception as exc:
+        return _error_response(request, str(exc), status_code=400)
+    return templates.TemplateResponse(request, "model_studio.html", context)
+
+
+@app.post("/models/{squad}/studio/{job_id}/save")
+async def save_model_studio(
+    request: Request,
+    squad: str,
+    job_id: str,
+) -> JSONResponse:
+    try:
+        squad = _normalize_squad_form(squad)
+        job_dir = _job_dir(job_id)
+        _assert_studio_squad(job_dir, squad)
+        payload = await request.json()
+        rows = _normalize_studio_rows(job_dir, payload.get("objects") or [])
+        _save_studio_rows(job_dir, rows)
+        audit.record(job_dir, _actor(request), "salvou_preparador_de_modelo", {"objetos": len(rows)})
+        return JSONResponse({"ok": True, "saved_at": _now_iso(), "object_count": len(rows)})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+
+@app.get("/models/{squad}/studio/{job_id}/identified.pptx")
+async def download_identified_model(squad: str, job_id: str) -> Response:
+    job_dir = _job_dir(job_id)
+    _assert_studio_squad(job_dir, _normalize_squad_form(squad))
+    manifest = _load_model_manifest(job_dir)
+    filename = f"{Path(str(manifest.get('original_filename') or 'modelo.pptx')).stem}_identificado.pptx"
+    return Response(
+        content=(job_dir / "identified.pptx").read_bytes(),
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={"Content-Disposition": f'attachment; filename="{safe_filename(filename)}"'},
+    )
+
+
+@app.get("/models/{squad}/studio/{job_id}/mapping.xlsx")
+async def download_model_mapping(squad: str, job_id: str) -> Response:
+    job_dir = _job_dir(job_id)
+    _assert_studio_squad(job_dir, _normalize_squad_form(squad))
+    manifest = _load_model_manifest(job_dir)
+    mapping_bytes = build_mapping_workbook(manifest, _load_studio_rows(job_dir))
+    return Response(
+        content=mapping_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{safe_filename(slugify(str(manifest.get("model_name") or "modelo")) + "_mapeamento.xlsx")}"'},
+    )
+
+
+@app.post("/models/{squad}/studio/{job_id}/import", response_class=HTMLResponse)
+async def import_model_mapping(
+    request: Request,
+    squad: str,
+    job_id: str,
+    project_ref: str = Form(""),
+    project_name: str = Form(""),
+    mapping: UploadFile | None = File(None),
+    datasources: list[UploadFile] = File([]),
+) -> Response:
+    try:
+        squad = _authorized_form_squad(request, squad, project_ref)
+        job_dir = _job_dir(job_id)
+        _assert_studio_squad(job_dir, squad)
+        manifest = _load_model_manifest(job_dir)
+        mapping_bytes = await _retain_mapping_upload(job_dir, mapping, manifest)
+        source_files = await _retain_studio_sources(job_dir, datasources)
+        report, entries = await run_in_threadpool(
+            validate_mapping_package,
+            manifest,
+            mapping_bytes,
+            source_files,
+        )
+        (job_dir / "import_report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if not report["ok"]:
+            context = _model_studio_context(request, squad, job_dir)
+            context["validation_report"] = report
+            context["error"] = (
+                f"Importacao bloqueada: {report['error_count']} erro(s). "
+                "Arquivos enviados ficaram guardados; envie somente o que falta."
+            )
+            return templates.TemplateResponse(request, "model_studio.html", context, status_code=400)
+
+        project = _resolve_project(
+            project_ref,
+            squad,
+            project_name or str(manifest.get("model_name") or "Modelo preparado"),
+        )
+        model_slug = slugify(str(manifest.get("model_name") or "modelo-preparado"))
+        mapping_ref = save_mapping_template(
+            project,
+            f"{manifest.get('model_name') or project.name} - preparado",
+            entries,
+            slug=f"prepared-{model_slug}",
+            metadata={
+                "prepared_model": model_slug,
+                "prepared_by": _actor(request),
+                "prepared_at": _now_iso(),
+            },
+        )
+        model_ref = save_prepared_model(
+            squad,
+            str(manifest.get("model_name") or project.name),
+            manifest,
+            entries,
+            {
+                "original.pptx": (job_dir / "original.pptx").read_bytes(),
+                "identified.pptx": (job_dir / "identified.pptx").read_bytes(),
+                "mapping.xlsx": mapping_bytes,
+            },
+            slug=model_slug,
+            actor=_actor(request),
+            metadata={
+                "mapping_template": {
+                    "squad": mapping_ref.squad,
+                    "slug": mapping_ref.slug,
+                    "name": mapping_ref.name,
+                },
+                "last_validation": report,
+            },
+        )
+        preview_job_id = _create_prepared_preview_job(
+            project=project,
+            pptx_bytes=(job_dir / "identified.pptx").read_bytes(),
+            pptx_filename=str(manifest.get("original_filename") or "modelo.pptx"),
+            source_files=source_files,
+            mapping_bytes=mapping_bytes,
+            mapping_template={
+                "squad": mapping_ref.squad,
+                "slug": mapping_ref.slug,
+                "name": mapping_ref.name,
+            },
+            allowed_target_ids=sorted(entries),
+            prepared_model={"squad": model_ref.squad, "slug": model_ref.slug, "name": model_ref.name},
+        )
+        audit.record(job_dir, _actor(request), "publicou_modelo_preparado", {"modelo": model_ref.slug})
+        return RedirectResponse(f"/jobs/{preview_job_id}/preview", status_code=303)
+    except Exception as exc:
+        try:
+            context = _model_studio_context(request, _normalize_squad_form(squad), _job_dir(job_id))
+            context["error"] = str(exc)
+            return templates.TemplateResponse(request, "model_studio.html", context, status_code=400)
+        except Exception:
+            return _error_response(request, str(exc), status_code=400)
+
+
+@app.get("/models/{squad}/{slug}/run", response_class=HTMLResponse)
+async def prepared_model_run_form(request: Request, squad: str, slug: str) -> HTMLResponse:
+    squad = _normalize_squad_form(squad)
+    model = load_prepared_model(squad, slug)
+    if not model:
+        return _error_response(request, "Modelo preparado nao encontrado.", status_code=404)
+    return templates.TemplateResponse(
+        request,
+        "model_run.html",
+        {
+            "current_user": _request_user(request),
+            "model": model,
+            "projects": list_projects(squad),
+            "validation_report": {},
+            "error": "",
+        },
+    )
+
+
+@app.post("/models/{squad}/{slug}/run", response_class=HTMLResponse)
+async def prepared_model_run(
+    request: Request,
+    squad: str,
+    slug: str,
+    project_ref: str = Form(""),
+    project_name: str = Form(""),
+    datasources: list[UploadFile] = File(...),
+) -> Response:
+    try:
+        squad = _authorized_form_squad(request, squad, project_ref)
+        model = load_prepared_model(squad, slug)
+        if not model:
+            raise ValueError("Modelo preparado nao encontrado.")
+        source_files = await _source_files_from_uploads(datasources)
+        mapping_bytes = load_prepared_model_bytes(squad, slug, "mapping.xlsx")
+        manifest = model.get("manifest") or {}
+        report, entries = await run_in_threadpool(
+            validate_mapping_package,
+            manifest,
+            mapping_bytes,
+            source_files,
+        )
+        if not report["ok"]:
+            return templates.TemplateResponse(
+                request,
+                "model_run.html",
+                {
+                    "current_user": _request_user(request),
+                    "model": model,
+                    "projects": list_projects(squad),
+                    "validation_report": report,
+                    "error": f"Faltam ajustes antes do preview: {report['error_count']} erro(s).",
+                },
+                status_code=400,
+            )
+        project = _resolve_project(
+            project_ref,
+            squad,
+            project_name or str(model.get("name") or "Atualizacao do modelo"),
+        )
+        mapping_template = model.get("metadata", {}).get("mapping_template") or {}
+        if not load_mapping_template(squad, str(mapping_template.get("slug") or "")):
+            ref = save_mapping_template(
+                project,
+                f"{model.get('name') or project.name} - preparado",
+                entries,
+                slug=f"prepared-{model.get('slug')}",
+                metadata={"prepared_model": model.get("slug")},
+            )
+            mapping_template = {"squad": ref.squad, "slug": ref.slug, "name": ref.name}
+        job_id = _create_prepared_preview_job(
+            project=project,
+            pptx_bytes=load_prepared_model_bytes(squad, slug, "identified.pptx"),
+            pptx_filename=str(model.get("original_filename") or "modelo.pptx"),
+            source_files=source_files,
+            mapping_bytes=mapping_bytes,
+            mapping_template=mapping_template,
+            allowed_target_ids=sorted(entries),
+            prepared_model={"squad": squad, "slug": model.get("slug"), "name": model.get("name")},
+        )
+        return RedirectResponse(f"/jobs/{job_id}/preview", status_code=303)
+    except Exception as exc:
+        return _error_response(request, str(exc), status_code=400)
 
 
 @app.get("/admin/users", response_class=HTMLResponse)
@@ -2202,12 +2523,37 @@ def _cached_analyze_files(
         slide_numbers=selected_slides,
         progress_callback=progress_callback,
     )
+    analysis = _filter_analysis_to_allowed_targets(job_dir, analysis)
     with ANALYZE_FILES_CACHE_LOCK:
         ANALYZE_FILES_CACHE[job_key] = (signature, analysis)
         ANALYZE_FILES_CACHE.move_to_end(job_key)
         while len(ANALYZE_FILES_CACHE) > ANALYZE_FILES_CACHE_MAX_JOBS:
             ANALYZE_FILES_CACHE.popitem(last=False)
     return analysis
+
+
+def _filter_analysis_to_allowed_targets(job_dir: Path, analysis: AnalysisResult) -> AnalysisResult:
+    metadata = _load_job_metadata(job_dir)
+    raw_allowed = metadata.get("allowed_target_ids")
+    if not isinstance(raw_allowed, list):
+        return analysis
+    allowed = {str(target_id) for target_id in raw_allowed if str(target_id)}
+    targets = [target for target in analysis.targets if target.target_id in allowed]
+    plans = [plan for plan in analysis.plans if plan.target_id in allowed]
+    preview = [item for item in analysis.preview if item.target in allowed]
+    return AnalysisResult(
+        plans=plans,
+        preview=preview,
+        targets=targets,
+        sources=analysis.sources,
+        target_count=len(targets),
+        source_count=analysis.source_count,
+        warnings=[
+            warning
+            for warning in analysis.warnings
+            if not warning.startswith("Sem plano para")
+        ],
+    )
 
 
 def _analysis_for_job(
@@ -4660,12 +5006,242 @@ def _unique_targets(targets: list) -> list:
     return output
 
 
+def _load_model_manifest(job_dir: Path) -> dict:
+    path = job_dir / "model_manifest.json"
+    if not path.exists():
+        raise ValueError("Manifesto do Preparador de Modelo nao encontrado.")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("objects"), list):
+        raise ValueError("Manifesto do Preparador de Modelo invalido.")
+    return payload
+
+
+def _load_studio_rows(job_dir: Path) -> dict[str, dict]:
+    path = job_dir / "studio_mapping.json"
+    if not path.exists():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_studio_rows(job_dir: Path, rows: dict[str, dict]) -> None:
+    path = job_dir / "studio_mapping.json"
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(path)
+
+
+def _assert_studio_squad(job_dir: Path, squad: str) -> None:
+    metadata = _load_job_metadata(job_dir)
+    actual = str((metadata.get("project") or {}).get("squad") or "")
+    if metadata.get("kind") != "model_studio" or actual != squad:
+        raise ValueError("Este Preparador de Modelo pertence a outro squad.")
+
+
+def _normalize_studio_rows(job_dir: Path, objects: list) -> dict[str, dict]:
+    manifest = _load_model_manifest(job_dir)
+    allowed_ids = {str(item.get("id_objeto") or "") for item in manifest.get("objects") or []}
+    output: dict[str, dict] = {}
+    for raw in objects:
+        if not isinstance(raw, dict):
+            continue
+        target_id = str(raw.get("id_objeto") or "").strip()
+        if target_id not in allowed_ids:
+            continue
+        entry = {}
+        for key in EDITABLE_COLUMNS:
+            value = raw.get(key, "")
+            if key == "ativo":
+                entry[key] = 1 if str(value).strip().lower() in {"1", "true", "sim", "yes"} else 0
+            else:
+                entry[key] = str(value or "").strip()
+        mode = entry.get("modo_leitura") or "auto"
+        orientation = entry.get("orientacao") or "auto"
+        value_format = entry.get("formato_valores") or "auto"
+        if mode not in ALLOWED_READ_MODES:
+            raise ValueError(f"modo_leitura invalido em {target_id}.")
+        if orientation not in ALLOWED_ORIENTATIONS:
+            raise ValueError(f"orientacao invalida em {target_id}.")
+        if value_format not in ALLOWED_VALUE_FORMATS:
+            raise ValueError(f"formato_valores invalido em {target_id}.")
+        output[target_id] = entry
+    return output
+
+
+def _model_studio_context(request: Request, squad: str, job_dir: Path) -> dict:
+    _assert_studio_squad(job_dir, squad)
+    manifest = _load_model_manifest(job_dir)
+    rows = _load_studio_rows(job_dir)
+    objects = mapping_entries_from_rows(manifest, rows)
+    slides: dict[int, list[dict]] = defaultdict(list)
+    width = max(float(manifest.get("slide_width_in") or 13.3333), 0.1)
+    height = max(float(manifest.get("slide_height_in") or 7.5), 0.1)
+    for item in objects:
+        display = dict(item)
+        display["left_pct"] = round(float(item.get("left_in") or 0) / width * 100, 4)
+        display["top_pct"] = round(float(item.get("top_in") or 0) / height * 100, 4)
+        display["width_pct"] = round(float(item.get("width_in") or 0) / width * 100, 4)
+        display["height_pct"] = round(float(item.get("height_in") or 0) / height * 100, 4)
+        slides[int(item.get("slide") or 1)].append(display)
+    report_path = job_dir / "import_report.json"
+    report = (
+        json.loads(report_path.read_text(encoding="utf-8"))
+        if report_path.exists()
+        else {}
+    )
+    retained_sources = sorted(
+        path.name for path in (job_dir / "import_sources").glob("*.xlsx")
+    ) if (job_dir / "import_sources").exists() else []
+    return {
+        "current_user": _request_user(request),
+        "squad": squad,
+        "job_id": job_dir.name,
+        "manifest": manifest,
+        "objects": objects,
+        "slides": dict(sorted(slides.items())),
+        "projects": list_projects(squad),
+        "validation_report": report,
+        "retained_sources": retained_sources,
+        "error": "",
+    }
+
+
+async def _retain_mapping_upload(job_dir: Path, upload: UploadFile | None, manifest: dict) -> bytes:
+    path = job_dir / "import_mapping.xlsx"
+    if upload is not None and (upload.filename or "").strip():
+        _validate_upload(upload, ".xlsx", "O arquivo de mapeamento precisa ser XLSX.")
+        data = await _read_upload_limited(upload, "XLSX de mapeamento")
+        validate_xlsx_bytes(data)
+        path.write_bytes(data)
+        return data
+    if path.exists():
+        return path.read_bytes()
+    data = build_mapping_workbook(manifest, _load_studio_rows(job_dir))
+    path.write_bytes(data)
+    return data
+
+
+async def _retain_studio_sources(job_dir: Path, uploads: list[UploadFile]) -> dict[str, bytes]:
+    root = job_dir / "import_sources"
+    root.mkdir(parents=True, exist_ok=True)
+    incoming = await _source_files_from_uploads(uploads, allow_empty=True)
+    for name, data in incoming.items():
+        (root / safe_filename(name)).write_bytes(data)
+    return {path.name: path.read_bytes() for path in root.glob("*.xlsx")}
+
+
+async def _source_files_from_uploads(
+    uploads: list[UploadFile],
+    *,
+    allow_empty: bool = False,
+) -> dict[str, bytes]:
+    output: dict[str, bytes] = {}
+    for upload in uploads or []:
+        if not upload or not (upload.filename or "").strip():
+            continue
+        filename = Path(upload.filename or "").name
+        data = await _read_upload_limited(upload, "Planilha")
+        if filename.lower().endswith(".xlsx"):
+            validate_xlsx_bytes(data)
+            _add_unique_source(output, filename, data)
+            continue
+        if filename.lower().endswith(".zip"):
+            validate_datasource_zip_bytes(data)
+            with ZipFile(BytesIO(data)) as archive:
+                for entry in archive.namelist():
+                    if not entry.lower().endswith(".xlsx") or entry.endswith("/"):
+                        continue
+                    entry_name = Path(entry).name
+                    entry_data = archive.read(entry)
+                    validate_xlsx_bytes(entry_data)
+                    _add_unique_source(output, entry_name, entry_data)
+            continue
+        raise ValueError(f"Formato nao suportado: {filename}. Envie XLSX ou ZIP.")
+    if not output and not allow_empty:
+        raise ValueError("Envie as planilhas XLSX usadas pelo modelo.")
+    return output
+
+
+def _add_unique_source(output: dict[str, bytes], name: str, data: bytes) -> None:
+    key = Path(name).name.casefold()
+    existing = next((item for item in output if item.casefold() == key), "")
+    if existing:
+        raise ValueError(f"Arquivo repetido: {name}. Renomeie para nomes unicos.")
+    output[Path(name).name] = data
+
+
+def _create_prepared_preview_job(
+    *,
+    project,
+    pptx_bytes: bytes,
+    pptx_filename: str,
+    source_files: dict[str, bytes],
+    mapping_bytes: bytes,
+    mapping_template: dict,
+    allowed_target_ids: list[str],
+    prepared_model: dict,
+) -> str:
+    datasource_bytes = datasource_zip(source_files)
+    validate_pptx_bytes(pptx_bytes)
+    validate_datasource_zip_bytes(datasource_bytes)
+    ppt_summary = _inspect_ppt_upload(pptx_bytes)
+    job_id = uuid.uuid4().hex
+    job_dir = _job_dir(job_id, create=True)
+    (job_dir / "input.pptx").write_bytes(pptx_bytes)
+    (job_dir / "datasources.zip").write_bytes(datasource_bytes)
+    (job_dir / "mapping.xlsx").write_bytes(mapping_bytes)
+    _reset_debug_log(job_dir)
+    metadata = {
+        "job_id": job_id,
+        "created_at": _now_iso(),
+        "project": {
+            "squad": project.squad,
+            "slug": project.slug,
+            "name": project.name,
+        },
+        "files": {
+            "pptx": pptx_filename,
+            "datasources": f"{len(source_files)} planilha(s)",
+            "mapping": "mapping.xlsx",
+        },
+        "slides": {"raw": "", "numbers": []},
+        "ppt_summary": ppt_summary,
+        "combined_upload_bytes": len(pptx_bytes) + len(datasource_bytes) + len(mapping_bytes),
+        "large_deck_slide_threshold": _large_deck_slide_threshold(),
+        "large_deck_confirmed": True,
+        "mapping_template": mapping_template,
+        "prepared_model": prepared_model,
+        "allowed_target_ids": allowed_target_ids,
+        "use_ai": False,
+        "auto_source_review": False,
+        "ignore_mapping_candidates": False,
+    }
+    _save_job_metadata(job_dir, metadata)
+    _log_job_debug_event(
+        job_dir,
+        "prepared_model_preview_request",
+        {
+            "prepared_model": prepared_model,
+            "allowed_target_ids": allowed_target_ids,
+            "source_files": sorted(source_files),
+        },
+    )
+    _save_project_checkpoint(job_dir, status="in_progress", include_inputs=True, reason="modelo_preparado")
+    _init_preview_processing_state(job_dir)
+    _start_preview_processing(job_dir)
+    return job_id
+
+
 def _projects_by_squad(squads: list[str] | None = None) -> dict[str, list]:
     return {squad: list_projects(squad) for squad in (squads or SQUADS)}
 
 
 def _mapping_templates_by_squad(squads: list[str] | None = None) -> dict[str, list]:
     return {squad: list_mapping_templates(squad) for squad in (squads or SQUADS)}
+
+
+def _prepared_models_by_squad(squads: list[str] | None = None) -> dict[str, list]:
+    return {squad: list_prepared_models(squad) for squad in (squads or SQUADS)}
 
 
 def _project_cards_by_squad(squads: list[str] | None = None) -> dict[str, list[dict]]:

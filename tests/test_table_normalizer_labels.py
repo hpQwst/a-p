@@ -134,6 +134,40 @@ class TableNormalizerLabelTests(unittest.TestCase):
         self.assertEqual(plan.series, source.series)
         self.assertEqual(plan.values, source.values)
 
+    def test_named_table_or_dynamic_range_adds_new_months_from_source(self) -> None:
+        target = PptTarget(
+            slide_index=0,
+            slide_number=1,
+            slide_path="ppt/slides/slide1.xml",
+            shape_name="chart",
+            shape_id="1",
+            object_type="chart",
+            left_in=0,
+            top_in=0,
+            width_in=1,
+            height_in=1,
+            expected_orientation="series_rows_categories_columns",
+            expected_categories=["Jan/26", "Fev/26"],
+            expected_series=["Detrator", "Promotor"],
+            expected_values=[[0.20, 0.19], [0.65, 0.67]],
+        )
+        source = ParsedXlsxTable(
+            source_id="",
+            file_name="nps.xlsx",
+            sheet_name="Dados",
+            orientation="series_rows_categories_columns",
+            categories=["Jan/26", "Fev/26", "Mar/26"],
+            series=["Detrator", "Promotor"],
+            values=[[0.20, 0.19, 0.18], [0.65, 0.67, 0.69]],
+            metadata={"_allow_axis_growth": "1"},
+        )
+
+        plan = normalize_to_target(target, source)
+
+        self.assertEqual(plan.categories, source.categories)
+        self.assertEqual(plan.series, source.series)
+        self.assertEqual(plan.values, source.values)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -48,14 +48,16 @@ Several regression tests (`test_mb_update_targets.py`, `test_hugo_matching.py`, 
 The "core novo" works with a generic `PptTarget` (not just charts) — a slide can have several updatable targets: real PowerPoint charts, PowerPoint tables, and eventually text boxes/shapes. Pipeline stages, roughly in data-flow order:
 
 1. `ppt_discovery.py` — discovers `PptTarget`s in the PPTX (`chart`, `table`, `text`, `shape`).
-2. `xlsx_parser.py` — parses XLSX datasources without assuming a fixed legacy layout.
-3. `slide_datasources.py` — scopes which datasource files are relevant to which slide.
-4. `table_normalizer.py` — builds the `TransformPlan` (align vs. transpose) per target.
-5. `ai_mapper.py` / `ai_transform.py` / `ai_slide_understanding.py` / `ai_slide_matrix_builder.py` — optional AI review layers (see below).
-6. `ppt_chart_writer.py` / `embedded_workbook_writer.py` — writes chart XML + the chart's embedded Excel workbook.
-7. `ppt_table_writer.py` — writes PowerPoint table cells directly in DrawingML XML.
-8. `preview_model.py` — builds the UI-friendly preview model.
-9. `engine.py` — orchestrates analysis, preview, and final `.pptx` generation (`analyze_update_package`, `generate_updated_pptx`).
+2. `model_preparer.py` — builds the reusable-model manifest, identified PPTX copy,
+   mapping workbook, and deterministic import validation.
+3. `xlsx_parser.py` — parses XLSX datasources without assuming a fixed legacy layout.
+4. `slide_datasources.py` — scopes which datasource files are relevant to which slide.
+5. `table_normalizer.py` — builds the `TransformPlan` (align vs. transpose) per target.
+6. `ai_mapper.py` / `ai_transform.py` / `ai_slide_understanding.py` / `ai_slide_matrix_builder.py` — optional AI review layers (see below).
+7. `ppt_chart_writer.py` / `embedded_workbook_writer.py` — writes chart XML + the chart's embedded Excel workbook.
+8. `ppt_table_writer.py` — writes PowerPoint table cells directly in DrawingML XML.
+9. `preview_model.py` — builds the UI-friendly preview model.
+10. `engine.py` — orchestrates analysis, preview, and final `.pptx` generation (`analyze_update_package`, `generate_updated_pptx`).
 
 `ppt_automator/__init__.py` re-exports both the new engine API (`analyze_update_package`, `generate_updated_pptx`, `discover_ppt_targets`, `PptTarget`, `TransformPlan`, `parse_datasource_zip`, ...) and the legacy `core.py` API used by `app.py` (`build_chart_jobs`, `generate_pptx`, `ChartTarget`, ...). When adding functionality, extend the new-engine modules, not `core.py`.
 
@@ -64,6 +66,16 @@ The "core novo" works with a generic `PptTarget` (not just charts) — a slide c
 Datasource XLSX files don't need to be named after the PPT chart's numeric shape name (e.g. `7792738590`). When the name matches, that's used as a shortcut; otherwise the system compares columns, rows, table question, mapping variable/opening, and optional metadata embedded in the XLSX to suggest the most likely datasource (`table_normalizer.py` source-match scoring, plus optional embedded hint rows like `PPT_TAG`, `graph_id`, `var_analise`, `abertura`).
 
 Once a project has a successful download, the system creates/updates a **mapping template** for that project's squad. On the next update, if targets and datasource names still line up, the template's de-para is applied before AI runs; new targets show up in the preview to be added to the same template.
+
+The **Prepared Model** flow is the explicit, reusable alternative. Routes under
+`/models/{squad}` create a structural studio for all chart/table targets, an
+identified PPTX copy, and a protected mapping workbook. Publishing is allowed
+only after every active row resolves to an uploaded XLSX/sheet and normalizes
+against the target. A successful import saves the learned mapping and opens a
+normal preview with AI disabled and `allowed_target_ids` restricted to the
+active objects. Inactive objects are never updated. Studio drafts and already
+uploaded sources live only under the runtime job; published models are versioned
+under squad storage. See `docs/preparador-modelo.md`.
 
 ### Preserving "Edit Data" (no python-pptx chart.replace_data / no full openpyxl workbook save)
 
@@ -87,7 +99,7 @@ FastAPI app. Preview runs as a **background job**: `POST /preview` creates a job
 
 ### Storage (`ppt_automator/project_store.py`)
 
-Single storage abstraction switched by `AUTO_PPT_STORAGE_BACKEND` (`local` default, or `s3` with `AUTO_PPT_S3_BUCKET`/`AUTO_PPT_S3_PREFIX`). In dev, everything lives under `workspace_data/` (git-ignored). Layout: `squads/<squad>/projects/<slug>/{checkpoint,runs,memory}`, `squads/<squad>/mapping_templates/<slug>/template.json`, hashed user profiles under `users/profiles/`, and immutable admin events under `admin_audit/`. Manual mapping corrections are appended to `memory/corrections.json` per project for audit/future learning.
+Single storage abstraction switched by `AUTO_PPT_STORAGE_BACKEND` (`local` default, or `s3` with `AUTO_PPT_S3_BUCKET`/`AUTO_PPT_S3_PREFIX`). In dev, everything lives under `workspace_data/` (git-ignored). Layout: `squads/<squad>/projects/<slug>/{checkpoint,runs,memory}`, `squads/<squad>/mapping_templates/<slug>/template.json`, `squads/<squad>/prepared_models/<slug>/{model.json,versions/<version_id>/...}`, hashed user profiles under `users/profiles/`, and immutable admin events under `admin_audit/`. Prepared-model assets are written before `model.json`, which publishes the new current version atomically. Datasources are not duplicated into long-term model storage; the project checkpoint owns each run's inputs. Manual mapping corrections are appended to `memory/corrections.json` per project for audit/future learning.
 
 ## Auth (`web/auth.py`, `web/entra.py`)
 

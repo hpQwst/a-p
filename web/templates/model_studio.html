@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Estudio de Mapeamento - QWST Auto PPT</title>
+    <script>
+      (function () {
+        var theme = localStorage.getItem("qwst-theme");
+        if (!theme) theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ asset_version('style.css') }}">
+  </head>
+  <body>
+    <main
+      class="app-shell studio-shell"
+      data-model-studio
+      data-save-url="/models/{{ squad }}/studio/{{ job_id }}/save"
+    >
+      <header class="product-header">
+        <div>
+          <p class="eyebrow">{{ squad.title() }} / Preparador de Modelo</p>
+          <h1>{{ manifest.model_name }}</h1>
+          <p class="header-subtitle">
+            {{ manifest.object_count }} objetos · {{ manifest.chart_count }} graficos · {{ manifest.table_count }} tabelas
+          </p>
+        </div>
+        <div class="header-actions">
+          <button type="button" class="ghost-button" data-studio-save>SALVAR</button>
+          <span class="save-status" data-studio-save-status>Salvo</span>
+          <a class="ghost-button" href="/?squad={{ squad }}">Inicio</a>
+          <button type="button" class="theme-toggle" data-theme-toggle aria-label="Alternar tema">◐</button>
+        </div>
+      </header>
+
+      {% if error %}
+        <div class="alert error">{{ error }}</div>
+      {% endif %}
+      {% if validation_report %}
+        <section class="validation-summary {% if validation_report.ok %}ok{% else %}error{% endif %}">
+          <div>
+            <strong>{{ validation_report.resolved_count or 0 }} de {{ validation_report.active_count or 0 }} ativos validados</strong>
+            <span>{{ validation_report.error_count or 0 }} erros · {{ validation_report.review_count or 0 }} revisar · {{ validation_report.warning_count or 0 }} avisos</span>
+          </div>
+          {% for item in validation_report.errors or [] %}
+            <p><b>ERRO{% if item.target_id %} · {{ item.target_id }}{% endif %}</b> {{ item.message }}</p>
+          {% endfor %}
+          {% for item in validation_report.reviews or [] %}
+            <p><b>REVISAR{% if item.target_id %} · {{ item.target_id }}{% endif %}</b> {{ item.message }}</p>
+          {% endfor %}
+          {% for item in validation_report.warnings or [] %}
+            <p><b>AVISO{% if item.target_id %} · {{ item.target_id }}{% endif %}</b> {{ item.message }}</p>
+          {% endfor %}
+        </section>
+      {% endif %}
+
+      <section class="studio-toolbar">
+        <label>
+          <span class="sr-only">Buscar objeto</span>
+          <input type="search" placeholder="Buscar ID, slide ou titulo..." data-studio-search>
+        </label>
+        <div class="studio-filters">
+          <button type="button" class="filter-chip active" data-studio-filter="all">TODOS</button>
+          <button type="button" class="filter-chip" data-studio-filter="active">ATIVOS</button>
+          <button type="button" class="filter-chip" data-studio-filter="missing">SEM ARQUIVO</button>
+        </div>
+        <div class="studio-downloads">
+          <a class="ghost-button" href="/models/{{ squad }}/studio/{{ job_id }}/identified.pptx">BAIXAR PPT IDENTIFICADO</a>
+          <a class="ghost-button" href="/models/{{ squad }}/studio/{{ job_id }}/mapping.xlsx" data-save-before-download>BAIXAR XLSX MODELO</a>
+        </div>
+      </section>
+
+      <section class="studio-layout">
+        <aside class="slide-map-panel">
+          <div class="panel-head">
+            <p class="eyebrow">Mapa estrutural</p>
+            <strong>Objetos por slide</strong>
+          </div>
+          <div class="slide-map-list">
+            {% for slide, slide_objects in slides.items() %}
+              <article class="slide-map-card" data-slide-map="{{ slide }}">
+                <header><strong>Slide {{ slide }}</strong><span>{{ slide_objects|length }}</span></header>
+                <div class="slide-wireframe">
+                  {% for item in slide_objects %}
+                    <button
+                      type="button"
+                      class="wire-object {{ item.tipo_objeto }}"
+                      style="left:{{ item.left_pct }}%;top:{{ item.top_pct }}%;width:{{ item.width_pct }}%;height:{{ item.height_pct }}%"
+                      data-wire-target="{{ item.id_objeto }}"
+                      title="{{ item.id_objeto }} · {{ item.titulo_detectado }}"
+                    >
+                      {{ item.rotulo_visual }}
+                    </button>
+                  {% endfor %}
+                </div>
+              </article>
+            {% endfor %}
+          </div>
+        </aside>
+
+        <div class="mapping-grid-panel">
+          <div class="mapping-table-wrap">
+            <table class="studio-table">
+              <thead>
+                <tr>
+                  <th>Ativo</th>
+                  <th>ID</th>
+                  <th>Slide</th>
+                  <th>Tipo</th>
+                  <th>Titulo detectado</th>
+                  <th>Nome amigavel</th>
+                  <th>Linhas no PPT</th>
+                  <th>Colunas no PPT</th>
+                  <th>Arquivo XLSX</th>
+                  <th>Aba XLSX</th>
+                  <th>Leitura</th>
+                  <th>Referencia</th>
+                  <th>Orientacao</th>
+                  <th>Formato</th>
+                  <th>Observacao</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for item in objects %}
+                  <tr
+                    data-studio-row
+                    data-target-id="{{ item.id_objeto }}"
+                    data-slide="{{ item.slide }}"
+                    data-search-text="{{ item.id_objeto }} {{ item.slide }} {{ item.titulo_detectado }} {{ item.nome_amigavel }}"
+                  >
+                    <td>
+                      <select data-field="ativo" aria-label="Ativo {{ item.id_objeto }}">
+                        <option value="0" {% if not item.ativo %}selected{% endif %}>0</option>
+                        <option value="1" {% if item.ativo %}selected{% endif %}>1</option>
+                      </select>
+                    </td>
+                    <td><code>{{ item.id_objeto }}</code></td>
+                    <td>{{ item.slide }}</td>
+                    <td><span class="object-kind">{{ item.tipo_objeto }}</span><small>{{ item.tipo_visual }}</small></td>
+                    <td><span class="title-confidence {{ item.confianca_titulo }}">{{ item.confianca_titulo }}</span>{{ item.titulo_detectado or "—" }}</td>
+                    <td><input data-field="nome_amigavel" value="{{ item.nome_amigavel }}"></td>
+                    <td><span class="structure-list">{{ item.linhas_no_ppt|join(" · ") or "—" }}</span></td>
+                    <td><span class="structure-list">{{ item.colunas_no_ppt|join(" · ") or "—" }}</span></td>
+                    <td><input data-field="arquivo_xlsx" value="{{ item.arquivo_xlsx }}" placeholder="arquivo.xlsx"></td>
+                    <td><input data-field="aba_xlsx" value="{{ item.aba_xlsx }}" placeholder="Aba"></td>
+                    <td>
+                      <select data-field="modo_leitura">
+                        {% for option in ["auto", "tabela_excel", "dinamico", "exato"] %}
+                          <option value="{{ option }}" {% if item.modo_leitura == option %}selected{% endif %}>{{ option }}</option>
+                        {% endfor %}
+                      </select>
+                    </td>
+                    <td><input data-field="referencia" value="{{ item.referencia }}" placeholder="tb_dados ou A2:F8"></td>
+                    <td>
+                      <select data-field="orientacao">
+                        {% for option in ["auto", "manter", "transpor"] %}
+                          <option value="{{ option }}" {% if item.orientacao == option %}selected{% endif %}>{{ option }}</option>
+                        {% endfor %}
+                      </select>
+                    </td>
+                    <td>
+                      <select data-field="formato_valores">
+                        {% for option in ["auto", "percentual", "numero", "milhares"] %}
+                          <option value="{{ option }}" {% if item.formato_valores == option %}selected{% endif %}>{{ option }}</option>
+                        {% endfor %}
+                      </select>
+                    </td>
+                    <td><textarea data-field="observacao" rows="2">{{ item.observacao }}</textarea></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace-card studio-import-card">
+        <div class="workspace-head">
+          <div>
+            <p class="eyebrow">Etapa 3 de 3</p>
+            <h2>Validar fontes e abrir preview</h2>
+          </div>
+          <span class="mini-pill">Sem IA</span>
+        </div>
+        <p class="section-hint">
+          Envie XLSX preenchido e todas as planilhas citadas. Se faltar arquivo ou aba,
+          sistema lista exatamente o que falta e guarda uploads ja recebidos.
+        </p>
+        {% if retained_sources %}
+          <div class="retained-files"><strong>Ja guardados:</strong> {{ retained_sources|join(", ") }}</div>
+        {% endif %}
+        <form
+          method="post"
+          action="/models/{{ squad }}/studio/{{ job_id }}/import"
+          enctype="multipart/form-data"
+          data-progress-message="Validando arquivos e montando preview..."
+          data-studio-import
+        >
+          <div class="grid two">
+            <label>
+              <span>Projeto existente</span>
+              <select name="project_ref">
+                <option value="">Criar novo projeto</option>
+                {% for project in projects %}
+                  <option value="{{ project.squad }}|{{ project.slug }}">{{ project.name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>
+              <span>Nome do novo projeto</span>
+              <input name="project_name" placeholder="{{ manifest.model_name }}">
+            </label>
+          </div>
+          <div class="file-grid">
+            <label class="file-card" data-dropzone>
+              <span>XLSX de mapeamento preenchido</span>
+              <span class="file-hint">Opcional se preencheu na tela</span>
+              <span class="file-selected" data-file-name></span>
+              <input name="mapping" type="file" accept=".xlsx">
+            </label>
+            <label class="file-card" data-dropzone>
+              <span>Planilhas de dados</span>
+              <span class="file-hint">.xlsx ou .zip · pode enviar so as faltantes</span>
+              <span class="file-selected" data-file-name></span>
+              <input name="datasources" type="file" accept=".xlsx,.zip" multiple>
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="submit">VALIDAR E ABRIR PREVIEW</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <div id="progress-overlay" class="progress-overlay" hidden>
+      <div>
+        <strong>Projeto em andamento</strong>
+        <p id="progress-message">Validando...</p>
+        <ol id="progress-steps" class="progress-steps"></ol>
+      </div>
+    </div>
+    <script src="{{ url_for('static', path='/app.js') }}?v={{ asset_version('app.js') }}"></script>
+    <script src="{{ url_for('static', path='/model_studio.js') }}?v={{ asset_version('model_studio.js') }}"></script>
+  </body>
+</html>

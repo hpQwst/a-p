@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Preparar modelo - QWST Auto PPT</title>
+    <script>
+      (function () {
+        var theme = localStorage.getItem("qwst-theme");
+        if (!theme) theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ asset_version('style.css') }}">
+  </head>
+  <body>
+    <main class="app-shell narrow-shell">
+      <header class="product-header">
+        <div>
+          <p class="eyebrow">{{ squad.title() }} / Preparador de Modelo</p>
+          <h1>Transforme o PPT em modelo reutilizavel</h1>
+        </div>
+        <div class="header-actions">
+          <a class="ghost-button" href="/?squad={{ squad }}">Inicio</a>
+          <button type="button" class="theme-toggle" data-theme-toggle aria-label="Alternar tema">◐</button>
+        </div>
+      </header>
+
+      <section class="workspace-card model-upload-card">
+        <div class="workspace-head">
+          <div>
+            <p class="eyebrow">Etapa 1 de 3</p>
+            <h2>Enviar PowerPoint</h2>
+          </div>
+          <span class="mini-pill">Original preservado</span>
+        </div>
+        <p class="section-hint">
+          Sistema cria copia identificada. Arquivo enviado nunca e alterado.
+          Graficos e tabelas recebem IDs estaveis para o mapeamento.
+        </p>
+        <form
+          action="/models/{{ squad }}/prepare"
+          method="post"
+          enctype="multipart/form-data"
+          data-progress-message="Mapeando objetos do PowerPoint..."
+        >
+          <label>
+            <span>Nome do modelo</span>
+            <input name="model_name" placeholder="Ex.: Relatorio mensal Natura">
+          </label>
+          <label class="file-card model-file-card" data-dropzone>
+            <span>PowerPoint original</span>
+            <span class="file-hint">.pptx · arraste aqui</span>
+            <span class="file-selected" data-file-name></span>
+            <input name="pptx" type="file" accept=".pptx" required>
+          </label>
+          <div class="form-actions">
+            <button type="submit">MAPEAR OBJETOS</button>
+          </div>
+        </form>
+      </section>
+    </main>
+    <div id="progress-overlay" class="progress-overlay" hidden>
+      <div>
+        <strong>Preparando modelo</strong>
+        <p id="progress-message">Lendo PowerPoint...</p>
+        <ol id="progress-steps" class="progress-steps"></ol>
+      </div>
+    </div>
+    <script src="{{ url_for('static', path='/app.js') }}?v={{ asset_version('app.js') }}"></script>
+  </body>
+</html>

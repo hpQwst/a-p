@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Usar modelo preparado - QWST Auto PPT</title>
+    <script>
+      (function () {
+        var theme = localStorage.getItem("qwst-theme");
+        if (!theme) theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ asset_version('style.css') }}">
+  </head>
+  <body>
+    <main class="app-shell narrow-shell">
+      <header class="product-header">
+        <div>
+          <p class="eyebrow">{{ model.squad.title() }} / Modelo preparado</p>
+          <h1>{{ model.name }}</h1>
+          <p class="header-subtitle">{{ model.active_count }} ativos · versao {{ model.version_count }}</p>
+        </div>
+        <div class="header-actions">
+          <a class="ghost-button" href="/?squad={{ model.squad }}">Inicio</a>
+          <button type="button" class="theme-toggle" data-theme-toggle aria-label="Alternar tema">◐</button>
+        </div>
+      </header>
+      {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+      {% if validation_report %}
+        <section class="validation-summary error">
+          {% for item in validation_report.errors or [] %}
+            <p><b>ERRO{% if item.target_id %} · {{ item.target_id }}{% endif %}</b> {{ item.message }}</p>
+          {% endfor %}
+          {% for item in validation_report.warnings or [] %}
+            <p><b>AVISO</b> {{ item.message }}</p>
+          {% endfor %}
+        </section>
+      {% endif %}
+      <section class="workspace-card model-upload-card">
+        <div class="workspace-head">
+          <div>
+            <p class="eyebrow">Nova rodada</p>
+            <h2>Enviar dados atuais</h2>
+          </div>
+          <span class="mini-pill">Mapeamento pronto</span>
+        </div>
+        <form
+          method="post"
+          action="/models/{{ model.squad }}/{{ model.slug }}/run"
+          enctype="multipart/form-data"
+          data-progress-message="Validando fontes e preparando preview..."
+        >
+          <div class="grid two">
+            <label>
+              <span>Projeto existente</span>
+              <select name="project_ref">
+                <option value="">Criar novo projeto</option>
+                {% for project in projects %}
+                  <option value="{{ project.squad }}|{{ project.slug }}">{{ project.name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>
+              <span>Nome do novo projeto</span>
+              <input name="project_name" placeholder="{{ model.name }}">
+            </label>
+          </div>
+          <label class="file-card model-file-card" data-dropzone>
+            <span>Planilhas desta rodada</span>
+            <span class="file-hint">Todos os .xlsx necessarios ou um .zip</span>
+            <span class="file-selected" data-file-name></span>
+            <input name="datasources" type="file" accept=".xlsx,.zip" multiple required>
+          </label>
+          <div class="form-actions">
+            <button type="submit">VALIDAR E ABRIR PREVIEW</button>
+          </div>
+        </form>
+      </section>
+    </main>
+    <div id="progress-overlay" class="progress-overlay" hidden>
+      <div><strong>Projeto em andamento</strong><p id="progress-message">Validando...</p><ol id="progress-steps" class="progress-steps"></ol></div>
+    </div>
+    <script src="{{ url_for('static', path='/app.js') }}?v={{ asset_version('app.js') }}"></script>
+  </body>
+</html>

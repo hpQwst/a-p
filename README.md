@@ -29,11 +29,44 @@ O fluxo atual da UI web e:
    `Salvar trabalho`.
 5. `Download`: acompanhe a geração por objeto e baixe o PPT atualizado.
 
+## Preparador de Modelo
+
+Para apresentações recorrentes, use `Preparar modelo` na tela inicial:
+
+1. envie o PPTX original e dê um nome ao modelo;
+2. o sistema cria uma cópia identificada e mapeia todos os gráficos e tabelas;
+3. confira os IDs, títulos detectados, linhas e colunas no estúdio;
+4. marque `ativo=1` somente nos objetos que devem mudar;
+5. preencha na tela ou baixe o XLSX de mapeamento;
+6. envie o XLSX preenchido e todas as planilhas citadas;
+7. se o pacote estiver completo, o mapeamento é salvo e o preview abre direto.
+
+O arquivo original nunca é alterado. Objetos com `ativo=0` ficam intactos. Antes
+de publicar o modelo, a importação abre cada fonte e bloqueia arquivo ausente,
+aba inexistente ou estrutura incompatível. XLSX e ZIP já enviados ficam retidos
+no rascunho, então uma correção pode enviar somente o que faltou.
+
+Para tabelas que crescem todo mês:
+
+- `auto`: prefere uma Tabela do Excel; sem ela, detecta o bloco principal;
+- `tabela_excel`: usa uma Tabela nomeada, a opção mais segura para crescer sem
+  capturar cálculos auxiliares ao lado;
+- `dinamico`: expande um intervalo-semente por linhas e colunas contíguas;
+- `exato`: nunca sai do intervalo informado.
+
+O estúdio tem salvamento automático, botão `Salvar`, tema claro/escuro e filtros.
+O preparador é determinístico e não chama IA. Os modelos ficam isolados por
+squad e seus arquivos são versionados; as planilhas de cada rodada continuam no
+checkpoint do projeto, sem uma segunda cópia permanente no modelo.
+
+Detalhes do contrato do XLSX: [docs/preparador-modelo.md](docs/preparador-modelo.md).
+
 ## Core novo de targets
 
 A nova arquitetura separa as responsabilidades principais:
 
 - `ppt_discovery.py`: descobre targets no PPT, incluindo `chart`, `table`, `text` e `shape`.
+- `model_preparer.py`: cria a cópia identificada, o manifesto estrutural, o XLSX de mapeamento e valida o pacote importado.
 - `xlsx_parser.py`: interpreta XLSX sem assumir layout fixo antigo.
 - `table_normalizer.py`: cria o plano de transformacao e transpõe quando necessario.
 - `ai_mapper.py`: monta o payload estrutural para a IA revisar target, datasource e plano.

@@ -64,6 +64,9 @@ def resolve_learned_matches(
             "reason": _reason_for(entry, source),
             "cell_range": str(entry.get("cell_range") or "").strip(),
             "range_mode": str(entry.get("range_mode") or "exact").strip().lower(),
+            "allow_axis_growth": bool(entry.get("allow_axis_growth")),
+            "orientation": str(entry.get("orientation") or "auto").strip().lower(),
+            "value_format": str(entry.get("value_format") or "auto").strip().lower(),
         }
     return resolved
 

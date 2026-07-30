@@ -374,6 +374,14 @@ def _normalize_chart(
     # cada eixo, a ordem e os labels exibidos devem vir do XLSX selecionado.
     target_rows = _target_axis_in_source_order(target_rows, axis_alignment, "row")
     target_cols = _target_axis_in_source_order(target_cols, axis_alignment, "col")
+    if source.metadata.get("_allow_axis_growth") == "1":
+        # Meses/categorias podem crescer sem alterar a quantidade de series do
+        # chart XML. Series novas exigem uma decisao visual e ficam para revisao
+        # em vez de serem adicionadas silenciosamente com estilo arbitrario.
+        if orientation_ppt == "series_rows_categories_columns":
+            target_cols = _axis_with_source_growth(target_cols, axis_alignment, "col")
+        else:
+            target_rows = _axis_with_source_growth(target_rows, axis_alignment, "row")
 
     values = []
     for row_label in target_rows:
@@ -934,6 +942,44 @@ def _target_axis_in_source_order(
         return source_index, original_index
 
     return [label for _index, label in sorted(enumerate(target_labels), key=order_key)]
+
+
+def _axis_with_source_growth(
+    target_labels: list[str],
+    alignment: dict[str, Any],
+    axis: str,
+) -> list[str]:
+    """Inclui rótulos novos apenas em fontes explicitamente expansíveis.
+
+    Tabela nomeada/range dinâmico delimita o bloco real. Assim meses e atributos
+    novos entram na ordem da fonte sem transformar colunas auxiliares soltas em
+    séries do gráfico.
+    """
+    mapping = alignment["row_map"] if axis == "row" else alignment["col_map"]
+    if alignment["mode"] == "same":
+        source_labels = alignment["source_rows"] if axis == "row" else alignment["source_cols"]
+    else:
+        source_labels = alignment["source_cols"] if axis == "row" else alignment["source_rows"]
+    target_by_source = {
+        _norm(source_label): target_label
+        for target_label, source_label in mapping.items()
+        if _norm(source_label)
+    }
+    output: list[str] = []
+    used_targets: set[str] = set()
+    for source_label in source_labels:
+        target_label = target_by_source.get(_norm(source_label), source_label)
+        mapping.setdefault(target_label, source_label)
+        normalized = _norm(target_label)
+        if normalized and normalized not in used_targets:
+            output.append(target_label)
+            used_targets.add(normalized)
+    for target_label in target_labels:
+        normalized = _norm(target_label)
+        if normalized and normalized not in used_targets:
+            output.append(target_label)
+            used_targets.add(normalized)
+    return output
 
 
 def _label_map(targets: list[str], choices: list[str]) -> dict[str, str]:

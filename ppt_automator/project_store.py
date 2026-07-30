@@ -45,6 +45,21 @@ class MappingTemplateRef:
 
 
 @dataclass(frozen=True)
+class PreparedModelRef:
+    model_id: str
+    squad: str
+    slug: str
+    name: str
+    original_filename: str
+    created_at: str
+    updated_at: str
+    version_count: int
+    object_count: int
+    active_count: int
+    backend: str
+
+
+@dataclass(frozen=True)
 class RunRef:
     run_id: str
     created_at: str
@@ -108,6 +123,7 @@ def ensure_store() -> str:
         for squad in SQUADS:
             (root / "squads" / squad / "projects").mkdir(parents=True, exist_ok=True)
             (root / "squads" / squad / "mapping_templates").mkdir(parents=True, exist_ok=True)
+            (root / "squads" / squad / "prepared_models").mkdir(parents=True, exist_ok=True)
         (root / "users" / "profiles").mkdir(parents=True, exist_ok=True)
         (root / "admin_audit").mkdir(parents=True, exist_ok=True)
         return str(root)
@@ -410,6 +426,190 @@ def load_mapping_template(squad: str, slug: str) -> dict | None:
     raise ValueError(f"Backend de storage nao suportado: {backend}")
 
 
+def list_prepared_models(squad: str) -> list[PreparedModelRef]:
+    squad = normalize_squad(squad)
+    backend = storage_backend()
+    payloads: list[dict] = []
+    if backend == "local":
+        root = data_root() / "squads" / squad / "prepared_models"
+        if not root.exists():
+            return []
+        for model_dir in sorted(root.iterdir()):
+            path = model_dir / "model.json"
+            if path.exists():
+                payloads.append(_read_json_file(path))
+    elif backend == "s3":
+        client = _s3_client()
+        bucket = _s3_bucket(required=True)
+        prefix = _s3_prepared_model_prefix(squad, "")
+        token = None
+        while True:
+            kwargs = {"Bucket": bucket, "Prefix": prefix}
+            if token:
+                kwargs["ContinuationToken"] = token
+            response = client.list_objects_v2(**kwargs)
+            for item in response.get("Contents", []):
+                key = item.get("Key", "")
+                if key.endswith("/model.json"):
+                    payloads.append(_read_json_s3(key))
+            if not response.get("IsTruncated"):
+                break
+            token = response.get("NextContinuationToken")
+    else:
+        raise ValueError(f"Backend de storage nao suportado: {backend}")
+    return sorted(
+        (_prepared_model_from_payload(payload, backend) for payload in payloads),
+        key=lambda item: item.updated_at,
+        reverse=True,
+    )
+
+
+def load_prepared_model(squad: str, slug: str) -> dict | None:
+    squad = normalize_squad(squad)
+    slug = slugify(slug)
+    backend = storage_backend()
+    if backend == "local":
+        path = data_root() / "squads" / squad / "prepared_models" / slug / "model.json"
+        if not path.exists():
+            return None
+        return _read_json_file(path)
+    if backend == "s3":
+        try:
+            return _read_json_s3(_s3_prepared_model_prefix(squad, slug, "model.json"))
+        except FileNotFoundError:
+            return None
+    raise ValueError(f"Backend de storage nao suportado: {backend}")
+
+
+def save_prepared_model(
+    squad: str,
+    name: str,
+    manifest: dict,
+    mapping_entries: dict,
+    assets: dict[str, bytes],
+    *,
+    slug: str = "",
+    actor: str = "",
+    metadata: dict | None = None,
+) -> PreparedModelRef:
+    """Publica nova versao do modelo.
+
+    Arquivos da versao entram primeiro; model.json entra por ultimo. Uma falha
+    no meio nunca aponta o usuario para versao incompleta.
+    """
+    squad = normalize_squad(squad)
+    clean_name = str(name or manifest.get("model_name") or "Modelo preparado").strip()
+    model_slug = slugify(slug or clean_name)
+    existing = load_prepared_model(squad, model_slug) or {}
+    now = utc_now()
+    version_id = f"{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    clean_assets = {
+        safe_filename(filename): bytes(data)
+        for filename, data in (assets or {}).items()
+        if filename and isinstance(data, (bytes, bytearray))
+    }
+    if not {"original.pptx", "identified.pptx", "mapping.xlsx"} <= set(clean_assets):
+        raise ValueError("Modelo preparado precisa de original.pptx, identified.pptx e mapping.xlsx.")
+
+    for filename, data in clean_assets.items():
+        save_prepared_model_bytes(squad, model_slug, version_id, filename, data)
+
+    versions = list(existing.get("versions") or [])
+    versions.append(
+        {
+            "version_id": version_id,
+            "created_at": now,
+            "actor": str(actor or ""),
+            "assets": {
+                filename: {
+                    "bytes": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+                for filename, data in clean_assets.items()
+            },
+        }
+    )
+    payload = {
+        "schema_version": 2,
+        "id": str(existing.get("id") or uuid.uuid4()),
+        "squad": squad,
+        "slug": model_slug,
+        "name": clean_name,
+        "original_filename": str(manifest.get("original_filename") or "modelo.pptx"),
+        "created_at": str(existing.get("created_at") or now),
+        "updated_at": now,
+        "current_version": version_id,
+        "version_count": len(versions),
+        "versions": versions,
+        "object_count": int(manifest.get("object_count") or len(manifest.get("objects") or [])),
+        "active_count": len(mapping_entries or {}),
+        "manifest": manifest,
+        "mapping_entries": _normalize_mapping_entries(mapping_entries),
+        "metadata": {
+            **(existing.get("metadata") or {}),
+            **(metadata or {}),
+        },
+    }
+    if storage_backend() == "local":
+        target = data_root() / "squads" / squad / "prepared_models" / model_slug / "model.json"
+        with _file_lock(target):
+            _write_json_file(target, payload)
+    elif storage_backend() == "s3":
+        _write_json_s3(_s3_prepared_model_prefix(squad, model_slug, "model.json"), payload)
+    else:
+        raise ValueError(f"Backend de storage nao suportado: {storage_backend()}")
+    return _prepared_model_from_payload(payload, storage_backend())
+
+
+def save_prepared_model_bytes(
+    squad: str,
+    slug: str,
+    version_id: str,
+    filename: str,
+    data: bytes,
+) -> str:
+    squad = normalize_squad(squad)
+    slug = slugify(slug)
+    version_id = safe_filename(version_id)
+    filename = safe_filename(filename)
+    if storage_backend() == "local":
+        path = data_root() / "squads" / squad / "prepared_models" / slug / "versions" / version_id / filename
+        _atomic_write_bytes(path, data)
+        return str(path)
+    if storage_backend() == "s3":
+        key = _s3_prepared_model_prefix(squad, slug, "versions", version_id, filename)
+        _s3_client().put_object(Bucket=_s3_bucket(required=True), Key=key, Body=data)
+        return f"s3://{_s3_bucket(required=True)}/{key}"
+    raise ValueError(f"Backend de storage nao suportado: {storage_backend()}")
+
+
+def load_prepared_model_bytes(
+    squad: str,
+    slug: str,
+    filename: str,
+    *,
+    version_id: str = "",
+) -> bytes:
+    model = load_prepared_model(squad, slug)
+    if not model:
+        raise FileNotFoundError(f"Modelo preparado nao encontrado: {slug}")
+    version = safe_filename(version_id or str(model.get("current_version") or ""))
+    if not version:
+        raise FileNotFoundError(f"Modelo preparado sem versao publicada: {slug}")
+    filename = safe_filename(filename)
+    if storage_backend() == "local":
+        path = data_root() / "squads" / normalize_squad(squad) / "prepared_models" / slugify(slug) / "versions" / version / filename
+        return path.read_bytes()
+    if storage_backend() == "s3":
+        key = _s3_prepared_model_prefix(normalize_squad(squad), slugify(slug), "versions", version, filename)
+        try:
+            response = _s3_client().get_object(Bucket=_s3_bucket(required=True), Key=key)
+        except _s3_client().exceptions.NoSuchKey as exc:
+            raise FileNotFoundError(key) from exc
+        return response["Body"].read()
+    raise ValueError(f"Backend de storage nao suportado: {storage_backend()}")
+
+
 def save_mapping_template(
     project: ProjectRef,
     name: str,
@@ -619,6 +819,22 @@ def _mapping_template_from_payload(payload: dict, backend: str) -> MappingTempla
         entry_count=int(payload.get("entry_count") or len(payload.get("entries") or {})),
         source_project_slug=str(origin_project.get("slug") or ""),
         source_project_name=str(origin_project.get("name") or ""),
+        backend=backend,
+    )
+
+
+def _prepared_model_from_payload(payload: dict, backend: str) -> PreparedModelRef:
+    return PreparedModelRef(
+        model_id=str(payload.get("id") or ""),
+        squad=str(payload.get("squad") or ""),
+        slug=str(payload.get("slug") or ""),
+        name=str(payload.get("name") or payload.get("slug") or ""),
+        original_filename=str(payload.get("original_filename") or ""),
+        created_at=str(payload.get("created_at") or ""),
+        updated_at=str(payload.get("updated_at") or ""),
+        version_count=int(payload.get("version_count") or len(payload.get("versions") or [])),
+        object_count=int(payload.get("object_count") or 0),
+        active_count=int(payload.get("active_count") or 0),
         backend=backend,
     )
 
@@ -833,6 +1049,14 @@ def _s3_project_prefix(squad: str, slug: str, *parts: str) -> str:
 
 def _s3_mapping_template_prefix(squad: str, slug: str, *parts: str) -> str:
     segments = [storage_prefix(), "squads", squad, "mapping_templates"]
+    if slug:
+        segments.append(slug)
+    segments.extend(part.strip("/") for part in parts if part)
+    return "/".join(segment for segment in segments if segment)
+
+
+def _s3_prepared_model_prefix(squad: str, slug: str, *parts: str) -> str:
+    segments = [storage_prefix(), "squads", squad, "prepared_models"]
     if slug:
         segments.append(slug)
     segments.extend(part.strip("/") for part in parts if part)

@@ -243,6 +243,7 @@ def apply_saved_source_matches_to_analysis(
             continue
         cell_range = str(match.get("cell_range") or "").strip()
         range_mode = str(match.get("range_mode") or "exact").strip().lower()
+        allow_axis_growth = bool(match.get("allow_axis_growth"))
         if cell_range and datasource_zip_bytes:
             cache_key = (source.file_name, cell_range, range_mode)
             if cache_key not in ranged_source_cache:
@@ -253,17 +254,30 @@ def apply_saved_source_matches_to_analysis(
                     range_mode,
                 )
             source = ranged_source_cache[cache_key]
+        if allow_axis_growth:
+            source = replace(
+                source,
+                metadata={**source.metadata, "_allow_axis_growth": "1"},
+            )
         confidence = float(match.get("confidence") or 1.0)
         reason = str(match.get("reason") or "Mapeamento salvo aplicado para este target.")
         if cell_range:
             mode_text = "dinamico" if range_mode == "dynamic" else "exato"
             reason = f"{reason} Intervalo {cell_range} ({mode_text})."
-        plans_by_id[target_id] = normalize_to_target(
+        plan = normalize_to_target(
             target,
             source,
             confidence=confidence,
             match_reason=reason,
         )
+        value_format = str(match.get("value_format") or "auto").strip().lower()
+        if value_format == "percentual":
+            plan = replace(plan, number_format="0%")
+        elif value_format == "numero":
+            plan = replace(plan, number_format="0.0")
+        elif value_format == "milhares":
+            plan = replace(plan, number_format="thousands_pt_br")
+        plans_by_id[target_id] = plan
 
     ordered_ids = [plan.target_id for plan in analysis.plans]
     for target in analysis.targets:
@@ -417,12 +431,18 @@ def _normalize_saved_matches(saved_matches: SavedSourceMatchMap) -> dict[str, di
             reason = str(match.get("reason") or "Mapeamento salvo aplicado para este target.")
             cell_range = str(match.get("cell_range") or "").strip()
             range_mode = str(match.get("range_mode") or "exact").strip().lower()
+            orientation = str(match.get("orientation") or "auto").strip().lower()
+            value_format = str(match.get("value_format") or "auto").strip().lower()
+            allow_axis_growth = bool(match.get("allow_axis_growth"))
         else:
             datasource = str(match or "").strip()
             confidence = 1.0
             reason = "Mapeamento salvo aplicado para este target."
             cell_range = ""
             range_mode = "exact"
+            orientation = "auto"
+            value_format = "auto"
+            allow_axis_growth = False
         if not datasource:
             continue
         output[clean_target_id] = {
@@ -431,6 +451,9 @@ def _normalize_saved_matches(saved_matches: SavedSourceMatchMap) -> dict[str, di
             "reason": reason,
             "cell_range": cell_range,
             "range_mode": range_mode if range_mode in {"dynamic", "exact"} else "exact",
+            "allow_axis_growth": allow_axis_growth,
+            "orientation": orientation if orientation in {"auto", "manter", "transpor"} else "auto",
+            "value_format": value_format if value_format in {"auto", "percentual", "numero", "milhares"} else "auto",
         }
     return output
 

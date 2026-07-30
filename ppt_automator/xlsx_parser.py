@@ -167,12 +167,13 @@ def parse_xlsx_table(
     readable_bytes = _openpyxl_readable_copy(original_bytes)
     calculated_bytes = prepare_workbook_values(readable_bytes, formula_mode=formula_mode)
     normalized_range_mode = _normalized_range_mode(range_mode)
+    needs_table_lookup = _reference_needs_table_lookup(cell_range)
     data_wb = openpyxl.load_workbook(
         BytesIO(calculated_bytes),
         data_only=True,
         # O modo normal continua enxuto. O dinamico abre a estrutura completa
         # para enxergar referencias de Tabelas do Excel (ListObjects).
-        read_only=normalized_range_mode != "dynamic",
+        read_only=normalized_range_mode != "dynamic" and not needs_table_lookup,
     )
     formula_wb = openpyxl.load_workbook(BytesIO(readable_bytes), data_only=False, read_only=True)
     # Aba explicita ganha do que estiver no cell_range: quem passou o nome sabe
@@ -277,7 +278,19 @@ def _select_worksheet(workbook: Any, cell_range: str, sheet: str = "") -> tuple[
     if sheet_name:
         if sheet_name not in workbook.sheetnames:
             raise ValueError(f"Aba '{sheet_name}' nao encontrada no XLSX.")
-        return workbook[sheet_name], range_ref
+        worksheet = workbook[sheet_name]
+        return worksheet, _resolve_table_reference(worksheet, range_ref)
+    if range_ref and not _is_a1_range(range_ref):
+        matches = []
+        for worksheet in workbook.worksheets:
+            resolved = _resolve_table_reference(worksheet, range_ref, required=False)
+            if resolved:
+                matches.append((worksheet, resolved))
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(f"A Tabela do Excel '{range_ref}' existe em mais de uma aba. Informe aba_xlsx.")
+        raise ValueError(f"Tabela do Excel '{range_ref}' nao encontrada no XLSX.")
     return workbook.worksheets[0], range_ref
 
 
@@ -290,11 +303,45 @@ def _split_range_ref(cell_range: str) -> tuple[str, str]:
         sheet_name = sheet_name.strip().strip("'")
     else:
         sheet_name, range_ref = "", text
-    try:
-        range_boundaries(range_ref)
-    except Exception as exc:
-        raise ValueError("Range invalido. Use algo como D5:G12 ou Planilha1!D5:G12.") from exc
+    if not _is_a1_range(range_ref) and not re.fullmatch(r"[A-Za-z_\\][A-Za-z0-9_.\\]*", range_ref):
+        raise ValueError(
+            "Range invalido. Use D5:G12, Planilha1!D5:G12 ou o nome de uma Tabela do Excel."
+        )
     return sheet_name, range_ref
+
+
+def _reference_needs_table_lookup(cell_range: str) -> bool:
+    try:
+        _sheet, reference = _split_range_ref(cell_range)
+    except ValueError:
+        return False
+    return bool(reference) and not _is_a1_range(reference)
+
+
+def _is_a1_range(reference: str) -> bool:
+    try:
+        range_boundaries(reference)
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_table_reference(worksheet: Any, reference: str, required: bool = True) -> str:
+    if not reference or _is_a1_range(reference):
+        return reference
+    tables = getattr(worksheet, "tables", None)
+    if tables:
+        try:
+            items = list(tables.values())
+        except (AttributeError, TypeError):
+            items = []
+        for table in items:
+            name = str(getattr(table, "name", "") or "")
+            if str(name).casefold() == str(reference).casefold():
+                return str(getattr(table, "ref", "") or "")
+    if required:
+        raise ValueError(f"Tabela do Excel '{reference}' nao encontrada na aba '{worksheet.title}'.")
+    return ""
 
 
 def _normalized_range_mode(range_mode: str) -> str:

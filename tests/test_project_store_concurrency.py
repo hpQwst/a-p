@@ -24,8 +24,8 @@ class AtomicWriteTests(unittest.TestCase):
 
     def test_atomic_write_leaves_no_partial_file_and_no_temp_leftovers(self) -> None:
         path = Path(self._tempdir.name) / "nested" / "data.json"
-        project_store._atomic_write_bytes(path, b'{"a": 1}')
-        project_store._atomic_write_bytes(path, b'{"a": 2}')
+        project_store.atomic_write_bytes(path, b'{"a": 1}')
+        project_store.atomic_write_bytes(path, b'{"a": 2}')
 
         self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"a": 2})
         leftovers = [item.name for item in path.parent.iterdir() if item.name.endswith(".tmp")]
@@ -44,7 +44,7 @@ class AtomicWriteTests(unittest.TestCase):
         os.replace = always_denied
         try:
             project_store.LOCK_TIMEOUT_SECONDS  # garante import intacto
-            project_store._atomic_write_bytes(path, b'{"depois": true}')
+            project_store.atomic_write_bytes(path, b'{"depois": true}')
         finally:
             os.replace = original_replace
 

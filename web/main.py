@@ -70,6 +70,7 @@ from ppt_automator.model_preparer import (
 from ppt_automator.xlsx_plaintext_dump import dump_xlsx_workbook, dump_xlsx_zip_entries
 from ppt_automator.project_store import (
     SQUADS,
+    atomic_write_bytes,
     create_project,
     create_run,
     ensure_store,
@@ -1446,6 +1447,17 @@ def _debug_log_path(job_dir: Path) -> Path:
     return job_dir / "log.txt"
 
 
+def _write_state_atomically(path: Path, payload: dict) -> None:
+    """Grava estado de job reusando a troca endurecida do project_store.
+
+    A versao anterior fazia `tmp.replace(path)` cru. No Windows o os.replace
+    exige acesso exclusivo e o antivirus segura arquivos recem-escritos, entao a
+    gravacao estourava PermissionError e derrubava o preview - foi exatamente
+    isso que apareceu no teste do deck real. O helper do store tenta de novo e,
+    em ultimo caso, grava direto, em vez de perder o estado."""
+    atomic_write_bytes(path, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+
+
 def _generation_processing_path(job_dir: Path) -> Path:
     return job_dir / "generation_processing.json"
 
@@ -1582,9 +1594,7 @@ def _load_generation_state(job_dir: Path) -> dict:
 def _save_generation_state(job_dir: Path, state: dict) -> None:
     state = {**state, "updated_at": _now_iso()}
     path = _generation_processing_path(job_dir)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    _write_state_atomically(path, state)
 
 
 def _init_generation_state(job_dir: Path, input_signature: str = "") -> None:
@@ -1961,9 +1971,7 @@ def _load_preview_processing_state(job_dir: Path) -> dict:
 def _save_preview_processing_state(job_dir: Path, state: dict) -> None:
     state["updated_at"] = _now_iso()
     path = _preview_processing_path(job_dir)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    _write_state_atomically(path, state)
 
 
 def _record_preview_progress(job_dir: Path, payload: dict) -> None:
@@ -5025,10 +5033,7 @@ def _load_studio_rows(job_dir: Path) -> dict[str, dict]:
 
 
 def _save_studio_rows(job_dir: Path, rows: dict[str, dict]) -> None:
-    path = job_dir / "studio_mapping.json"
-    temp = path.with_suffix(".tmp")
-    temp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(path)
+    _write_state_atomically(job_dir / "studio_mapping.json", rows)
 
 
 def _assert_studio_squad(job_dir: Path, squad: str) -> None:

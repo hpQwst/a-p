@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
@@ -764,9 +765,18 @@ def _parse_key_value_rows(rows: list[list[Any]]) -> tuple[list[str], list[list[A
     return best[2], best[3]
 
 
+# Cabecalho de tabela exportada aparece no inicio da aba, depois de no maximo
+# algumas dezenas de linhas de titulo/contexto. Varrer a aba inteira custava o
+# dominante do parse (uma aba de 5 mil linhas x 28 colunas roda 140 mil vezes os
+# predicados por celula) e ainda multiplica pelo numero de abas. O limite e
+# generoso de proposito; se nada for encontrado dentro dele, a aba cai no mesmo
+# caminho de antes (nenhum cabecalho detectado).
+_HEADER_SEARCH_ROWS = 200
+
+
 def _find_header_row(rows: list[list[Any]]) -> tuple[int | None, int, int]:
     best: tuple[int | None, int, int, int] = (None, 0, 0, -1)
-    for row_index, row in enumerate(rows):
+    for row_index, row in enumerate(rows[:_HEADER_SEARCH_ROWS]):
         header_cols = [col for col, value in enumerate(row) if _is_header_cell(value)]
         if len(header_cols) < 2:
             continue
@@ -994,15 +1004,28 @@ def _period_score(values: list[Any]) -> float:
     return sum(1 for value in clean if _looks_like_period(value)) / len(clean)
 
 
-def _looks_like_period(value: Any) -> bool:
-    text = _norm(value)
-    if re.fullmatch(r"(?:19|20)\d{2}", text):
+_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+_MONTH_YEAR_RE = re.compile(
+    r"(JAN|FEV|FEB|MAR|ABR|APR|MAI|MAY|JUN|JUL|AGO|AUG|SET|SEP|OUT|OCT|NOV|DEZ|DEC)\s*\d{2,4}"
+)
+_SHORT_DATE_RE = re.compile(r"\d{1,2}[/-]\d{2,4}")
+
+
+@lru_cache(maxsize=100_000)
+def _looks_like_period_text(text: str) -> bool:
+    """Memoizado sobre o texto ja normalizado: numa aba de dados os mesmos
+    rotulos repetem milhares de vezes, e este predicado roda por celula."""
+    if _YEAR_RE.fullmatch(text):
         return True
-    if re.fullmatch(r"(JAN|FEV|FEB|MAR|ABR|APR|MAI|MAY|JUN|JUL|AGO|AUG|SET|SEP|OUT|OCT|NOV|DEZ|DEC)\s*\d{2,4}", text):
+    if _MONTH_YEAR_RE.fullmatch(text):
         return True
-    if re.fullmatch(r"\d{1,2}[/-]\d{2,4}", text):
+    if _SHORT_DATE_RE.fullmatch(text):
         return True
     return False
+
+
+def _looks_like_period(value: Any) -> bool:
+    return _looks_like_period_text(_norm(value))
 
 
 def _is_likely_header_label(value: Any) -> bool:

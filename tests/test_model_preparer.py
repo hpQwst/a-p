@@ -365,5 +365,86 @@ class ModelPreparerWebFlowTests(unittest.TestCase):
                     self.fail("Preview da nova rodada nao terminou.")
 
 
+def _mapping_with(**cells: object) -> bytes:
+    """Planilha de mapeamento preenchida, com celulas sobrescritas por nome."""
+    workbook = openpyxl.load_workbook(BytesIO(_filled_mapping()))
+    sheet = workbook["OBJETOS"]
+    headers = {cell.value: cell.column for cell in sheet[4]}
+    for name, value in cells.items():
+        sheet.cell(5, headers[name], value)
+    stream = BytesIO()
+    workbook.save(stream)
+    workbook.close()
+    return stream.getvalue()
+
+
+class MappingValidationGuardTests(unittest.TestCase):
+    """O preparador so pode publicar quando TODA linha ativa resolve. Estas sao
+    as garantias que, se quebrarem, gravam numero errado no slide sem avisar."""
+
+    def test_inactive_object_is_never_resolved(self) -> None:
+        report, entries = validate_mapping_package(
+            _manifest(),
+            _mapping_with(ativo=0),
+            {"nps.xlsx": _source_xlsx()},
+        )
+        self.assertNotIn(TARGET_ID, entries)
+        self.assertFalse(report["ok"])
+
+    def test_duplicate_source_names_are_refused(self) -> None:
+        """Dois arquivos com o mesmo nome tornam ambiguo qual alimenta o objeto."""
+        report, _entries = validate_mapping_package(
+            _manifest(),
+            _filled_mapping(),
+            {"pasta_a/nps.xlsx": _source_xlsx(), "pasta_b/nps.xlsx": _source_xlsx()},
+        )
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any("repetido" in issue["message"].lower() for issue in report["errors"]),
+            report["errors"],
+        )
+
+    def test_unknown_sheet_is_reported_not_silently_ignored(self) -> None:
+        report, entries = validate_mapping_package(
+            _manifest(),
+            _mapping_with(aba_xlsx="AbaQueNaoExiste", modo_leitura="auto", referencia=""),
+            {"nps.xlsx": _source_xlsx()},
+        )
+        self.assertFalse(report["ok"])
+        self.assertNotIn(TARGET_ID, entries)
+
+    def test_unknown_target_id_only_warns(self) -> None:
+        """ID que nao existe mais no PPT nao pode derrubar a publicacao: o deck
+        pode ter sido reeditado. Vira aviso, e o objeto e ignorado."""
+        workbook = openpyxl.load_workbook(BytesIO(_filled_mapping()))
+        sheet = workbook["OBJETOS"]
+        headers = {cell.value: cell.column for cell in sheet[4]}
+        sheet.cell(6, headers["id_objeto"], "S009_T009_CHART")
+        sheet.cell(6, headers["ativo"], 0)
+        stream = BytesIO()
+        workbook.save(stream)
+        workbook.close()
+
+        report, entries = validate_mapping_package(
+            _manifest(), stream.getvalue(), {"nps.xlsx": _source_xlsx()}
+        )
+        self.assertTrue(report["ok"], report)
+        self.assertIn(TARGET_ID, entries)
+        self.assertNotIn("S009_T009_CHART", entries)
+        self.assertTrue(
+            any("S009_T009_CHART" in issue.get("target_id", "") for issue in report["warnings"]),
+            report["warnings"],
+        )
+
+    def test_resolved_entry_carries_the_sheet_it_must_read(self) -> None:
+        _report, entries = validate_mapping_package(
+            _manifest(),
+            _mapping_with(modo_leitura="auto", referencia=""),
+            {"nps.xlsx": _source_xlsx()},
+        )
+        self.assertEqual(entries[TARGET_ID]["datasource"], "nps.xlsx")
+        self.assertEqual(entries[TARGET_ID].get("sheet_name") or "Dados", "Dados")
+
+
 if __name__ == "__main__":
     unittest.main()

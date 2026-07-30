@@ -574,7 +574,7 @@ def save_prepared_model_bytes(
     filename = safe_filename(filename)
     if storage_backend() == "local":
         path = data_root() / "squads" / squad / "prepared_models" / slug / "versions" / version_id / filename
-        _atomic_write_bytes(path, data)
+        atomic_write_bytes(path, data)
         return str(path)
     if storage_backend() == "s3":
         key = _s3_prepared_model_prefix(squad, slug, "versions", version_id, filename)
@@ -711,7 +711,7 @@ def save_project_bytes(project: ProjectRef, parts: list[str], filename: str, dat
     backend = storage_backend()
     if backend == "local":
         path = _local_project_path(project, parts, filename)
-        _atomic_write_bytes(path, data)
+        atomic_write_bytes(path, data)
         return str(path)
     if backend == "s3":
         key = _s3_project_prefix(project.squad, project.slug, *parts, filename)
@@ -770,7 +770,7 @@ def append_memory_correction(project: ProjectRef, correction: dict) -> str:
         with _file_lock(path):
             corrections = load_memory_corrections(project)
             corrections.append(correction)
-            _atomic_write_bytes(path, json.dumps(corrections, ensure_ascii=False, indent=2).encode("utf-8"))
+            atomic_write_bytes(path, json.dumps(corrections, ensure_ascii=False, indent=2).encode("utf-8"))
             return str(path)
     corrections = load_memory_corrections(project)
     corrections.append(correction)
@@ -928,10 +928,10 @@ def _read_json_file(path: Path):
 
 
 def _write_json_file(path: Path, payload) -> None:
-    _atomic_write_bytes(path, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+    atomic_write_bytes(path, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
 
 
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
+def atomic_write_bytes(path: Path, data: bytes) -> None:
     """Grava tudo-ou-nada: escreve num temporario na mesma pasta e troca com
     os.replace, que e atomico. Sem isso, um crash (ou dois processos gravando ao
     mesmo tempo) deixa o JSON truncado e o mapeamento do squad se perde."""

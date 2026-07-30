@@ -88,20 +88,28 @@ class _TargetMatchFeatures:
 
 @dataclass(frozen=True)
 class SourceMatchIndex:
-    """Features imutaveis das fontes, calculadas uma vez por analise."""
+    """Features imutaveis das fontes, calculadas uma vez por analise.
+
+    O indice e por `id()` do objeto, que e barato e nao exige que
+    ParsedXlsxTable seja hashavel (ele tem campos de lista). Por isso `sources`
+    fica guardado aqui: sem manter as fontes vivas, o CPython poderia reciclar
+    aqueles enderecos para outros objetos e `features_for` devolveria, em
+    silencio, as features de uma fonte diferente - o fallback so protege quando o
+    id esta AUSENTE, nao quando foi reaproveitado.
+    """
 
     by_identity: dict[int, _SourceMatchFeatures]
+    sources: tuple[ParsedXlsxTable, ...] = ()
 
     def features_for(self, source: ParsedXlsxTable) -> _SourceMatchFeatures:
         return self.by_identity.get(id(source)) or _source_match_features(source)
 
 
 def build_source_match_index(sources: Iterable[ParsedXlsxTable]) -> SourceMatchIndex:
+    retained = tuple(sources)
     return SourceMatchIndex(
-        by_identity={
-            id(source): _source_match_features(source)
-            for source in sources
-        }
+        by_identity={id(source): _source_match_features(source) for source in retained},
+        sources=retained,
     )
 
 

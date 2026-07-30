@@ -269,6 +269,7 @@ def apply_saved_source_matches_to_analysis(
             source,
             confidence=confidence,
             match_reason=reason,
+            axis_mode=str(match.get("orientation") or "auto"),
         )
         value_format = str(match.get("value_format") or "auto").strip().lower()
         if value_format == "percentual":

@@ -168,6 +168,79 @@ class TableNormalizerLabelTests(unittest.TestCase):
         self.assertEqual(plan.series, source.series)
         self.assertEqual(plan.values, source.values)
 
+    def test_manual_orientation_forces_chart_transpose(self) -> None:
+        target = PptTarget(
+            slide_index=0,
+            slide_number=1,
+            slide_path="ppt/slides/slide1.xml",
+            shape_name="chart",
+            shape_id="1",
+            object_type="chart",
+            left_in=0,
+            top_in=0,
+            width_in=1,
+            height_in=1,
+            expected_orientation="categories_rows_series_columns",
+            expected_categories=["Jan", "Fev"],
+            expected_series=["Total", "Natura"],
+            expected_values=[[1, 2], [3, 4]],
+        )
+        source = ParsedXlsxTable(
+            source_id="",
+            file_name="dados.xlsx",
+            sheet_name="Dados",
+            orientation="categories_rows_series_columns",
+            categories=["Jan", "Fev"],
+            series=["Total", "Natura"],
+            values=[[1, 2], [3, 4]],
+        )
+
+        automatic = normalize_to_target(target, source)
+        forced = normalize_to_target(target, source, axis_mode="transpor")
+
+        self.assertEqual(automatic.action, "align")
+        self.assertEqual(forced.action, "transpose")
+        self.assertIn("forçou a transposicao", forced.reason)
+
+    def test_manual_orientation_transposes_powerpoint_table_matrix(self) -> None:
+        target = PptTarget(
+            slide_index=0,
+            slide_number=1,
+            slide_path="ppt/slides/slide1.xml",
+            shape_name="table",
+            shape_id="2",
+            object_type="table",
+            left_in=0,
+            top_in=0,
+            width_in=1,
+            height_in=1,
+            table_cells=[["", "Jan", "Fev"], ["Total", 1, 2], ["Natura", 3, 4]],
+        )
+        source = ParsedXlsxTable(
+            source_id="",
+            file_name="dados.xlsx",
+            sheet_name="Dados",
+            orientation="series_rows_categories_columns",
+            categories=["Jan", "Fev"],
+            series=["Total", "Natura"],
+            values=[[1, 2], [3, 4]],
+        )
+
+        normal = normalize_to_target(target, source)
+        transposed = normalize_to_target(target, source, axis_mode="transpor")
+        expected = [
+            list(row)
+            for row in zip(
+                *[
+                    values + [None] * (max(map(len, normal.table_matrix)) - len(values))
+                    for values in normal.table_matrix
+                ]
+            )
+        ]
+
+        self.assertEqual(transposed.table_matrix, expected)
+        self.assertIn("transpos a tabela", transposed.reason)
+
 
 if __name__ == "__main__":
     unittest.main()

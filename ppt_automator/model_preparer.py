@@ -323,6 +323,7 @@ def validate_mapping_package(
                 source,
                 confidence=1.0,
                 match_reason="Mapeamento preparado pelo cliente.",
+                axis_mode=row.get("orientacao") or "auto",
             )
             if source.table_blocks > 1 and not cell_range:
                 reviews.append(

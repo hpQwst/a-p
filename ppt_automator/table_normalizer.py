@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable
 import re
@@ -352,11 +352,13 @@ def normalize_to_target(
     source: ParsedXlsxTable,
     confidence: float = 1.0,
     match_reason: str = "",
+    axis_mode: str = "auto",
 ) -> TransformPlan:
     if target.object_type == "chart":
-        return _normalize_chart(target, source, confidence, match_reason)
+        return _normalize_chart(target, source, confidence, match_reason, axis_mode)
     if target.object_type == "table":
-        return _normalize_table(target, source, confidence, match_reason)
+        plan = _normalize_table(target, source, confidence, match_reason)
+        return _transpose_table_plan(plan) if axis_mode == "transpor" else plan
     raise ValueError(f"Tipo de target nao suportado: {target.object_type}")
 
 
@@ -365,11 +367,18 @@ def _normalize_chart(
     source: ParsedXlsxTable,
     confidence: float,
     match_reason: str,
+    axis_mode: str,
 ) -> TransformPlan:
     orientation_ppt = target.expected_orientation or "categories_rows_series_columns"
     target_rows, target_cols = _target_axes(target, source)
     source_rows, source_cols = _source_axes(source)
-    axis_alignment = _best_axis_alignment(target_rows, target_cols, source_rows, source_cols)
+    axis_alignment = _best_axis_alignment(
+        target_rows,
+        target_cols,
+        source_rows,
+        source_cols,
+        forced_mode=axis_mode,
+    )
     # O contrato do PPT decide apenas a orientacao fisica da matriz. Dentro de
     # cada eixo, a ordem e os labels exibidos devem vir do XLSX selecionado.
     target_rows = _target_axis_in_source_order(target_rows, axis_alignment, "row")
@@ -405,9 +414,15 @@ def _normalize_chart(
         warnings.append("Alguns valores nao foram encontrados no datasource.")
     reason = match_reason or "Datasource escolhido por compatibilidade estrutural."
     if action == "transpose":
-        reason += " Os eixos do XLSX e do PPT estao cruzados, entao a matriz foi transposta."
+        if axis_mode == "transpor":
+            reason += " Orientacao manual forçou a transposicao da matriz."
+        else:
+            reason += " Os eixos do XLSX e do PPT estao cruzados, entao a matriz foi transposta."
     else:
-        reason += " Os eixos do XLSX foram alinhados ao contrato do Editar dados do PPT."
+        if axis_mode == "manter":
+            reason += " Orientacao manual preservou os eixos da fonte."
+        else:
+            reason += " Os eixos do XLSX foram alinhados ao contrato do Editar dados do PPT."
 
     return TransformPlan(
         target=target,
@@ -462,6 +477,26 @@ def _normalize_table(
         number_format=number_format,
         table_matrix=table_matrix,
         table_header_rows=table_header_rows,
+    )
+
+
+def _transpose_table_plan(plan: TransformPlan) -> TransformPlan:
+    matrix = [list(row) for row in plan.table_matrix]
+    width = max((len(row) for row in matrix), default=0)
+    padded = [row + [None] * (width - len(row)) for row in matrix]
+    transposed_matrix = [list(row) for row in zip(*padded)] if padded else []
+    values = [list(row) for row in plan.values]
+    value_width = max((len(row) for row in values), default=0)
+    padded_values = [row + [None] * (value_width - len(row)) for row in values]
+    transposed_values = [list(row) for row in zip(*padded_values)] if padded_values else []
+    return replace(
+        plan,
+        categories=list(plan.series),
+        series=list(plan.categories),
+        values=transposed_values,
+        table_matrix=transposed_matrix,
+        table_header_rows=0,
+        reason=f"{plan.reason} Orientacao manual transpos a tabela.",
     )
 
 
@@ -879,10 +914,14 @@ def _best_axis_alignment(
     target_cols: list[str],
     source_rows: list[str],
     source_cols: list[str],
+    forced_mode: str = "auto",
 ) -> dict[str, Any]:
     same_score = _coverage_score(target_rows, source_rows) + _coverage_score(target_cols, source_cols)
     cross_score = _coverage_score(target_rows, source_cols) + _coverage_score(target_cols, source_rows)
-    if cross_score > same_score:
+    use_cross = forced_mode == "transpor" or (
+        forced_mode not in {"manter", "transpor"} and cross_score > same_score
+    )
+    if use_cross:
         return {
             "mode": "cross",
             "row_map": _label_map(target_rows, source_cols),

@@ -18,6 +18,9 @@ Quatro arquivos, um caminho só:
   -BootstrapAdminEmails "hugo.rocha@qwst.co"
 ```
 
+`-EntraClientSecret` só entra na primeira publicação (ou na rotação do segredo);
+depois o deploy reaproveita o secret já guardado no Secrets Manager.
+
 Nada precisa ser configurado no console. O passo a passo está em
 [`DEPLOYMENT.md`](../../DEPLOYMENT.md).
 

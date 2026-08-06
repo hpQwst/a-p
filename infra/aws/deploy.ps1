@@ -11,8 +11,16 @@
 
     Rodar de novo publica uma versao nova.
 
+    -EntraClientSecret so e necessario na primeira publicacao (ou quando o segredo
+    for rotacionado). Depois disso o valor ja esta no Secrets Manager e o deploy
+    reaproveita o ARN existente.
+
 .EXAMPLE
     .\infra\aws\deploy.ps1 -EntraTenantId "..." -EntraClientId "..." -EntraClientSecret "..." -EntraRedirectUri "https://.../auth/callback"
+
+.EXAMPLE
+    # Republicar codigo com o segredo ja guardado
+    .\infra\aws\deploy.ps1 -EntraTenantId "..." -EntraClientId "..." -EntraRedirectUri "https://.../auth/callback"
 #>
 param(
     [string]$AppName = "squad4e5-auto-ppt",
@@ -154,13 +162,27 @@ if ($LASTEXITCODE -ne 0) { throw "Nao consegui etiquetar o secret de sessao." }
 # Login Microsoft e obrigatorio em producao. A senha compartilhada foi
 # desativada para preservar identidade nominal e isolamento por squad.
 $EntraSecretArn = ""
-if (-not $EntraClientSecret -or -not $EntraTenantId -or -not $EntraClientId -or -not $EntraRedirectUri) {
-    throw "Informe EntraTenantId, EntraClientId, EntraClientSecret e EntraRedirectUri. Login por senha esta desativado."
+if (-not $EntraTenantId -or -not $EntraClientId -or -not $EntraRedirectUri) {
+    throw "Informe EntraTenantId, EntraClientId e EntraRedirectUri. Login por senha esta desativado."
 }
 if ($EntraRedirectUri -notmatch '^https://[^/]+/auth/callback$') {
     throw "EntraRedirectUri deve ser https://<host>/auth/callback (recebido: $EntraRedirectUri)."
 }
-$EntraSecretArn = Set-Secret "$AppName/entra-client-secret" $EntraClientSecret
+if ($EntraClientSecret) {
+    $EntraSecretArn = Set-Secret "$AppName/entra-client-secret" $EntraClientSecret
+}
+else {
+    # Republicar codigo nao precisa do valor do secret: o App Runner le direto do
+    # Secrets Manager. Sem -EntraClientSecret reaproveitamos o que ja esta la, e o
+    # segredo nao precisa transitar de novo por linha de comando.
+    $entraArn = & $AwsCli secretsmanager list-secrets --profile default --region $Region `
+        --filters "Key=name,Values=$AppName/entra-client-secret" `
+        --query "SecretList[?Name=='$AppName/entra-client-secret'].ARN | [0]" --output text
+    if (-not $entraArn -or $entraArn -eq "None") {
+        throw "Secret $AppName/entra-client-secret ainda nao existe. Informe -EntraClientSecret nesta publicacao."
+    }
+    $EntraSecretArn = $entraArn.Trim()
+}
 
 # --- 5. aplicacao ---------------------------------------------------------
 Write-Host "[5/5] Publicando a aplicacao..." -ForegroundColor Cyan

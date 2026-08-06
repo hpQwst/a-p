@@ -59,6 +59,18 @@ O deploy de produção exige Entra e desativa a senha compartilhada:
   -BootstrapAdminEmails "hugo.rocha@qwst.co"
 ```
 
+`-EntraClientSecret` só é necessário na primeira publicação ou quando o segredo
+for rotacionado. Depois disso o valor já está no Secrets Manager e o deploy
+reaproveita o ARN existente — republicar código não precisa do segredo na linha
+de comando:
+
+```powershell
+.\infra\aws\deploy.ps1 `
+  -EntraTenantId "..." `
+  -EntraClientId "..." `
+  -EntraRedirectUri "https://.../auth/callback"
+```
+
 O script:
 
 1. cria ou atualiza build bucket, ECR e CodeBuild;

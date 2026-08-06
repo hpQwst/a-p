@@ -21,6 +21,7 @@
           <h1>Transforme o PPT em modelo reutilizavel</h1>
         </div>
         <div class="header-actions">
+          <a class="ghost-button" href="/ajuda?squad={{ squad }}">Como organizar os arquivos</a>
           <a class="ghost-button" href="/?squad={{ squad }}">Inicio</a>
           <button type="button" class="theme-toggle" data-theme-toggle aria-label="Alternar tema">◐</button>
         </div>
@@ -54,6 +55,12 @@
             <span class="file-selected" data-file-name></span>
             <input name="pptx" type="file" accept=".pptx" required>
           </label>
+          <details class="explainer">
+            <summary>Como o PPT precisa estar antes de virar modelo</summary>
+            <p>Envie o deck no layout final. Só entram no mapeamento os objetos nativos: gráfico que abre <em>Editar dados</em>, tabela do PowerPoint e caixa de texto. Gráfico colado como imagem não é encontrado — precisa ser refeito como gráfico.</p>
+            <p>A estrutura de cada gráfico (séries e categorias do <em>Editar dados</em>) é o contrato do modelo. Deixe-a como será usada todo mês; as planilhas de cada rodada preenchem esse contrato.</p>
+            <p><a href="/ajuda?squad={{ squad }}">Ver o guia completo</a></p>
+          </details>
           <div class="form-actions">
             <button type="submit">MAPEAR OBJETOS</button>
           </div>

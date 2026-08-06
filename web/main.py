@@ -477,6 +477,26 @@ async def index(request: Request, squad: str = "") -> HTMLResponse:
     )
 
 
+@app.get("/ajuda", response_class=HTMLResponse)
+async def guide(request: Request, squad: str = "") -> HTMLResponse:
+    user = _request_user(request)
+    if user is not None and not user.is_admin and user.squad:
+        selected_squad = user.squad
+    else:
+        try:
+            selected_squad = _normalize_squad_form(squad) if squad else ""
+        except ValueError:
+            selected_squad = ""
+    return templates.TemplateResponse(
+        request,
+        "help.html",
+        {
+            "current_user": user,
+            "selected_squad": selected_squad,
+        },
+    )
+
+
 @app.get("/models/{squad}/new", response_class=HTMLResponse)
 async def new_prepared_model(request: Request, squad: str) -> HTMLResponse:
     squad = _normalize_squad_form(squad)

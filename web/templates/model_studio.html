@@ -30,6 +30,7 @@
         <div class="header-actions">
           <button type="button" class="ghost-button" data-studio-save>SALVAR</button>
           <span class="save-status" data-studio-save-status>Salvo</span>
+          <a class="ghost-button" href="/ajuda?squad={{ squad }}">Guia dos arquivos</a>
           <a class="ghost-button" href="/?squad={{ squad }}">Inicio</a>
           <button type="button" class="theme-toggle" data-theme-toggle aria-label="Alternar tema">◐</button>
         </div>
@@ -188,6 +189,12 @@
           Envie XLSX preenchido e todas as planilhas citadas. Se faltar arquivo ou aba,
           sistema lista exatamente o que falta e guarda uploads ja recebidos.
         </p>
+        <details class="explainer">
+          <summary>Como preencher o mapeamento e preparar as planilhas</summary>
+          <p>Cada linha do mapeamento é um objeto do PPT. Preencha <code>arquivo_xlsx</code> e <code>aba_xlsx</code> (ou <code>arquivo.xlsx#Aba</code>). Objeto marcado como inativo nunca é alterado.</p>
+          <p>Em cada aba citada: títulos na primeira linha, rótulos na primeira coluna, números como número. Orientação livre — o sistema transpõe para o formato do <em>Editar dados</em> do gráfico.</p>
+          <p><a href="/ajuda?squad={{ squad }}">Ver o guia completo</a></p>
+        </details>
         {% if retained_sources %}
           <div class="retained-files"><strong>Ja guardados:</strong> {{ retained_sources|join(", ") }}</div>
         {% endif %}

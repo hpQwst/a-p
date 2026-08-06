@@ -23,7 +23,7 @@
           <h1>Central de atualização</h1>
         </div>
         <div class="header-actions">
-          <a class="ghost-button" href="/models/{{ selected_squad }}/new">Preparar modelo</a>
+          <a class="ghost-button" href="/ajuda?squad={{ selected_squad }}">Como organizar os arquivos</a>
           {% if is_admin %}
             <form class="squad-view-switcher" method="get" action="/">
               <label>
@@ -71,6 +71,31 @@
             <p>Veja a prévia de cada gráfico e baixe o PowerPoint pronto.</p>
           </div>
         </article>
+      </section>
+
+      {% set has_prepared_models = prepared_models_by_squad.values()|map('length')|sum %}
+      <section class="path-band" aria-label="Preparar modelo reutilizável">
+        <div class="path-band-body">
+          <p class="eyebrow">Deck que volta todo mês?</p>
+          <strong>Prepare o modelo uma vez — depois é só enviar os números</strong>
+          <p>
+            Você marca uma vez qual planilha e qual aba alimenta cada gráfico e tabela.
+            Nas próximas rodadas a ferramenta liga direto no que você definiu, sem adivinhar.
+          </p>
+          <ul class="path-band-facts">
+            <li>Ligação fixa por objeto</li>
+            <li>Avisa o que falta antes do preview</li>
+            <li>Inativo nunca muda</li>
+          </ul>
+        </div>
+        <div class="path-band-cta">
+          <a class="button" href="/models/{{ selected_squad }}/new">Preparar modelo</a>
+          {% if has_prepared_models %}
+            <a class="path-band-link" href="#modelos-preparados">Ver modelos deste squad</a>
+          {% else %}
+            <a class="path-band-link" href="/ajuda?squad={{ selected_squad }}#ppt">Como funciona</a>
+          {% endif %}
+        </div>
       </section>
 
       <section class="home-layout">
@@ -172,6 +197,12 @@
               <strong>Arquivos</strong>
             </div>
             <p class="section-hint">Arraste ou clique. As planilhas podem ter qualquer nome — a ferramenta descobre qual pertence a cada gráfico.</p>
+            <details class="explainer">
+              <summary>Como devem estar o PPT e as planilhas?</summary>
+              <p><strong>No PowerPoint:</strong> só é atualizado o que é objeto de verdade — gráfico que abre <em>Editar dados</em>, tabela em que dá para digitar na célula, caixa de texto. Print ou gráfico colado como imagem a ferramenta não enxerga.</p>
+              <p><strong>Nas planilhas:</strong> um bloco de dados por gráfico/tabela, títulos na primeira linha, rótulos na primeira coluna, sem linha em branco antes do cabeçalho. Números como número — sem <code>%</code> digitado e sem multiplicar por 100. Linhas e colunas invertidas não são problema: a ferramenta transpõe.</p>
+              <p><a href="/ajuda?squad={{ selected_squad }}">Ver o guia completo com exemplo e checklist</a></p>
+            </details>
             <div class="file-grid">
               <label class="file-card" data-dropzone>
                 <span>Apresentação</span>
@@ -219,7 +250,7 @@
         </form>
 
         <aside class="library-column">
-          <section class="workspace-card library-card">
+          <section class="workspace-card library-card" id="modelos-preparados">
             <div class="workspace-head">
               <div>
                 <p class="eyebrow">Modelos preparados</p>
@@ -227,7 +258,6 @@
               </div>
               <a class="mini-pill" href="/models/{{ selected_squad }}/new">Novo</a>
             </div>
-            {% set has_prepared_models = prepared_models_by_squad.values()|map('length')|sum %}
             {% if has_prepared_models %}
               <div class="mapping-list">
                 {% for squad, prepared_models in prepared_models_by_squad.items() %}
@@ -243,6 +273,7 @@
               <div class="empty-state compact">
                 <strong>Nenhum modelo preparado</strong>
                 <p>Mapeie um PPT uma vez, preencha o XLSX e reutilize nas proximas rodadas.</p>
+                <a class="button" href="/models/{{ selected_squad }}/new">Preparar modelo</a>
               </div>
             {% endif %}
           </section>

@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Como organizar os arquivos - QWST Auto PPT</title>
+    <script>
+      (function () {
+        var theme = localStorage.getItem("qwst-theme");
+        if (!theme) {
+          theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ asset_version('style.css') }}">
+  </head>
+  <body>
+    <main class="app-shell guide-shell">
+      <header class="product-header">
+        <div>
+          <p class="eyebrow">QWST Auto PPT / Guia</p>
+          <h1>Como organizar o PowerPoint e as planilhas</h1>
+          <p class="header-subtitle">Não existe nome obrigatório de arquivo. Existem poucas regras de formato — elas estão todas aqui.</p>
+        </div>
+        <div class="header-actions">
+          <a class="ghost-button" href="/{% if selected_squad %}?squad={{ selected_squad }}{% endif %}">Início</a>
+          <button type="button" class="theme-toggle" data-theme-toggle title="Alternar tema claro/escuro" aria-label="Alternar tema">◐</button>
+        </div>
+      </header>
+
+      <nav class="guide-toc" aria-label="Seções do guia">
+        <a href="#o-que-atualiza">O que é atualizado</a>
+        <a href="#ppt">Organizar o PPT</a>
+        <a href="#xlsx">Organizar as planilhas</a>
+        <a href="#nomes">Nome dos arquivos</a>
+        <a href="#numeros">Números e fórmulas</a>
+        <a href="#checklist">Checklist</a>
+        <a href="#problemas">Deu errado?</a>
+      </nav>
+
+      <section class="workspace-card guide-card" id="o-que-atualiza">
+        <div class="workspace-head">
+          <div>
+            <p class="eyebrow">01</p>
+            <h2>O que a ferramenta consegue atualizar</h2>
+          </div>
+          <span class="mini-pill">Objeto real, não imagem</span>
+        </div>
+        <div class="guide-split">
+          <div class="guide-yes">
+            <strong>Ela enxerga</strong>
+            <ul>
+              <li><b>Gráfico de verdade</b> — o que abre em <i>Editar dados</i> ao clicar com o botão direito.</li>
+              <li><b>Tabela de verdade</b> do PowerPoint — aquela em que dá para clicar dentro de uma célula e digitar.</li>
+              <li><b>Caixa de texto</b> — usada para números soltos no slide.</li>
+              <li>Objetos dentro de <b>grupos</b> continuam sendo encontrados.</li>
+            </ul>
+          </div>
+          <div class="guide-no">
+            <strong>Ela não enxerga</strong>
+            <ul>
+              <li>Print, foto ou <b>gráfico colado como imagem</b> — vira figura, não tem dados dentro.</li>
+              <li>Tabela colada do Excel <b>como imagem</b> ou como objeto vinculado.</li>
+              <li>SmartArt e desenhos.</li>
+              <li>Qualquer coisa fora do slide (mestre, layout, anotações).</li>
+            </ul>
+          </div>
+        </div>
+        <p class="guide-note">
+          Teste de 5 segundos no seu deck: clique no objeto com o botão direito. Se aparecer
+          <b>Editar dados</b> (gráfico) ou der para digitar dentro da célula (tabela), a ferramenta atualiza.
+          Se só aparecer opções de imagem, aquele objeto precisa ser refeito como gráfico/tabela nativo.
+        </p>
+      </section>
+
+      <section class="workspace-card guide-card" id="ppt">
+        <div class="workspace-head">
+          <div>
+            <p class="eyebrow">02</p>
+            <h2>Organizar o PowerPoint</h2>
+          </div>
+          <span class="mini-pill">Seu arquivo nunca é alterado</span>
+        </div>
+        <ul class="guide-list">
+          <li><b>Envie o deck já no layout final.</b> A ferramenta troca números, não move nem redesenha nada — cores, fontes, eixos e rótulos ficam como estão no seu arquivo.</li>
+          <li><b>Deixe cada gráfico com a estrutura certa.</b> O <i>Editar dados</i> define o contrato: quantas séries, quais categorias. Se a planilha vier com linhas e colunas invertidas, a ferramenta transpõe sozinha; mas se o gráfico tem 3 séries e a planilha só traz 2, sobra série vazia.</li>
+          <li><b>Não precisa renomear formas.</b> O nome numérico da forma (ex.: <code>7792738590</code>) é usado como atalho quando existe, mas o match funciona por conteúdo.</li>
+          <li><b>Slides repetidos são tratados separadamente.</b> Cada gráfico é um objeto próprio, mesmo que o slide seja duplicado.</li>
+          <li><b>Vai atualizar só parte do deck?</b> Use o campo <i>Slides para atualizar</i> (ex.: <code>3, 5, 8-10</code>). Deck grande fica mais rápido e o resto não é tocado.</li>
+        </ul>
+        <details class="explainer">
+          <summary>Deck que se repete todo mês: prepare um modelo</summary>
+          <p>
+            Em <b>Preparar modelo</b> a ferramenta lê o deck uma vez, dá um ID estável para cada gráfico/tabela
+            e devolve duas coisas: uma <b>cópia identificada</b> do PPT (com os IDs à vista) e uma
+            <b>planilha de mapeamento</b> onde você diz, por objeto, qual arquivo e qual aba alimenta ele.
+          </p>
+          <p>
+            Depois disso, a rodada mensal vira só "enviar as planilhas do mês": sem IA, sem adivinhação, e
+            objetos marcados como inativos nunca são alterados.
+          </p>
+        </details>
+      </section>
+
+      <section class="workspace-card guide-card" id="xlsx">
+        <div class="workspace-head">
+          <div>
+            <p class="eyebrow">03</p>
+            <h2>Organizar as planilhas</h2>
+          </div>
+          <span class="mini-pill">Uma planilha por objeto</span>
+        </div>
+        <ul class="guide-list">
+          <li><b>Um bloco de dados por gráfico/tabela.</b> Pode ser um arquivo por objeto ou uma aba por objeto — o que for mais natural para você.</li>
+          <li><b>Primeira linha = títulos das colunas. Primeira coluna = rótulos das linhas.</b> Nada de linha em branco, logo ou título mesclado antes do cabeçalho.</li>
+          <li><b>Sem colunas auxiliares coladas na tabela.</b> Deixe pelo menos uma coluna/linha vazia separando cálculos de apoio, ou marque o intervalo como Tabela do Excel.</li>
+          <li><b>Linhas e colunas podem estar invertidas.</b> A ferramenta compara com o <i>Editar dados</i> do gráfico e transpõe quando preciso.</li>
+          <li><b>Várias tabelas na mesma aba?</b> Funciona, mas dá trabalho a mais: no preview você pode apontar o intervalo exato (ex.: <code>Base!A1:D10</code>).</li>
+        </ul>
+
+        <figure class="guide-sheet">
+          <figcaption>Formato que sempre funciona</figcaption>
+          <table>
+            <tr><td class="corner"></td><th>Jan</th><th>Fev</th><th>Mar</th></tr>
+            <tr><th>Satisfeito</th><td>62,4</td><td>65,1</td><td>67,0</td></tr>
+            <tr><th>Neutro</th><td>25,0</td><td>23,9</td><td>22,5</td></tr>
+            <tr><th>Insatisfeito</th><td>12,6</td><td>11,0</td><td>10,5</td></tr>
+          </table>
+          <p class="guide-note">
+            Rótulos na borda, números no miolo, nada de <code>%</code> digitado junto do número.
+            Se o gráfico do PPT esperar os meses nas linhas, a ferramenta vira a tabela sozinha.
+          </p>
+        </figure>
+      </section>
+
+      <section class="workspace-card guide-card" id="nomes">
+        <div class="workspace-head">
+          <div>
+            <p class="eyebrow">04</p>
+            <h2>Nome dos arquivos</h2>
+          </div>
+          <span class="mini-pill">Livre — mas dá para ajudar</span>
+        </div>
+        <p class="section-hint">
+          Nenhum nome é obrigatório: a ferramenta compara conteúdo (categorias, séries, título perto do gráfico)
+          para descobrir qual planilha é de qual objeto. Estes dois hábitos deixam o acerto imediato:
+        </p>
+        <ul class="guide-list">
+          <li><b><code>slide3</code> no nome do arquivo</b> (ex.: <code>satisfacao_slide3.xlsx</code>) — restringe a busca àquele slide.</li>
+          <li><b>Célula de contexto com <code>obj</code> + número da forma</b> (ex.: <code>obj3958478347</code>) — match exato, sem disputa. As planilhas exportadas pelo Preparador de Modelo já saem assim.</li>
+        </ul>
+        <p class="guide-note">
+          Renomeou tudo no mês seguinte? Sem problema: depois do primeiro download bem-sucedido o squad ganha
+          uma <b>memória de mapeamento</b> que reconhece as planilhas pelo conteúdo, mesmo com nome novo ou deck refeito.
+        </p>
+      </section>
+
+      <section class="workspace-card guide-card" id="numeros">
+        <div class="workspace-head">
+          <div>
+            <p class="eyebrow">05</p>
+            <h2>Números, percentuais e fórmulas</h2>
+          </div>
+          <span class="mini-pill">Valor entra igual saiu</span>
+        </div>
+        <ul class="guide-list">
+          <li><b>Número tem que ser número</b>, não texto. <code>62,4</code> sim; <code>"62,4%"</code> não.</li>
+          <li><b>Não multiplique nem divida por 100.</b> Escreva o valor como ele deve aparecer; o <code>%</code> é exibido só se o próprio gráfico já usa formato percentual.</li>
+          <li><b>O valor gravado é idêntico ao da planilha</b>, com todas as casas decimais. A exibição no preview usa 1 casa.</li>
+          <li><b>Fórmulas simples são calculadas</b>: <code>SOMA</code>, <code>MÉDIA</code>, <code>MÍNIMO</code>, <code>MÁXIMO</code>, <code>CONT.NÚM</code>, <code>CONT.VALORES</code>, <code>SE</code>, <code>SOMASE</code>, <code>CONT.SE</code>, <code>SOMARPRODUTO</code>.</li>
+          <li><b>Evite fórmula que puxa outro arquivo</b> (link externo), tabela dinâmica como fonte e funções fora dessa lista — nesses casos a rodada avisa em vez de gravar número errado. Cole como valor.</li>
+        </ul>
+      </section>
+
+      <section class="workspace-card guide-card" id="checklist">
+        <div class="workspace-head">
+          <div>
+            <p class="eyebrow">06</p>
+            <h2>Checklist antes de enviar</h2>
+          </div>
+          <span class="mini-pill">1 minuto</span>
+        </div>
+        <ul class="guide-check">
+          <li>Todo gráfico/tabela que precisa mudar é objeto nativo (abre <i>Editar dados</i>), não imagem.</li>
+          <li>Existe um bloco de dados para cada objeto que vai mudar.</li>
+          <li>Cabeçalho na primeira linha e rótulos na primeira coluna, sem linha em branco antes.</li>
+          <li>Números como número, sem <code>%</code> digitado e sem multiplicar por 100.</li>
+          <li>Fórmula complexa ou link externo colado como valor.</li>
+          <li>(Opcional) <code>slide&lt;N&gt;</code> no nome do arquivo.</li>
+          <li>Planilhas juntas num <code>.zip</code> ou selecionadas de uma vez no campo de upload.</li>
+        </ul>
+      </section>
+
+      <section class="workspace-card guide-card" id="problemas">
+        <div class="workspace-head">
+          <div>
+            <p class="eyebrow">07</p>
+            <h2>Deu errado? O que costuma ser</h2>
+          </div>
+          <span class="mini-pill">Antes de pedir ajuda</span>
+        </div>
+        <dl class="guide-faq">
+          <dt>O gráfico não apareceu no preview</dt>
+          <dd>Provavelmente é imagem, não gráfico. Ou o slide ficou fora do campo <i>Slides para atualizar</i>.</dd>
+
+          <dt>Apareceu, mas sem planilha ligada</dt>
+          <dd>Nenhum arquivo bateu por conteúdo. Escolha a planilha na mão no preview — a escolha vira memória do squad para a próxima vez.</dd>
+
+          <dt>Ligou na planilha errada</dt>
+          <dd>Duas planilhas parecidas demais. Troque no preview; se o deck é recorrente, use o Preparador de Modelo para fixar a ligação.</dd>
+
+          <dt>Números certos, série vazia no gráfico</dt>
+          <dd>O gráfico espera mais séries/categorias do que a planilha traz. Compare com o <i>Editar dados</i> do gráfico original.</dd>
+
+          <dt>Valor virou texto / ficou zerado</dt>
+          <dd>Célula formatada como texto, <code>%</code> digitado junto ou fórmula não suportada.</dd>
+        </dl>
+      </section>
+    </main>
+    <script src="{{ url_for('static', path='/app.js') }}?v={{ asset_version('app.js') }}"></script>
+  </body>
+</html>

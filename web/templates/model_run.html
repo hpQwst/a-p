@@ -22,6 +22,7 @@
           <p class="header-subtitle">{{ model.active_count }} ativos · versao {{ model.version_count }}</p>
         </div>
         <div class="header-actions">
+          <a class="ghost-button" href="/ajuda?squad={{ model.squad }}">Como organizar os arquivos</a>
           <a class="ghost-button" href="/?squad={{ model.squad }}">Inicio</a>
           <button type="button" class="theme-toggle" data-theme-toggle aria-label="Alternar tema">◐</button>
         </div>
@@ -72,6 +73,12 @@
             <span class="file-selected" data-file-name></span>
             <input name="datasources" type="file" accept=".xlsx,.zip" multiple required>
           </label>
+          <details class="explainer">
+            <summary>Como as planilhas desta rodada devem vir</summary>
+            <p>Mesmos arquivos e mesmas abas que o modelo aprendeu — pode mudar só os números. Se um arquivo ou aba faltar, a validação diz exatamente qual.</p>
+            <p>Títulos na primeira linha, rótulos na primeira coluna, números como número (sem <code>%</code> digitado, sem multiplicar por 100). Fórmula com link externo: cole como valor antes de enviar.</p>
+            <p><a href="/ajuda?squad={{ model.squad }}">Ver o guia completo</a></p>
+          </details>
           <div class="form-actions">
             <button type="submit">VALIDAR E ABRIR PREVIEW</button>
           </div>

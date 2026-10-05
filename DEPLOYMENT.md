@@ -5,6 +5,9 @@ usuário comum pertence a uma das squads `squad1`–`squad5` e só enxerga dados
 dessa squad. Administradores podem selecionar qualquer squad e gerenciar
 usuários em `/admin/users`.
 
+**Estado em 05/10/2026: serviço pausado por falta de uso.** Para publicar,
+religue antes. Motivo e comando em “Pausa de 05/10/2026”, na seção Custos.
+
 ## Arquitetura
 
 ```text
@@ -204,6 +207,42 @@ Para pausar sem destruir estado:
 & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" apprunner pause-service `
   --service-arn <arn-do-servico> --profile default --region us-east-1
 ```
+
+### Pausa de 05/10/2026
+
+Em 03/10/2026 o orçamento avisou que a previsão do mês passava de US$ 20. O
+serviço estava ligado sem uso: de 07/08 a 05/10 recebeu só o health check e
+cinco visitas à tela de login, nenhuma seguida de login. Setembro custou
+US$ 11,82, dos quais US$ 10,08 foram a memória da instância ligada o mês
+inteiro (1.440 GB-hora) e US$ 1,60 os quatro secrets.
+
+Em 05/10/2026:
+
+- o serviço foi pausado;
+- o secret `squad4e5-auto-ppt/team-password` foi agendado para exclusão. Ele
+  sobrou do login por senha, que está desativado, e nenhum template o
+  referencia. Até 04/11/2026 dá para desfazer com
+  `secretsmanager restore-secret`.
+
+Pausado, o app custa cerca de US$ 1,30 por mês: os três secrets restantes
+(US$ 1,20), as imagens no ECR e o bucket de estado. Estado no S3, imagem, URL e
+configuração continuam como estavam. Para religar:
+
+```powershell
+& "C:\Program Files\Amazon\AWSCLIV2\aws.exe" apprunner resume-service `
+  --service-arn arn:aws:apprunner:us-east-1:134164930693:service/squad4e5-auto-ppt/ff996fa8394e421cb6901564312979b0 `
+  --profile AdministratorAccess-QWST-134164930693 --region us-east-1
+```
+
+O serviço volta com a última imagem publicada (`1b76e09ed770`, de 06/08) e a
+mesma URL. Enquanto estiver pausado, o `deploy.ps1` não consegue publicar: o
+App Runner recusa `UpdateService` em serviço pausado.
+
+O comando acima usa o perfil SSO. Em 05/10/2026 o perfil `default` da máquina
+de deploy tinha uma chave IAM inativa, e toda chamada devolvia
+`InvalidClientTokenId`. Como `deploy.ps1` e `configure-cost-controls.ps1` usam
+`--profile default`, confirme `aws sts get-caller-identity --profile default`
+antes de publicar.
 
 ## Recuperar dados
 
